@@ -2,6 +2,7 @@ import CircuitHdlTest.Syntax
 import CircuitHdlTest.Semantics
 import CircuitHdlTest.Clocks
 import CircuitHdlTest.AsyncFifo
+import CircuitHdlTest.Circt
 
 /-!
 Umbrella module for the test suite.
@@ -18,4 +19,6 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 boundary sits
 - `CircuitHdlTest.AsyncFifo` -- the FIFO at three clock ratios and with intermittent handshakes,
                                 plus gray-code and synchronizer unit tests
+- `CircuitHdlTest.Circt`     -- the lowering to `hw`/`comb`/`seq`: the text it emits for the
+                                smallest designs, and VeIR's verdict on every example
 -/

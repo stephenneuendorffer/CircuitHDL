@@ -3,9 +3,17 @@ version = "0.1.0"
 testDriver = "CircuitHdlTest"
 defaultTargets = ["CircuitHdl"]
 
-# This package deliberately has no dependencies: it is built on core `Lean` and `BitVec`
-# alone. Keep it that way -- it is what lets the whole thing build against a bare toolchain,
-# with no Mathlib and no build cache.
+# The language itself -- the AST, the width rules, the clock analysis, the surface syntax and
+# the semantics -- is built on core `Lean` and `BitVec` alone, with no Mathlib and no build
+# cache. Keep it that way: it is what lets the whole thing build against a bare toolchain.
+#
+# VeIR is the one dependency, and only `CircuitHdl.Circt` imports it. It supplies the CIRCT
+# dialects (`hw`, `comb`, `seq`) that the backend lowers into, and the verifier that checks the
+# result. Nothing else in the package may import it.
+
+[[require]]
+name = "VeIR"
+path = "../veir"
 
 [[lean_lib]]
 name = "CircuitHdl"

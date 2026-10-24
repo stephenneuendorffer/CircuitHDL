@@ -4,6 +4,7 @@ import CircuitHdl.Clocks
 import CircuitHdl.Syntax
 import CircuitHdl.Semantics
 import CircuitHdl.Transactions
+import CircuitHdl.Circt
 import CircuitHdl.Examples.And2
 import CircuitHdl.Examples.Counter
 import CircuitHdl.Examples.Alu
@@ -22,6 +23,8 @@ The language itself:
 - `CircuitHdl.Syntax`    -- the `module!` surface syntax, its lowering and width inference
 - `CircuitHdl.Semantics` -- evaluation over core `BitVec`
 - `CircuitHdl.Transactions` -- driving AXI-Stream ports at transaction level
+- `CircuitHdl.Circt`     -- lowering to the CIRCT dialects, via VeIR. The one module with a
+                            dependency outside core `Lean`.
 
 Example designs, each written in the `module!` surface syntax, in rough order of how much of the
 language they need:
