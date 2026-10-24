@@ -3,10 +3,14 @@
 A Lean-embedded circuit HDL: a typed core for digital hardware, a Verilog-flavoured surface
 syntax that lowers into it, and an executable semantics you can simulate.
 
-This is a **self-contained Lake package**. It depends on nothing but core `Lean` and `BitVec` —
-no Mathlib, and nothing from the surrounding `lean-mlir` tree — so it builds against a bare
-toolchain in well under a minute, with no build cache. Please keep it that way; the only
-intended coupling to `lean-mlir` is the eventual lowering described under *Next steps*.
+The language itself depends on nothing but core `Lean` and `BitVec` — no Mathlib — so it builds
+against a bare toolchain in well under a minute, with no build cache. Please keep it that way.
+
+There is exactly one dependency, and exactly one module that may use it: `CircuitHdl.Circt`
+lowers a `Module` to the CIRCT dialects through [VeIR](https://github.com/opencompl/veir), a Lean
+formalisation of MLIR, which then *verifies* the result. Nothing else in the package may import
+it. VeIR is a path dependency on a sibling `../veir` checkout, so that checkout's state is part
+of this build.
 
 ## Goals
 
@@ -27,6 +31,7 @@ The language itself, under `CircuitHdl/`:
 | `Syntax.lean` | The `module!` surface syntax, its lowering into the AST, and width inference. |
 | `Semantics.lean` | Evaluation over core `BitVec` (`Expr.eval`, `Module.step`, `Module.run`). |
 | `Transactions.lean` | Driving AXI-Stream ports at transaction level (`Module.transfer`). |
+| `Circt.lean` | Lowering to the CIRCT dialects `hw`/`comb`/`seq` via VeIR (`Module.toMlir`, `Module.toVeir`). The one module with a dependency outside core `Lean`. |
 | `../CircuitHdl.lean` | Umbrella module importing the above. |
 
 Example designs, one per file, each written in the `module!` surface syntax exactly as a real
@@ -40,6 +45,16 @@ design would be — there are no hand-built `Module` literals here:
 | `Examples/Shifter.lean` | Nibble selection and rotation: slices and concatenation. |
 | `Examples/Swap.lean` | `swapSeq` and `swapComb` — identical statements, clocked and unclocked. |
 | `Examples/AsyncFifo.lean` | An asynchronous FIFO with AXI valid/ready ports: two clocks, gray-coded pointers, two-flop synchronizers. |
+| `Examples/ShiftFifo.lean` | The same interface built the opposite way: one clock, no memory, data moves instead of pointers. |
+
+Alongside the designs, two *specifications* — what a FIFO is, with no reference to any
+implementation. Neither imports the HDL, which is what lets both FIFOs above be checked against
+the same models:
+
+| File | Contents |
+|---|---|
+| `Examples/AbstractFifoModel.lean` | A depth and a count. Forgetting the data is what makes the flag logic provable. |
+| `Examples/AbstractQueueModel.lean` | A depth and a list, plus `counting`, the map down to the model above. Says the first-in-first-out property, which a counter cannot. |
 
 Tests live in their own library under `CircuitHdlTest/`, so they can be built and run on their
 own with `lake test`. Small modules that probe one rule each live with the tests that use them,
@@ -50,7 +65,11 @@ since they are assertions rather than designs:
 | `CircuitHdlTest/Syntax.lean` | Expression lowering and precedence, plus round-trips asserting the example designs lower to the hand-written reference structures (`and2Example`, `counterExample`) kept here. |
 | `CircuitHdlTest/Semantics.lean` | Executable tests: the counter counts, the and2 truth table, non-blocking assignment. |
 | `CircuitHdlTest/Clocks.lean` | Clock-domain analysis on small modules: what it accepts, rejects, and where the boundary sits. |
-| `CircuitHdlTest/AsyncFifo.lean` | The FIFO simulated at three clock ratios and with intermittent handshakes, plus gray-code and synchronizer unit tests. |
+| `CircuitHdlTest/AsyncFifo.lean` | The FIFO simulated at three clock ratios and with intermittent handshakes, gray-code and synchronizer unit tests, and its refinement of the abstract models — including `bv_decide` proofs that the gray-coded full and empty flags fire at exactly the right occupancy. |
+| `CircuitHdlTest/ShiftFifo.lean` | The shift-register FIFO: that it carries the same traffic, and that it refines the same models by entirely different means. |
+| `CircuitHdlTest/AbstractFifoModel.lean`, `AbstractQueueModel.lean` | The two specifications at their edges: saturation, overflow, degenerate depths. |
+| `CircuitHdlTest/FifoHarness.lean` | Shared machinery for checking any design against the models. |
+| `CircuitHdlTest/Circt.lean` | The CIRCT lowering: the text it emits for the smallest designs, and VeIR's verdict on every example. |
 
 ## Layer 2: typed circuit core
 
@@ -588,8 +607,12 @@ lake build        # the library
 lake test         # the library and its test suite
 ```
 
-There is nothing to fetch and no cache to prime — the package has no dependencies, so a clean
-build takes seconds.
+`lake build` builds the library **only** — `defaultTargets` does not include the test library, so
+a broken assertion there will not show up. Use `lake test`.
+
+The one thing to fetch is the sibling `../veir` checkout that `lakefile.toml` names, pinned by
+`lean-toolchain` to the toolchain VeIR uses. Everything else builds in seconds against a bare
+toolchain with no cache.
 
 All the tests are checked by the compiler, so a green build means the parser produces exactly the
 reference modules (`example … := rfl`), the widths agree (`#guard_msgs`), and the circuits actually
@@ -601,8 +624,19 @@ running the tests.
 1. ~~a real parser for `module`, `wire`, `reg`, and `always` syntax~~ — done, except `wire`
 2. ~~width checking during elaboration~~ — done
 3. ~~a small denotational semantics for expressions and procedural blocks, over core `BitVec`~~ — done
-4. optional lowering to an existing MLIR/SSA-style internal form — the CIRCT dialects in
-   [`SSA/Projects/CIRCT`](../SSA/Projects/CIRCT) are the natural target
+4. ~~lowering to an MLIR/SSA-style internal form, with the CIRCT dialects the natural target~~ —
+   done, via VeIR; every example design round-trips through `firtool` to Verilog
 
-This keeps the design aligned with the existing `lean-mlir` style while avoiding a premature
-commitment to a full Verilog-like surface language.
+What is left is mostly about reach rather than new layers:
+
+- **Width checking for every size.** `Module.check` can be proved for a *concrete* FIFO but not
+  for all depths at once: `rfl` sticks on `expectWidth` at a symbolic `Nat`, and `simp` will not
+  evaluate `Name` equality inside a `match` scrutinee. The fix is for `Module.check` to take an
+  environment rather than compute one. The obstacle is written up at the end of
+  `CircuitHdlTest/AsyncFifo.lean`.
+- **Unbounded refinement.** The FIFO refinement results are bounded enumerations over schedules,
+  because symbolically evaluating `Module.settle` runs into the same wall. The models' own
+  properties, and the gray-coded flag logic, *are* proved outright.
+- **A semantics that can see metastability.** Evaluation is deterministic, so the reason the
+  asynchronous FIFO's pointers are gray coded — that a sampler catching one mid-transition reads
+  only its old or new value — is invisible to simulation at any horizon.
