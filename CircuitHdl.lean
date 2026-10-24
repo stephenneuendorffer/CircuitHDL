@@ -10,6 +10,8 @@ import CircuitHdl.Examples.Counter
 import CircuitHdl.Examples.Alu
 import CircuitHdl.Examples.Shifter
 import CircuitHdl.Examples.Swap
+import CircuitHdl.Examples.AbstractFifoModel
+import CircuitHdl.Examples.AbstractQueueModel
 import CircuitHdl.Examples.AsyncFifo
 
 /-!
@@ -34,5 +36,9 @@ language they need:
 - `CircuitHdl.Examples.Alu`       -- the expression language: mux chain, comparison, bitwise
 - `CircuitHdl.Examples.Shifter`   -- slices and concatenation
 - `CircuitHdl.Examples.Swap`      -- non-blocking versus blocking assignment
+- `CircuitHdl.Examples.AbstractFifoModel`  -- what a FIFO is if you only ask how full it is: a
+                                      bounded counter. No HDL, no implementation
+- `CircuitHdl.Examples.AbstractQueueModel` -- what it is if you ask which words, in what order,
+                                      plus the map down to the counting model
 - `CircuitHdl.Examples.AsyncFifo` -- the real design: two clock domains, gray-coded pointers
 -/

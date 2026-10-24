@@ -1,3 +1,5 @@
+import CircuitHdlTest.AbstractFifoModel
+import CircuitHdlTest.AbstractQueueModel
 import CircuitHdlTest.Syntax
 import CircuitHdlTest.Semantics
 import CircuitHdlTest.Clocks
@@ -11,6 +13,10 @@ Every test here is checked by the compiler rather than by a runner, so a green b
 passing run: `example … := rfl` asserts the parser produces the reference modules, `#guard_msgs`
 pins the width-error messages, and `#guard` forces evaluation of the simulations.
 
+- `CircuitHdlTest.AbstractFifoModel`  -- the counting model at its edges: saturation, the
+                                full and empty boundaries, degenerate depths
+- `CircuitHdlTest.AbstractQueueModel` -- the contents model: which end each operation works on,
+                                which word overflow loses, and agreement with the counting model
 - `CircuitHdlTest.Syntax`    -- expression lowering, precedence, and round-trips against
                                 hand-written reference modules
 - `CircuitHdlTest.Semantics` -- executable tests: the counter counts, the and2 truth table,
