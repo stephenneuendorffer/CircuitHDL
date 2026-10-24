@@ -13,6 +13,7 @@ import CircuitHdl.Examples.Swap
 import CircuitHdl.Examples.AbstractFifoModel
 import CircuitHdl.Examples.AbstractQueueModel
 import CircuitHdl.Examples.AsyncFifo
+import CircuitHdl.Examples.ShiftFifo
 
 /-!
 Umbrella module for the circuit HDL sketch.
@@ -41,4 +42,6 @@ language they need:
 - `CircuitHdl.Examples.AbstractQueueModel` -- what it is if you ask which words, in what order,
                                       plus the map down to the counting model
 - `CircuitHdl.Examples.AsyncFifo` -- the real design: two clock domains, gray-coded pointers
+- `CircuitHdl.Examples.ShiftFifo`  -- the same interface built the opposite way: data moves,
+                                      pointers do not
 -/

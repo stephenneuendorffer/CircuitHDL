@@ -6,6 +6,7 @@ import CircuitHdlTest.Clocks
 import CircuitHdlTest.AsyncFifo
 import CircuitHdlTest.Circt
 import CircuitHdlTest.FifoHarness
+import CircuitHdlTest.ShiftFifo
 
 /-!
 Umbrella module for the test suite.
@@ -30,4 +31,6 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 smallest designs, and VeIR's verdict on every example
 - `CircuitHdlTest.FifoHarness` -- shared machinery for checking a design against the abstract
                                 FIFO models in `CircuitHdl.Examples.AbstractFifoModel`
+- `CircuitHdlTest.ShiftFifo` -- the shift-register FIFO: that it carries traffic, and that it
+                                refines the same two models by entirely different means
 -/
