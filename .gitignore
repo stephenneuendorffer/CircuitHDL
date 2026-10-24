@@ -1,0 +1,29 @@
+# Lake build output and package directories
+.lake/
+build/
+lake-packages/
+lean_packages/
+*.olean
+
+# Editor and tooling state
+.vscode/
+.idea/
+*.code-workspace
+.lean_options
+compile_commands.json
+.cline_storage/
+.gdb_history
+
+# Editor backup and swap files
+*~
+\#*
+.#*
+*.sw[a-p]
+
+# Tag files
+tags
+GPATH
+GRTAGS
+GSYMS
+GTAGS
+.projectile
