@@ -86,6 +86,14 @@ Things the surface syntax does *not* have, each of which has bitten:
   `ShiftFifo.lean` fixes its depth at four and parameterizes only the width.
 - Binary operands must match width **exactly**. Zero-extend by concatenation: `{(0 : n), wfire}`.
 - A ternary `c ? t : f` does exist (precedence 20), and is usually clearer than nested `if`.
+- **An `if` around a clocked block doubles what the clock analysis has to reduce.** `Stmt.targets`
+  counts *both* branches, deliberately, so `if rst { .. } else { .. }` wrapping five assignments
+  yields ten targets. That is free for a fixed-size design, but `asyncFifo_singleClocked` and
+  `asyncFifo_noRaces` are `rfl` at a *symbolic* width, and wrapping both of `asyncFifo`'s blocks
+  put them over the 200,000-heartbeat default. Resetting per assignment (`wbin = wrst ? 0 :
+  wbnext`) keeps the target list flat and the proofs at their original cost. Prefer the ternary
+  wherever a proof reduces through the block; `shiftFifo4` keeps its `if` because nothing there is
+  proved for all sizes.
 
 Instances are flattened by `Module.ofItems`, so the width rules and the semantics never see one —
 `InstInfo` survives only so bindings can be checked.

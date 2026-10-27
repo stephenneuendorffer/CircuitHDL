@@ -9,10 +9,10 @@ below is the first-in-first-out property, and it is not expressible about a coun
 
 ### How the two models relate
 
-`counting` is the map that forgets the data, and `counting_push` / `counting_popped` show it
-commutes with both operations. So the two are not independent guesses at what a FIFO is: the
-counting model is this one with the contents erased, and reasoning about occupancy alone is
-reasoning about the same FIFO.
+`counting` is the map that forgets the data, and `counting_push` / `counting_popped` /
+`counting_reset` show it commutes with all three operations. So the two are not independent
+guesses at what a FIFO is: the counting model is this one with the contents erased, and reasoning
+about occupancy alone is reasoning about the same FIFO.
 
 The map runs one way only. A design can track occupancy perfectly and still put words in the
 wrong order, which is why both models are kept and checked separately -- see
@@ -60,6 +60,15 @@ def pop (q : AbstractQueueModel) : Option (Nat × AbstractQueueModel) :=
   match q.queue with
   | [] => none
   | v :: rest => some (v, { q with queue := rest })
+
+/-- Reset: drop everything, keeping the depth.
+
+The contents model makes plainer what reset costs than the counting one can. `AbstractFifoModel`
+says the count goes to zero; here the words themselves are discarded, and `popAll_pushAll_reset`
+below pins that they are not recoverable afterwards. A design that merely rewound a pointer
+without invalidating the data would satisfy the counting model and not this one -- the same split
+`shiftFifoOffByOne` exhibits for ordering. -/
+def reset (q : AbstractQueueModel) : AbstractQueueModel := { q with queue := [] }
 
 def wellFormed (q : AbstractQueueModel) : Prop := q.queue.length ≤ q.depth
 
@@ -159,10 +168,52 @@ theorem popAll_pushAll (depth : Nat) (values : List Nat) (h : values.length ≤ 
   rw [popAll_queue (q := (empty depth).pushAll values) values.length (Nat.le_of_eq (by rw [hq]))]
   exact hq
 
+/-! ### Reset
+
+The same shape as the counting model's, with one property that model cannot state: that the words
+are *gone*, not merely uncounted.
+-/
+
+@[simp] theorem reset_queue (q : AbstractQueueModel) : q.reset.queue = [] := rfl
+
+@[simp] theorem reset_depth (q : AbstractQueueModel) : q.reset.depth = q.depth := rfl
+
+theorem reset_eq_empty (q : AbstractQueueModel) : q.reset = empty q.depth := rfl
+
+theorem reset_wellFormed (q : AbstractQueueModel) : q.reset.wellFormed := by
+  simp [wellFormed]
+
+@[simp] theorem reset_isEmpty (q : AbstractQueueModel) : q.reset.isEmpty = true := by
+  simp [isEmpty]
+
+theorem reset_idempotent (q : AbstractQueueModel) : q.reset.reset = q.reset := rfl
+
+/-- **Reset forgets**, for contents as for occupancy. -/
+theorem push_reset (q : AbstractQueueModel) (v : Nat) : (q.push v).reset = q.reset := by
+  unfold push reset; split <;> rfl
+
+theorem popped_reset (q : AbstractQueueModel) : q.popped.reset = q.reset := by
+  unfold popped reset
+  cases hq : q.queue with
+  | nil => simp [pop, hq]
+  | cons v rest => simp [pop_queue hq]
+
+/-- **What reset destroys cannot be drained back out.** The counterpart to `popAll_pushAll`, and
+the statement the counting model has no words to make: fill a queue from a stream, reset it, and
+draining returns nothing rather than the stream.
+
+This is what makes a reset tick in a refinement check meaningful. Without it, "the model is empty"
+would be compatible with a design that had merely moved a read pointer back to a buffer still
+holding the old words, and a subsequent read would hand out data the model never saw. -/
+theorem popAll_pushAll_reset (depth : Nat) (values : List Nat) :
+    (((empty depth).pushAll values).reset).popAll values.length = [] := by
+  rw [popAll_queue (q := ((empty depth).pushAll values).reset) values.length (by simp)]
+  simp
+
 /-! ### The two models agree
 
 The counting model is not a separate guess at what a FIFO is; it is this one with the data erased.
-Stating that as a map, and showing it commutes with both operations, is what entitles the next
+Stating that as a map, and showing it commutes with every operation, is what entitles the next
 section to reason about occupancy alone and still be reasoning about *this* FIFO.
 -/
 
@@ -178,6 +229,10 @@ theorem counting_push (q : AbstractQueueModel) (v : Nat) :
     (q.push v).counting = q.counting.push := by
   simp only [counting, push, AbstractFifoModel.push]
   by_cases hlt : q.queue.length < q.depth <;> simp [hlt]
+
+/-- And likewise for resetting -- the third square, and the one that entitles a refinement check
+to assert reset against the counting model and the contents model and mean the same event by it. -/
+theorem counting_reset (q : AbstractQueueModel) : q.reset.counting = q.counting.reset := rfl
 
 /-- And likewise for popping. -/
 theorem counting_popped (q : AbstractQueueModel) : q.popped.counting = q.counting.pop := by

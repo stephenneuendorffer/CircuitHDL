@@ -23,9 +23,21 @@ Both flags are **registered**, which is also what keeps the combinational chain 
 `bin -> next -> gray -> flag` reads the flag from a register rather than from itself, so a single
 ordered settle pass is enough.
 
-There is no reset port. Every register starts at zero, which is the correct empty state, but
-`rempty` and `wfull` are registers too and so only become correct one tick into their own domain.
-A testbench that checks the flags before ticking will see them low.
+There are **two** reset ports, `wrst` and `rrst`, one per domain, and that is the design rather
+than an accident of how it was written. Reset de-assertion into two asynchronous clocks is itself
+a crossing: released at one instant, the two domains leave reset at unrelated times, and a write
+pointer that has been cleared while the read pointer has not is exactly the inconsistency the gray
+coding exists to prevent. The standard formulation takes `wrst_n` and `rrst_n` already synchronised
+into their own domains, and so does this one.
+
+Worth knowing how little the existing analysis would say about getting that wrong: `singleClocked`
+inspects *registers*, and a reset is an input, so one shared `rst` read from both `always` blocks
+would leave it green. `CircuitHdlTest.AsyncFifo`'s `oneSidedReset_rejected` is what actually
+catches it, by resetting one domain and watching the occupancy check fail.
+
+Power-up is still unreset: every register starts at zero, and `rempty` is a register, so before
+the first `rrst` the design claims to be non-empty. One reset tick in each domain fixes that,
+which is what `reset_replaces_warmup` pins against the older `warmup_matters`.
 -/
 
 namespace CircuitHdl
@@ -108,10 +120,16 @@ or just after -- both safe.
 `s.ready` can drop while the FIFO has in fact been drained. That is the safe direction -- the
 opposite error would overwrite data the reader has not taken.
 
-There is no reset port. Every register starts at zero, which is the correct empty state, but
-`rempty` and `wfull` are registers too and so only become correct one tick into their own domain. -/
+`wrst` and `rrst` are separate because reset release is itself a clock-domain crossing; each is
+assumed already synchronised into the domain it names. A reset asserted in one domain only leaves
+the pointers disagreeing, which no single-count model can describe -- see the header.
+
+Power-up is not reset. Every register starts at zero, which is the correct empty state for the
+pointers, but `rempty` is a register too and zero there means "not empty". So an unreset design
+still needs a tick in each domain before its flags mean anything; a reset tick is the better way
+to get there, and the only one that works from a state other than power-up. -/
 module! asyncFifo #[(depth dw : Nat) (_h : validDepth depth = true := by decide)]
-    (wclk : 1, rclk : 1, slave s : axis dw) -> (master m : axis dw) {
+    (wclk : 1, wrst : 1, rclk : 1, rrst : 1, slave s : axis dw) -> (master m : axis dw) {
     let n := Nat.log2 depth;
     reg mem[depth] : dw;
 
@@ -142,8 +160,8 @@ module! asyncFifo #[(depth dw : Nat) (_h : validDepth depth = true := by decide)
 
     -- Combinational, in dependency order so one settle pass suffices. Both handshake outputs come
     -- straight off a register, so neither depends on the valid facing it.
-    assign s.ready = ~wfull;
-    assign m.valid = ~rempty;
+    assign s.ready = ~wfull & ~wrst;
+    assign m.valid = ~rempty & ~rrst;
     assign wfire = s.valid & s.ready;
     assign rfire = m.valid & m.ready;
     assign wbnext = wbin + {(0 : n), wfire};
@@ -156,21 +174,42 @@ module! asyncFifo #[(depth dw : Nat) (_h : validDepth depth = true := by decide)
     assign raddr = rbin[n-1:0];
     assign m.data = mem[raddr];
 
+    -- Each domain resets from its own reset input and touches only its own registers, which is
+    -- what keeps `singleClocked` honest: a shared reset read from both blocks would pass that
+    -- check too, because it inspects registers and a reset is an input.
+    --
+    -- The memory is deliberately not cleared. Real FIFOs do not reset their storage, and nothing
+    -- can read it while `rempty` is high, so its contents after reset are unobservable rather
+    -- than merely unspecified.
+    -- Reset per assignment rather than as one `if rst { .. } else { .. }` around the block. Both
+    -- describe the same hardware, but `Stmt.targets` counts both branches of an `if`, so wrapping
+    -- the block doubles the target list that `asyncFifo_singleClocked` and `asyncFifo_noRaces`
+    -- have to reduce through at a symbolic width -- enough to push them past the default
+    -- heartbeat limit. `shiftFifo4` wraps its block, because nothing there is proved for all
+    -- sizes and the `if` reads closer to the Verilog.
+    --
+    -- The memory write needs no reset guard: `s.ready` is gated on `~wrst`, so `wfire` is low
+    -- throughout reset and the store cannot fire.
     always @(posedge wclk) {
-      assign wbin = wbnext;
-      assign wptr = wgnext;
-      assign wq1 = rptr;
-      assign wq2 = wq1;
-      assign wfull = wfullnext;
+      assign wbin = wrst ? 0 : wbnext;
+      assign wptr = wrst ? 0 : wgnext;
+      assign wq1 = wrst ? 0 : rptr;
+      assign wq2 = wrst ? 0 : wq1;
+      assign wfull = wrst ? 0 : wfullnext;
       if wfire { assign mem[waddr] = s.data; } else { }
     }
 
+    -- `rempty` resets to 1 and `wfull` to 0: an empty FIFO, which is the state the design used to
+    -- reach only one tick into each domain. Both are the fixed point of the next-state logic above
+    -- -- with every pointer zero, `remptynext = (gray 0 == 0) = 1` and `wfullnext = 0` -- so the
+    -- values reset drives are the ones the design would compute for itself, not a second opinion
+    -- about what empty means.
     always @(posedge rclk) {
-      assign rbin = rbnext;
-      assign rptr = rgnext;
-      assign rq1 = wptr;
-      assign rq2 = rq1;
-      assign rempty = remptynext;
+      assign rbin = rrst ? 0 : rbnext;
+      assign rptr = rrst ? 0 : rgnext;
+      assign rq1 = rrst ? 0 : wptr;
+      assign rq2 = rrst ? 0 : rq1;
+      assign rempty = rrst ? 1 : remptynext;
     }
   }
 

@@ -53,6 +53,16 @@ def push (fifo : AbstractFifoModel) : AbstractFifoModel :=
 def pop (fifo : AbstractFifoModel) : AbstractFifoModel :=
   if 0 < fifo.count then { fifo with count := fifo.count - 1 } else fifo
 
+/-- Reset: back to empty, keeping the depth.
+
+Unconditional, where `push` and `pop` are guarded. That is the whole character of a reset -- it
+does not ask what state the FIFO was in, which is what `push_reset` and `pop_reset` below say
+formally, and what makes a reset the one transition a design can be driven into from anywhere.
+
+The depth survives because it is a property of the hardware rather than of the contents. A model
+whose `reset` returned `empty 0` would be describing a FIFO that shrank. -/
+def reset (fifo : AbstractFifoModel) : AbstractFifoModel := { fifo with count := 0 }
+
 /-- The invariant the whole design exists to maintain. -/
 def wellFormed (fifo : AbstractFifoModel) : Prop := fifo.count ≤ fifo.depth
 
@@ -116,6 +126,40 @@ theorem push_full {fifo : AbstractFifoModel} (h : fifo.depth ≤ fifo.count) : f
 
 theorem pop_empty {fifo : AbstractFifoModel} (h : fifo.count = 0) : fifo.pop = fifo := by
   unfold pop; simp [h]
+
+/-! ### Reset
+
+Reset is the only transition with no hypothesis attached. `push_count` holds when there is room
+and `pop_count` when there is something to take; `reset_count` holds always, which is what a
+design gets to assume when it comes out of reset regardless of what it was doing before.
+-/
+
+@[simp] theorem reset_count (fifo : AbstractFifoModel) : fifo.reset.count = 0 := rfl
+
+@[simp] theorem reset_depth (fifo : AbstractFifoModel) : fifo.reset.depth = fifo.depth := rfl
+
+/-- Reset and `empty` are the same state. Worth stating rather than assuming: `empty` is where a
+run starts and `reset` is where it returns to, and a model in which those differed would let a
+design pass a check it restarted but fail one it reset. -/
+theorem reset_eq_empty (fifo : AbstractFifoModel) : fifo.reset = empty fifo.depth := rfl
+
+theorem reset_wellFormed (fifo : AbstractFifoModel) : fifo.reset.wellFormed := by
+  simp [wellFormed]
+
+@[simp] theorem reset_isEmpty (fifo : AbstractFifoModel) : fifo.reset.isEmpty = true := by
+  simp
+
+/-- Holding reset longer changes nothing after the first tick of it. -/
+theorem reset_idempotent (fifo : AbstractFifoModel) : fifo.reset.reset = fifo.reset := rfl
+
+/-- **Reset forgets.** Whatever happened on the way in is not visible on the way out -- these two
+are what distinguish a reset from a drain, and they are why a schedule may assert reset from any
+state at all and still have a model to compare against. -/
+theorem push_reset (fifo : AbstractFifoModel) : fifo.push.reset = fifo.reset := by
+  unfold push reset; split <;> rfl
+
+theorem pop_reset (fifo : AbstractFifoModel) : fifo.pop.reset = fifo.reset := by
+  unfold pop reset; split <;> rfl
 
 end AbstractFifoModel
 

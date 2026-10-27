@@ -242,7 +242,8 @@ private def fifoEnv (n dw : Nat) : Env :=
    (`rempty, 1), (`rq2, n+1), (`rq1, n+1), (`rptr, n+1), (`rbin, n+1), (`wfull, 1),
    (`wq2, n+1), (`wq1, n+1), (`wptr, n+1), (`wbin, n+1),
    (`s.ready, 1), (`m.data, dw), (`m.valid, 1),
-   (`m.ready, 1), (`s.data, dw), (`s.valid, 1), (`rclk, 1), (`wclk, 1)]
+   (`m.ready, 1), (`s.data, dw), (`s.valid, 1),
+   (`rrst, 1), (`rclk, 1), (`wrst, 1), (`wclk, 1)]
 
 /-- The declarations of the FIFO, for **every** depth.
 
@@ -481,6 +482,41 @@ theorem refines_queue_burst_depth8 :
     refinesQueueAll fifo8 8 sPort mPort burstSchedules queueAbstractionOf = true := by native_decide
 
 
+/-! ### Across reset
+
+`asyncFifo` has two reset inputs, one per domain, and the harness asserts both and takes an edge
+in each. Everything above this point runs a FIFO that has been going since power-up; these inject
+a reset into a FIFO that is holding words.
+-/
+
+/-- The design's two resets. They are different signals, which is the whole point -- see
+`oneSidedReset_rejected` for what happens when they are not treated as such. -/
+private def fifoRst : ResetSpec := { write := `wrst, read := `rrst }
+
+/-- **Occupancy tracks across reset**, with reset injected at three points into every burst. -/
+theorem refines_reset_depth4 :
+    refinesAlongAll fifo4 4 sPort mPort burstResetSchedules abstractionOf
+      (rst := some fifoRst) = true := by native_decide
+
+/-- **And the contents**: after a reset the FIFO offers nothing until something new is written,
+rather than the words it was holding. The memory still contains them -- reset does not clear it --
+so this says the pointers and flags make them unreachable, which is the only thing that matters. -/
+theorem refines_queue_reset_depth4 :
+    refinesQueueAll fifo4 4 sPort mPort burstResetSchedules queueAbstractionOf
+      (rst := some fifoRst) = true := by native_decide
+
+/-- **A reset tick replaces the warm-up.** The direct counterpart to `warmup_matters` below: that
+theorem says a run started at power-up with no idle ticks goes wrong, this one says a run started
+with a reset does not. `rempty` resetting to 1 is what makes the difference -- it is the register
+whose zero at power-up is a lie about an empty FIFO.
+
+So the warm-up in `Module.transfer` and in `warmUp` was standing in for a reset the design did not
+have. It still earns its place for a design that has none, but it is no longer the only way in. -/
+theorem reset_replaces_warmup :
+    refinesQueueAll fifo4 4 sPort mPort resetFirstSchedules queueAbstractionOf
+      (warm := false) (rst := some fifoRst) = true := by native_decide
+
+
 /-! ### Negative controls
 
 A refinement check that cannot fail proves nothing, and `abstractionOf` is a definition rather
@@ -516,14 +552,116 @@ theorem queue_ordering_matters :
     refinesQueueAll fifo4 4 sPort mPort burstSchedules queueAbstractionReversed
       = false := by native_decide
 
-/-- **The warm-up is load-bearing**, and this is the design's documented behaviour rather than a
-quirk of the harness: `asyncFifo` has no reset, so at power-up both flags read zero -- "not full"
-and "not empty" -- and the second is a lie about an empty FIFO. A consumer that believes `m.valid`
-before the read domain has ticked pops a word that was never written, and the check sees the
-occupancy go wrong. `Module.transfer` opens with the same two idle ticks for the same reason. -/
+/-- **The warm-up is load-bearing on a run that never asserts reset**, and this is the design's
+documented behaviour rather than a quirk of the harness: at power-up every register reads zero, so
+both flags do, meaning "not full" and "not empty" -- and the second is a lie about an empty FIFO.
+A consumer that believes `m.valid` before the read domain has ticked pops a word that was never
+written, and the check sees the occupancy go wrong. `Module.transfer` opens with the same two idle
+ticks for the same reason.
+
+This and `reset_replaces_warmup` are the same observation from the two sides. These schedules have
+no reset tick and fail without the idle ticks; those open with one and pass without them. The
+reset is what the warm-up was standing in for. -/
 theorem warmup_matters :
     refinesAlongAll fifo4 4 sPort mPort burstSchedules abstractionOf (warm := false)
       = false := by native_decide
+
+/-- A `ResetSpec` that names `wrst` for both domains. The harness drives one signal and still
+takes an edge in each clock domain, so the write side is reset and the read side keeps running --
+which is exactly what a single shared reset port would do to this design when the two domains
+released it at different times. -/
+private def fifoOneSidedRst : ResetSpec := ResetSpec.single `wrst
+
+/-- **Resetting one domain is not resetting the FIFO**, and this is the reason `asyncFifo` has two
+reset inputs rather than one.
+
+The write pointer goes to zero while the read pointer stays where it was, so the pair no longer
+encodes any occupancy at all -- `abstractionOf` reads the difference of two pointers and gets a
+number that is not the model's zero. The check rejects it.
+
+Worth being clear about what *would not* have caught this. `asyncFifo_singleClocked` and
+`asyncFifo_noRaces` inspect registers, and a reset is an input, so a design with one shared `rst`
+read from both `always` blocks passes both of them. `Module.check` passes it too. The only thing
+here that notices is driving the design and watching the occupancy, which is what this does. -/
+theorem oneSidedReset_rejected :
+    refinesAlongAll fifo4 4 sPort mPort burstResetSchedules abstractionOf
+      (rst := some fifoOneSidedRst) = false := by native_decide
+
+/-- **And the reset values are load-bearing, not just the clearing.** `rempty` resets to 1; this
+is the same design with the read domain's reset driving it to 0, as a plain "clear every register"
+reset would. Every pointer is still cleared, so the state immediately after reset is right -- what
+is wrong is that the FIFO claims to have a word to offer, which is the power-up lie made permanent
+at every reset. -/
+private def asyncFifoResetEmptyLow : Module :=
+  module! asyncFifoResetEmptyLow (wclk : 1, wrst : 1, rclk : 1, rrst : 1, slave s : axis 8)
+      -> (master m : axis 8) {
+    reg mem[4] : 8;
+    reg wbin : 3;
+    reg wptr : 3;
+    reg wq1 : 3;
+    reg wq2 : 3;
+    reg wfull : 1;
+    reg rbin : 3;
+    reg rptr : 3;
+    reg rq1 : 3;
+    reg rq2 : 3;
+    reg rempty : 1;
+    wire wfire : 1;
+    wire rfire : 1;
+    wire wbnext : 3;
+    wire wgnext : 3;
+    wire wfullnext : 1;
+    wire rbnext : 3;
+    wire rgnext : 3;
+    wire remptynext : 1;
+    wire waddr : 2;
+    wire raddr : 2;
+    assign s.ready = ~wfull & ~wrst;
+    assign m.valid = ~rempty & ~rrst;
+    assign wfire = s.valid & s.ready;
+    assign rfire = m.valid & m.ready;
+    assign wbnext = wbin + {(0 : 2), wfire};
+    (grayOfW 3) wg (.b(wbnext), .g(wgnext));
+    assign wfullnext = wgnext == {~wq2[2:1], wq2[0:0]};
+    assign rbnext = rbin + {(0 : 2), rfire};
+    (grayOfW 3) rg (.b(rbnext), .g(rgnext));
+    assign remptynext = rgnext == rq2;
+    assign waddr = wbin[1:0];
+    assign raddr = rbin[1:0];
+    assign m.data = mem[raddr];
+    always @(posedge wclk) {
+      assign wbin = wrst ? 0 : wbnext;
+      assign wptr = wrst ? 0 : wgnext;
+      assign wq1 = wrst ? 0 : rptr;
+      assign wq2 = wrst ? 0 : wq1;
+      assign wfull = wrst ? 0 : wfullnext;
+      if wfire { assign mem[waddr] = s.data; } else { }
+    }
+    always @(posedge rclk) {
+      assign rbin = rrst ? 0 : rbnext;
+      assign rptr = rrst ? 0 : rgnext;
+      assign rq1 = rrst ? 0 : wptr;
+      assign rq2 = rrst ? 0 : rq1;
+      -- The one changed value: 0 here means "not empty".
+      assign rempty = rrst ? 0 : remptynext;
+    }
+  }
+
+/-- **Both models reject it**, and the reason is worth following, because it is not the one you
+would guess. The lie is about `m.valid`, which is the contents model's territory -- but a consumer
+that believes it *acts* on it, and the completed handshake advances `rbin` past a word that was
+never written. So the read pointer runs ahead of the write pointer and the occupancy the two
+encode is wrong too.
+
+Which is the stronger statement: a flag that lies does not stay a flag problem. There is no
+schedule on which this design merely looks wrong without also going wrong. -/
+theorem resetEmptyLow_rejected_by_counting :
+    refinesAlongAll asyncFifoResetEmptyLow 4 sPort mPort resetFirstSchedules abstractionOf
+      (warm := false) (rst := some fifoRst) = false := by native_decide
+
+theorem resetEmptyLow_rejected_by_queue :
+    refinesQueueAll asyncFifoResetEmptyLow 4 sPort mPort resetFirstSchedules queueAbstractionOf
+      (warm := false) (rst := some fifoRst) = false := by native_decide
 
 
 /-! ### What this does not say

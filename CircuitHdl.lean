@@ -41,7 +41,9 @@ language they need:
                                       bounded counter. No HDL, no implementation
 - `CircuitHdl.Examples.AbstractQueueModel` -- what it is if you ask which words, in what order,
                                       plus the map down to the counting model
-- `CircuitHdl.Examples.AsyncFifo` -- the real design: two clock domains, gray-coded pointers
+- `CircuitHdl.Examples.AsyncFifo` -- the real design: two clock domains, gray-coded pointers, and
+                                      a reset per domain because releasing one into two clocks is
+                                      itself a crossing
 - `CircuitHdl.Examples.ShiftFifo`  -- the same interface built the opposite way: data moves,
-                                      pointers do not
+                                      pointers do not, and one clock means one reset
 -/

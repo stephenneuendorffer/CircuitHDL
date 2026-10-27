@@ -22,9 +22,14 @@ descriptions *of* it -- of pointers and wrap-around rather than of FIFOs. A seco
 implementation that shares no structure with the first, refining the same two models unchanged,
 is the evidence that they did not.
 
-This one is also simpler in a way the refinement makes visible: it has no reset but needs no
-warm-up, because `count` starts at zero and both flags are correct from the first cycle. The
-asynchronous FIFO's flags are only right one tick into each domain.
+This one is also simpler in a way the refinement makes visible: it needs no warm-up, because
+`count` starts at zero and both flags are correct from the first cycle. The asynchronous FIFO's
+flags are only right one tick into each domain, and before its reset existed that was a hole a
+testbench had to work around rather than a state it could ask for.
+
+It has one reset, where `asyncFifo` has two. That is not a simplification of the same thing: a
+single clock means there is only one domain for a reset to be released into, so the question that
+forces `wrst` and `rrst` apart over there does not arise here.
 
 The depth is fixed at four rather than parameterized. The registers have to be declared one by
 one -- a shift register is `depth` separate registers, not an array -- and the surface syntax has
@@ -41,7 +46,7 @@ Verilog equivalent:
 
 ```verilog
 module shiftFifo4 #(parameter DW = 8) (
-  input clk,
+  input clk, input rst,
   input s_valid, input [DW-1:0] s_data, output s_ready,
   output m_valid, output [DW-1:0] m_data, input m_ready
 );
@@ -50,21 +55,31 @@ module shiftFifo4 #(parameter DW = 8) (
   wire wfire = s_valid & s_ready;
   wire rfire = m_valid & m_ready;
   wire [2:0] widx = count - rfire;      // first free slot, after any shift
-  assign s_ready = count != 3'd4;
-  assign m_valid = count != 3'd0;
+  assign s_ready = !rst && count != 3'd4;
+  assign m_valid = !rst && count != 3'd0;
   assign m_data  = r0;
   always @(posedge clk) begin
-    count <= count + wfire - rfire;
-    r0 <= (wfire && widx == 0) ? s_data : (rfire ? r1 : r0);
-    r1 <= (wfire && widx == 1) ? s_data : (rfire ? r2 : r1);
-    r2 <= (wfire && widx == 2) ? s_data : (rfire ? r3 : r2);
-    r3 <= (wfire && widx == 3) ? s_data : r3;
+    if (rst) begin
+      count <= 0; r0 <= 0; r1 <= 0; r2 <= 0; r3 <= 0;
+    end else begin
+      count <= count + wfire - rfire;
+      r0 <= (wfire && widx == 0) ? s_data : (rfire ? r1 : r0);
+      r1 <= (wfire && widx == 1) ? s_data : (rfire ? r2 : r1);
+      r2 <= (wfire && widx == 2) ? s_data : (rfire ? r3 : r2);
+      r3 <= (wfire && widx == 3) ? s_data : r3;
+    end
   end
 endmodule
 ```
 
-`+ 7` is `- 1`: the core has no subtraction, and at three bits the two agree. -/
-module! shiftFifo4 #[(dw : Nat)] (clk : 1, slave s : axis dw) -> (master m : axis dw) {
+`+ 7` is `- 1`: the core has no subtraction, and at three bits the two agree.
+
+The reset is synchronous and clears the data registers as well as `count`. Clearing `r0..r3` is
+not strictly needed -- `shiftQueueAbstractionOf` reads only the first `count` of them, so they are
+don't-cares at `count = 0` -- but it keeps the post-reset state a single definite value, which is
+what lets the refinement check compare against `AbstractQueueModel.reset` without having to say
+which registers it is allowed to ignore. -/
+module! shiftFifo4 #[(dw : Nat)] (clk : 1, rst : 1, slave s : axis dw) -> (master m : axis dw) {
   reg count : 3;
   reg r0 : dw;
   reg r1 : dw;
@@ -76,9 +91,10 @@ module! shiftFifo4 #[(dw : Nat)] (clk : 1, slave s : axis dw) -> (master m : axi
   wire widx : 3;
 
   -- Both flags are exact, and correct from the first cycle: `count` is local, so neither has to
-  -- cross a clock boundary and neither is conservative.
-  assign s.ready = count != 4;
-  assign m.valid = count != 0;
+  -- cross a clock boundary and neither is conservative. Gating them on `rst` is what makes "no
+  -- transfer completes during reset" true by construction rather than by assertion.
+  assign s.ready = ~rst & (count != 4);
+  assign m.valid = ~rst & (count != 0);
   assign m.data = r0;
   assign wfire = s.valid & s.ready;
   assign rfire = m.valid & m.ready;
@@ -86,11 +102,19 @@ module! shiftFifo4 #[(dw : Nat)] (clk : 1, slave s : axis dw) -> (master m : axi
   assign widx = count + (rfire ? 7 : 0);
 
   always @(posedge clk) {
-    assign count = count + (wfire ? 1 : 0) + (rfire ? 7 : 0);
-    assign r0 = (wfire & (widx == 0)) ? s.data : (rfire ? r1 : r0);
-    assign r1 = (wfire & (widx == 1)) ? s.data : (rfire ? r2 : r1);
-    assign r2 = (wfire & (widx == 2)) ? s.data : (rfire ? r3 : r2);
-    assign r3 = (wfire & (widx == 3)) ? s.data : r3;
+    if rst {
+      assign count = 0;
+      assign r0 = 0;
+      assign r1 = 0;
+      assign r2 = 0;
+      assign r3 = 0;
+    } else {
+      assign count = count + (wfire ? 1 : 0) + (rfire ? 7 : 0);
+      assign r0 = (wfire & (widx == 0)) ? s.data : (rfire ? r1 : r0);
+      assign r1 = (wfire & (widx == 1)) ? s.data : (rfire ? r2 : r1);
+      assign r2 = (wfire & (widx == 2)) ? s.data : (rfire ? r3 : r2);
+      assign r3 = (wfire & (widx == 3)) ? s.data : r3;
+    }
   }
 }
 

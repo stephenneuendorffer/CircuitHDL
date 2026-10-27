@@ -72,8 +72,12 @@ domain gets per round, which is how the two clocks are made to run at different 
 
 Two things the protocol forces and a test should not have to restate:
 
-* **The flags are settled first.** The design has no reset, so `empty` and `full` are only correct
-  one tick into their own domain. Trusting `valid` before that reads garbage out of an empty FIFO.
+* **The flags are settled first.** This driver never asserts a design's reset -- it drives only
+  the two ports' handshake wires -- so the FIFO it is given starts at power-up, where `empty` and
+  `full` are only correct one tick into their own domain. Trusting `valid` before that reads
+  garbage out of an empty FIFO. A design *with* a reset would be better served by pulsing it, and
+  `CircuitHdlTest.FifoHarness` does; keeping the idle ticks here is what lets `transfer` drive a
+  design with no reset port at all.
 * **The run stops once everything offered has arrived.** Accepting past that point would keep
   reading a drained FIFO, which wraps its pointers and reports data that was never sent again.
 

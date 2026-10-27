@@ -96,4 +96,37 @@ run that deliberately overruns both edges.
   let run := (empty 3).push.push.push.push.pop.pop.pop.pop.push
   run.count = 1 && run.count ≤ run.depth
 
+/-! ### Reset
+
+`push_reset` and `pop_reset` say reset forgets one operation at a time, and `reset_eq_empty` that
+where it lands is where a run starts. These run histories into it, including the two states a
+design is most likely to mishandle: a full FIFO and one that has already been reset.
+
+The depth checks are the ones that would catch a reset written as `empty 0` rather than
+`empty fifo.depth` -- a model that shrank the FIFO would pass every count check here and then
+refuse the first push afterwards.
+-/
+
+#guard (empty 4).push.push.reset.count = 0
+#guard (empty 4).push.push.reset.depth = 4
+#guard (empty 4).push.push.reset.isEmpty
+#guard !(empty 4).push.push.reset.isFull
+
+-- Reset from full, and usable to the same depth afterwards.
+#guard (empty 4).push.push.push.push.isFull
+#guard (empty 4).push.push.push.push.reset.count = 0
+#guard (empty 4).push.push.push.push.reset.push.push.push.push.isFull
+
+-- A no-op on an empty FIFO, and holding it changes nothing further.
+#guard (empty 4).reset.count = 0
+#guard (empty 4).push.reset.reset.count = 0
+
+-- Reset is where a run starts, on values rather than by `reset_eq_empty`.
+#guard (empty 4).push.push.push.reset = empty 4
+
+-- Degenerate depths: reset cannot make a zero-deep FIFO non-full, nor a depth-one one deeper.
+#guard (empty 0).reset.isFull && (empty 0).reset.isEmpty
+#guard (empty 1).push.reset.count = 0
+#guard (empty 1).push.reset.push.isFull
+
 end CircuitHdl

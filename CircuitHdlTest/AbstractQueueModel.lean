@@ -105,4 +105,42 @@ check it at the edges the theorems leave alone -- a refused push and an ignored 
 -- And an ignored pop agrees with an ignored decrement.
 #guard (empty 2).popped.counting = (AbstractFifoModel.empty 2).pop
 
+-- `counting_reset` proves the third square; here it is on a queue with something in it, which is
+-- the only case where erasing the contents and zeroing the count could have come apart.
+#guard ((empty 4).pushAll [1, 2, 3]).reset.counting = (AbstractFifoModel.empty 4).push.push.reset
+
+/-! ### Reset
+
+`push_reset` and `popped_reset` say reset forgets one operation at a time. These run whole
+histories into it, and then check the queue is usable afterwards rather than merely empty -- a
+model whose reset left `depth` behind would pass the emptiness checks and refuse every subsequent
+push.
+-/
+
+#guard ((empty 4).pushAll [1, 2, 3]).reset.queue = []
+#guard ((empty 4).pushAll [1, 2, 3]).reset.depth = 4
+#guard ((empty 4).pushAll [1, 2, 3]).reset.isEmpty
+#guard !((empty 4).pushAll [1, 2, 3]).reset.isFull
+
+-- Usable afterwards: the depth survived, so the queue fills again to the same four.
+#guard (((empty 4).pushAll [1, 2, 3]).reset.pushAll [7, 8, 9, 10, 11]).queue = [7, 8, 9, 10]
+
+-- Reset from a *full* queue, which is the state a design is least likely to get right.
+#guard ((empty 2).pushAll [1, 2]).reset.queue = []
+#guard ((empty 2).pushAll [1, 2]).reset.isEmpty
+
+-- Draining after a reset returns nothing, however much fuel it is given. This is
+-- `popAll_pushAll_reset` on values, and the property that distinguishes a reset from a drain:
+-- the words are gone, not merely unreachable by one pop.
+#guard ((empty 4).pushAll [1, 2, 3]).reset.popAll 9 = []
+#guard ((empty 4).pushAll [1, 2, 3]).reset.popped.queue = []
+
+-- Resetting an empty queue is a no-op rather than an error, and holding reset changes nothing.
+#guard (empty 4).reset.queue = []
+#guard ((empty 4).pushAll [1, 2]).reset.reset.queue = []
+
+-- The degenerate depth, where reset and every other operation agree because nothing fits.
+#guard (empty 0).reset.queue = []
+#guard (empty 0).reset.isEmpty && (empty 0).reset.isFull
+
 end CircuitHdl

@@ -30,7 +30,9 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
 - `CircuitHdlTest.Circt`     -- the lowering to `hw`/`comb`/`seq`: the text it emits for the
                                 smallest designs, and VeIR's verdict on every example
 - `CircuitHdlTest.FifoHarness` -- shared machinery for checking a design against the abstract
-                                FIFO models in `CircuitHdl.Examples.AbstractFifoModel`
+                                FIFO models in `CircuitHdl.Examples.AbstractFifoModel`, including
+                                driving a design through reset and checking the data bus on every
+                                tick where `valid` is asserted rather than only at a transfer
 - `CircuitHdlTest.ShiftFifo` -- the shift-register FIFO: that it carries traffic, and that it
                                 refines the same two models by entirely different means
 -/

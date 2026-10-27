@@ -13,13 +13,27 @@ Two checks, one per model:
 
 * `refinesAlongAll` -- the design's occupancy matches `AbstractFifoModel` at every tick, and stays
   within the depth.
-* `refinesQueueAll` -- the design's contents match `AbstractQueueModel`, and every word handed
-  out is the oldest one waiting.
+* `refinesQueueAll` -- the design's contents match `AbstractQueueModel`, every word handed out is
+  the oldest one waiting, and -- the stronger half -- every word *offered* is too.
 
 In both the abstract side *follows* the design's own handshakes. That is what makes this a
 refinement rather than an equivalence, and it is what lets a conservative design pass: a tick on
 which the design declines to accept simply leaves the model alone. `asyncFifo` needs that latitude
 -- its full flag is pessimistic by two clock ticks.
+
+### Reset
+
+A `Tick` may assert reset, and a `ResetSpec` says which input to drive. The spec names a reset
+signal **per clock domain**, because an asynchronous FIFO has one per domain and must: reset
+release into two unrelated clocks is itself a crossing, and a design whose write pointer has been
+cleared while its read pointer has not is in a state no single-count model can describe. So a
+reset tick here is a whole-FIFO event -- it asserts both domains' resets and takes an edge in each
+-- and the asymmetric case is a negative control rather than a supported mode. See
+`CircuitHdlTest.AsyncFifo`'s `oneSidedReset_rejected`.
+
+`AbstractFifoModel.reset` and `AbstractQueueModel.reset` are unconditional where `push` and `pop`
+are guarded, so a schedule may assert reset from any state at all and still have something to
+compare against. `push_reset`, `pop_reset` and `counting_reset` are what say that formally.
 
 ### What these results are worth
 
@@ -36,16 +50,69 @@ namespace CircuitHdl
 
 open Lean
 
+/-! ### Schedules -/
+
+/-- One tick of a schedule: which domain takes an edge, what the producer offers, whether the
+consumer accepts, and whether this tick takes the design through reset.
+
+A record rather than a tuple because `reset` arrived fourth and a bare `Bool × Bool × Bool × Bool`
+says nothing about which bit is which. The default on `reset` is what lets the pre-existing
+enumerators below stay reset-free without mentioning it. -/
+structure Tick where
+  /-- Which domain takes an edge: the source's clock when true, the destination's when false. -/
+  writeClock : Bool
+  offers : Bool
+  accepts : Bool
+  /-- Ignored unless the check is given a `ResetSpec`, in which case a reset tick resets *both*
+  domains -- see the header. -/
+  reset : Bool := false
+  deriving Repr, DecidableEq, Inhabited
+
+/-- A schedule: one entry per tick. -/
+abbrev Schedule := List Tick
+
+/-- How a design is taken through reset: the reset input in each clock domain.
+
+Two names rather than one. For a single-clock design they are the same name and `ResetSpec.single`
+says so; for an asynchronous FIFO they are genuinely different signals, and the reason is in the
+header. Passing a spec whose two names coincide to a *two*-clock design is how
+`oneSidedReset_rejected` resets one domain and leaves the other running. -/
+structure ResetSpec where
+  write : Name
+  read : Name
+  deriving Repr, DecidableEq
+
+/-- The degenerate case: one clock, so one reset. -/
+def ResetSpec.single (n : Name) : ResetSpec := ⟨n, n⟩
+
+/-- The reset inputs at a given assertion level. Empty for a design with no reset, which is what
+keeps every pre-existing check drivable unchanged.
+
+Deduplicated when the two names coincide, so a single-clock design is driven once rather than
+twice with the same value. -/
+private def resetInputs (rst : Option ResetSpec) (asserted : Bool) : State :=
+  match rst with
+  | none => []
+  | some r =>
+      let v := Value.ofNat 1 (if asserted then 1 else 0)
+      if r.write == r.read then [(r.write, v)] else [(r.write, v), (r.read, v)]
+
+/-! ### Driving one tick -/
+
 /-- One tick: advance the design on `clk`, and advance the model by whatever handshake actually
 completed. The model follows the design, which is what makes this a refinement rather than an
-equivalence -- a tick on which the design conservatively refuses simply leaves the model alone. -/
-private def stepBoth (m : Module) (source dest : AxisPort) (clk : Name)
+equivalence -- a tick on which the design conservatively refuses simply leaves the model alone.
+
+Reset is driven *low* here rather than left alone. The state persists between ticks, so a reset
+asserted on the previous tick would otherwise still be asserted on this one. -/
+private def stepBoth (m : Module) (source dest : AxisPort) (rst : Option ResetSpec) (clk : Name)
     (offer : Option Nat) (accept : Bool) (σ : State) (model : AbstractFifoModel) :
     Except EvalError (State × AbstractFifoModel) := do
-  let inputs : State :=
+  let driven : State :=
     [ (source.valid, Value.ofNat 1 (if offer.isSome then 1 else 0)),
       (source.data, Value.ofNat source.width (offer.getD 0)),
       (dest.ready, Value.ofNat 1 (if accept then 1 else 0)) ]
+  let inputs : State := driven ++ resetInputs rst false
   -- Settle first, so the handshake is decided on the values the edge actually sees.
   let settled ← m.settle (σ.apply inputs)
   let wrote := offer.isSome && settled.valueOf? source.ready == some 1 && clk == source.clock
@@ -55,29 +122,43 @@ private def stepBoth (m : Module) (source dest : AxisPort) (clk : Name)
   let model := if took then model.pop else model
   return (σ', model)
 
-/-- A schedule: one entry per tick, giving which domain ticks, whether the producer offers a word,
-and whether the consumer accepts one. -/
-abbrev Schedule := List (Bool × Bool × Bool)
+/-- A reset tick: assert every domain's reset, offer nothing, accept nothing, and take an edge in
+each clock domain.
 
-/-- Every schedule of a given length -- `8 ^ length` of them. -/
-def allSchedules : Nat → List Schedule
-  | 0 => [[]]
-  | n + 1 =>
-      (allSchedules n).flatMap fun rest =>
-        [false, true].flatMap fun writeClock =>
-          [false, true].flatMap fun offers =>
-            [false, true].map fun accepts =>
-              (writeClock, offers, accepts) :: rest
+Both domains, because that is the only reset event the abstract models can describe -- they hold
+one count, and a design with one pointer cleared and the other not does not have one. The second
+edge is skipped when the two ports share a clock, so a single-clock design sees exactly one. -/
+private def resetBoth (m : Module) (source dest : AxisPort) (r : ResetSpec) (σ : State) :
+    Except EvalError State := do
+  let idle : State :=
+    [ (source.valid, Value.ofNat 1 0),
+      (source.data, Value.ofNat source.width 0),
+      (dest.ready, Value.ofNat 1 0) ]
+  let inputs : State := idle ++ resetInputs (some r) true
+  let σ ← m.stepClock source.clock σ inputs
+  if source.clock == dest.clock then return σ
+  m.stepClock dest.clock σ inputs
 
-/-- The design has no reset, so both flags read zero at power-up -- meaning "not full" and
-"not empty", and the second of those is a lie about an empty FIFO. They become true one tick into
-their own domain, which is what this idles for. `Module.transfer` opens with the same two ticks
-and for the same reason. -/
-private def warmUp (m : Module) (source dest : AxisPort) : Except EvalError State := do
+/-- A schedule asking for reset on a check that was given no `ResetSpec`. Rejected rather than
+ignored: silently dropping the reset would leave the model resetting while the design did not. -/
+private def noResetSpec : EvalError := .check (.unbound `reset)
+
+/-- The design has no reset *at power-up* -- registers start at zero, and `asyncFifo`'s `rempty`
+is a register, so zero there means "not empty", which is a lie about an empty FIFO. Both flags
+become correct one tick into their own domain, which is what this idles for. `Module.transfer`
+opens with the same two ticks and for the same reason.
+
+A schedule that opens with a reset tick reaches the same place and does not need this -- see
+`reset_replaces_warmup`. Warm-up survives because it is the only option for a design with no reset
+port at all, and because the existing results are stated in terms of it. -/
+private def warmUp (m : Module) (source dest : AxisPort) (rst : Option ResetSpec) :
+    Except EvalError State := do
   let (σ, _) ←
-    stepBoth m source dest source.clock none false m.initState (AbstractFifoModel.empty 0)
-  let (σ, _) ← stepBoth m source dest dest.clock none false σ (AbstractFifoModel.empty 0)
+    stepBoth m source dest rst source.clock none false m.initState (AbstractFifoModel.empty 0)
+  let (σ, _) ← stepBoth m source dest rst dest.clock none false σ (AbstractFifoModel.empty 0)
   return σ
+
+/-! ### The counting check -/
 
 /-- Run one schedule, checking at every tick that the design's pointers still encode the model's
 occupancy, and that the occupancy is within the depth.
@@ -85,68 +166,93 @@ occupancy, and that the occupancy is within the depth.
 Offered values are a counter rather than a fixed word: nothing here observes data, but distinct
 values keep a run from passing by accident on a design that writes the wrong word. -/
 private def refinesAlong (m : Module) (depth : Nat) (source dest : AxisPort)
-    (abstraction : Nat → State → Option AbstractFifoModel) :
+    (rst : Option ResetSpec) (abstraction : Nat → State → Option AbstractFifoModel) :
     Nat → State → AbstractFifoModel → Schedule → Bool
   | _, _, _, [] => true
-  | next, σ, model, (writeClock, offers, accepts) :: rest =>
-      let clk := if writeClock then source.clock else dest.clock
-      match stepBoth m source dest clk (if offers then some next else none) accepts σ model with
+  | next, σ, model, t :: rest =>
+      let stepped : Except EvalError (State × AbstractFifoModel) :=
+        if t.reset then
+          match rst with
+          | none => .error noResetSpec
+          | some r => do return (← resetBoth m source dest r σ, model.reset)
+        else
+          let clk := if t.writeClock then source.clock else dest.clock
+          stepBoth m source dest rst clk (if t.offers then some next else none) t.accepts σ model
+      match stepped with
       | .error _ => false
       | .ok (σ', model') =>
           abstraction depth σ' == some model'
             && decide (model'.count ≤ model'.depth)
-            && refinesAlong m depth source dest abstraction
-                 (if offers then next + 1 else next) σ' model' rest
+            && refinesAlong m depth source dest rst abstraction
+                 (if t.offers then next + 1 else next) σ' model' rest
 
 /-- Whether the design refines the model along every one of `schedules`.
 
 `abstraction` is how to read a model state out of this design's concrete one, and is the only
 thing an implementation has to supply. `warm` runs two idle ticks first, which a design whose
-flags are not valid at power-up needs; `asyncFifo` is one such and `shiftFifo4` is not. -/
+flags are not valid at power-up needs; `asyncFifo` is one such and `shiftFifo4` is not. `rst` is
+needed only by schedules that actually assert reset. -/
 def refinesAlongAll (m : Module) (depth : Nat) (source dest : AxisPort) (schedules : List Schedule)
-    (abstraction : Nat → State → Option AbstractFifoModel) (warm : Bool := true) :
-    Bool :=
-  match (if warm then warmUp m source dest else .ok m.initState) with
+    (abstraction : Nat → State → Option AbstractFifoModel) (warm : Bool := true)
+    (rst : Option ResetSpec := none) : Bool :=
+  match (if warm then warmUp m source dest rst else .ok m.initState) with
   | .error _ => false
   | .ok σ =>
       schedules.all
-        (refinesAlong m depth source dest abstraction 1 σ (AbstractFifoModel.empty depth))
+        (refinesAlong m depth source dest rst abstraction 1 σ (AbstractFifoModel.empty depth))
 
-/-- One tick, tracking contents. Yields `none` when the design hands out a word that is not the
-one the model says is next -- including handing one out when the model has nothing, which is what
-reading a drained FIFO would look like. -/
-private def stepQueue (m : Module) (source dest : AxisPort) (clk : Name)
+/-! ### The contents check -/
+
+/-- One tick, tracking contents. Yields `none` when the design offers a word that is not the one
+the model says is next.
+
+The check fires on `valid`, not on a completed transfer. That is the stronger statement and the
+one a consumer actually relies on: **whenever the design asserts `m.valid`, `m.data` is the oldest
+word that was written into the FIFO.** Checking only at transfer time would accept a design that
+drives the right word exactly when `m.ready` happens to be high and garbage otherwise -- which is
+what `dataOnlyWhenReady_rejected` exhibits. It also rules out asserting `m.valid` with nothing in
+the FIFO, since an empty model has no head for the data to match. -/
+private def stepQueue (m : Module) (source dest : AxisPort) (rst : Option ResetSpec) (clk : Name)
     (offer : Option Nat) (accept : Bool) (σ : State) (model : AbstractQueueModel) :
     Except EvalError (Option (State × AbstractQueueModel)) := do
-  let inputs : State :=
+  let driven : State :=
     [ (source.valid, Value.ofNat 1 (if offer.isSome then 1 else 0)),
       (source.data, Value.ofNat source.width (offer.getD 0)),
       (dest.ready, Value.ofNat 1 (if accept then 1 else 0)) ]
+  let inputs : State := driven ++ resetInputs rst false
   let settled ← m.settle (σ.apply inputs)
   let wrote := offer.isSome && settled.valueOf? source.ready == some 1 && clk == source.clock
-  let took := accept && settled.valueOf? dest.valid == some 1 && clk == dest.clock
+  let offering := settled.valueOf? dest.valid == some 1
+  let took := accept && offering && clk == dest.clock
   let emitted := settled.valueOf? dest.data
   let σ' ← m.stepClock clk settled inputs
-  if took && emitted != model.queue.head? then
+  if offering && emitted != model.queue.head? then
     return none
   let model := if wrote then model.push (offer.getD 0) else model
   let model := if took then model.popped else model
   return some (σ', model)
 
 private def refinesQueueAlong (m : Module) (depth : Nat) (source dest : AxisPort)
-    (abstraction : Nat → State → Option AbstractQueueModel) :
+    (rst : Option ResetSpec) (abstraction : Nat → State → Option AbstractQueueModel) :
     Nat → State → AbstractQueueModel → Schedule → Bool
   | _, _, _, [] => true
-  | next, σ, model, (writeClock, offers, accepts) :: rest =>
-      let clk := if writeClock then source.clock else dest.clock
-      match stepQueue m source dest clk (if offers then some next else none) accepts σ model with
+  | next, σ, model, t :: rest =>
+      let stepped : Except EvalError (Option (State × AbstractQueueModel)) :=
+        if t.reset then
+          match rst with
+          | none => .error noResetSpec
+          | some r => do return some (← resetBoth m source dest r σ, model.reset)
+        else
+          let clk := if t.writeClock then source.clock else dest.clock
+          stepQueue m source dest rst clk (if t.offers then some next else none) t.accepts σ model
+      match stepped with
       | .error _ => false
       | .ok none => false
       | .ok (some (σ', model')) =>
           abstraction depth σ' == some model'
             && decide (model'.queue.length ≤ model'.depth)
-            && refinesQueueAlong m depth source dest abstraction
-                 (if offers then next + 1 else next) σ' model' rest
+            && refinesQueueAlong m depth source dest rst abstraction
+                 (if t.offers then next + 1 else next) σ' model' rest
 
 /-- Whether the design refines the *contents* model along every one of `schedules`.
 
@@ -154,25 +260,33 @@ Offered words are a counter from 1, so every word in flight is distinct and dist
 the zeros an untouched memory holds. -/
 def refinesQueueAll (m : Module) (depth : Nat) (source dest : AxisPort)
     (schedules : List Schedule)
-    (abstraction : Nat → State → Option AbstractQueueModel) (warm : Bool := true) : Bool :=
-  match (if warm then warmUp m source dest else .ok m.initState) with
+    (abstraction : Nat → State → Option AbstractQueueModel) (warm : Bool := true)
+    (rst : Option ResetSpec := none) : Bool :=
+  match (if warm then warmUp m source dest rst else .ok m.initState) with
   | .error _ => false
   | .ok σ =>
       schedules.all
-        (refinesQueueAlong m depth source dest abstraction 1 σ (AbstractQueueModel.empty depth))
+        (refinesQueueAlong m depth source dest rst abstraction 1 σ
+          (AbstractQueueModel.empty depth))
 
+/-! ### Schedule families
 
-/-- `writes` write ticks, then `reads` read ticks, repeated `rounds` times. -/
-def burst (writes reads rounds : Nat) : Schedule :=
-  (List.replicate rounds
-    (List.replicate writes (true, true, false)
-      ++ List.replicate reads (false, false, true))).flatten
+The reset-free families come first and are unchanged in content: `allSchedules 4` is still 4096
+schedules of four ticks, so the results stated over them mean exactly what they meant. Reset gets
+its own families rather than a free bit in these, because a free bit doubles the count per tick --
+`allSchedules 4` would go from 4096 to 65536 -- for coverage that targeted injection gets more
+cheaply.
+-/
 
-/-- Every burst pattern up to six writes and six reads, over four rounds: 49 schedules of up to
-48 ticks each. These are the ones that fill the FIFO and wrap its pointers. -/
-def burstSchedules : List Schedule :=
-  (List.range 7).flatMap fun writes => (List.range 7).map fun reads => burst writes reads 4
-
+/-- Every schedule of a given length -- `8 ^ length` of them. Reset is never asserted. -/
+def allSchedules : Nat → List Schedule
+  | 0 => [[]]
+  | n + 1 =>
+      (allSchedules n).flatMap fun rest =>
+        [false, true].flatMap fun writeClock =>
+          [false, true].flatMap fun offers =>
+            [false, true].map fun accepts =>
+              ({ writeClock, offers, accepts } : Tick) :: rest
 
 /-- Every schedule of a given length for a single-clock design. The clock bit is pinned, because
 both ports tick together -- leaving it free would just duplicate each schedule. `4 ^ length`. -/
@@ -181,7 +295,53 @@ def allSingleClockSchedules : Nat → List Schedule
   | n + 1 =>
       (allSingleClockSchedules n).flatMap fun rest =>
         [false, true].flatMap fun offers =>
-          [false, true].map fun accepts => (true, offers, accepts) :: rest
+          [false, true].map fun accepts =>
+            ({ writeClock := true, offers, accepts } : Tick) :: rest
 
+/-- `writes` write ticks, then `reads` read ticks, repeated `rounds` times. -/
+def burst (writes reads rounds : Nat) : Schedule :=
+  (List.replicate rounds
+    (List.replicate writes ({ writeClock := true, offers := true, accepts := false } : Tick)
+      ++ List.replicate reads
+           ({ writeClock := false, offers := false, accepts := true } : Tick))).flatten
+
+/-- Every burst pattern up to six writes and six reads, over four rounds: 49 schedules of up to
+48 ticks each. These are the ones that fill the FIFO and wrap its pointers. -/
+def burstSchedules : List Schedule :=
+  (List.range 7).flatMap fun writes => (List.range 7).map fun reads => burst writes reads 4
+
+/-! ### Reset families -/
+
+/-- A tick that takes the design through reset, offering and accepting nothing. -/
+def resetTick : Tick :=
+  { writeClock := true, offers := false, accepts := false, reset := true }
+
+/-- Insert a reset tick `k` ticks into a schedule, keeping the rest of it. Appends at the end if
+`k` is past the end, which is harmless and keeps the function total. -/
+def resetAfter (k : Nat) (s : Schedule) : Schedule := s.take k ++ resetTick :: s.drop k
+
+/-- The burst family with a reset injected part-way through: 147 schedules.
+
+Three injection points rather than every one. What has to be exercised is reset landing on a FIFO
+that is *holding words* and the run continuing correctly afterwards, and the 49 burst patterns
+already vary how full it is at any given tick -- so varying the burst is the cheaper axis. The
+points are odd numbers so that they do not land on a round boundary in every pattern. -/
+def burstResetSchedules : List Schedule :=
+  burstSchedules.flatMap fun s => [5, 11, 23].map fun k => resetAfter k s
+
+/-- Every burst schedule opened by a reset, which is how a design is meant to start. -/
+def resetFirstSchedules : List Schedule := burstSchedules.map (resetAfter 0)
+
+/-- Every schedule of a given length for a single-clock design with the reset bit free as well:
+`8 ^ length`. Small lengths only -- this is the exhaustive family, and reset triples its branching
+factor. -/
+def allSingleClockResetSchedules : Nat → List Schedule
+  | 0 => [[]]
+  | n + 1 =>
+      (allSingleClockResetSchedules n).flatMap fun rest =>
+        [false, true].flatMap fun reset =>
+          [false, true].flatMap fun offers =>
+            [false, true].map fun accepts =>
+              ({ writeClock := true, offers, accepts, reset } : Tick) :: rest
 
 end CircuitHdl
