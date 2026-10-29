@@ -310,6 +310,35 @@ def Module.runClocks (m : Module) (σ : State) :
       let σ' ← m.stepClock clk σ inputs
       .ok (σ' :: (← m.runClocks σ' rest))
 
+/-! ### Simulators
+
+A testbench needs three things from whatever it is driving: where to start, how to settle, and how
+to take an edge on one clock. Bundling them lets the same testbench drive a `Module` under the
+evaluator above *or* the same design after `Module.toNetlist`, under `CircuitHdl.NetlistSemantics`
+-- which is the only reason this exists. The alternative, making the harness generic over a class,
+buys nothing: there are two implementations and neither needs dispatch.
+
+Both implementations key their state by the source module's own signal names, so an abstraction
+function written against one works against the other unchanged.
+-/
+
+/-- Everything driving a design requires, independent of how the design is represented. -/
+structure Sim where
+  /-- Every signal at its power-up value. -/
+  init : State
+  /-- Run the combinational logic to a settled state. -/
+  settle : State → Except EvalError State
+  /-- One tick of one clock: settle, take that clock's edge, settle again. -/
+  stepClock : Name → State → State → Except EvalError State
+
+/-- The evaluator in this file, as a `Sim`. -/
+def Module.sim (m : Module) : Sim :=
+  { init := m.initState, settle := m.settle, stepClock := m.stepClock }
+
+/-- So that a testbench written against `Sim` still reads `refinesAlongAll fifo4 ..`, with the
+design named directly. -/
+instance : CoeHead Module Sim := ⟨Module.sim⟩
+
 /-- The value of a single scalar signal, for reading results out of a simulation. -/
 def State.valueOf? (σ : State) (x : Name) : Option Nat :=
   match σ.lookup x with

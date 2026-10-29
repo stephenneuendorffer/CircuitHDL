@@ -9,6 +9,10 @@ Generic over the design and over how to read a model state out of a concrete one
 machinery serves `asyncFifo` and `shiftFifo4` -- which share no structure beyond their interface.
 An implementation supplies an abstraction function; everything else is here.
 
+It is also generic over the *semantics*. What it drives is a `Sim` rather than a `Module`, so one
+check can serve more than one meaning of a design. A `Module` coerces to its own `Sim`, which is
+why every call here still names a design directly.
+
 Two checks, one per model:
 
 * `refinesAlongAll` -- the design's occupancy matches `AbstractFifoModel` at every tick, and stays
@@ -105,7 +109,7 @@ equivalence -- a tick on which the design conservatively refuses simply leaves t
 
 Reset is driven *low* here rather than left alone. The state persists between ticks, so a reset
 asserted on the previous tick would otherwise still be asserted on this one. -/
-private def stepBoth (m : Module) (source dest : AxisPort) (rst : Option ResetSpec) (clk : Name)
+private def stepBoth (m : Sim) (source dest : AxisPort) (rst : Option ResetSpec) (clk : Name)
     (offer : Option Nat) (accept : Bool) (σ : State) (model : AbstractFifoModel) :
     Except EvalError (State × AbstractFifoModel) := do
   let driven : State :=
@@ -128,7 +132,7 @@ each clock domain.
 Both domains, because that is the only reset event the abstract models can describe -- they hold
 one count, and a design with one pointer cleared and the other not does not have one. The second
 edge is skipped when the two ports share a clock, so a single-clock design sees exactly one. -/
-private def resetBoth (m : Module) (source dest : AxisPort) (r : ResetSpec) (σ : State) :
+private def resetBoth (m : Sim) (source dest : AxisPort) (r : ResetSpec) (σ : State) :
     Except EvalError State := do
   let idle : State :=
     [ (source.valid, Value.ofNat 1 0),
@@ -151,10 +155,10 @@ opens with the same two ticks and for the same reason.
 A schedule that opens with a reset tick reaches the same place and does not need this -- see
 `reset_replaces_warmup`. Warm-up survives because it is the only option for a design with no reset
 port at all, and because the existing results are stated in terms of it. -/
-private def warmUp (m : Module) (source dest : AxisPort) (rst : Option ResetSpec) :
+private def warmUp (m : Sim) (source dest : AxisPort) (rst : Option ResetSpec) :
     Except EvalError State := do
   let (σ, _) ←
-    stepBoth m source dest rst source.clock none false m.initState (AbstractFifoModel.empty 0)
+    stepBoth m source dest rst source.clock none false m.init (AbstractFifoModel.empty 0)
   let (σ, _) ← stepBoth m source dest rst dest.clock none false σ (AbstractFifoModel.empty 0)
   return σ
 
@@ -165,7 +169,7 @@ occupancy, and that the occupancy is within the depth.
 
 Offered values are a counter rather than a fixed word: nothing here observes data, but distinct
 values keep a run from passing by accident on a design that writes the wrong word. -/
-private def refinesAlong (m : Module) (depth : Nat) (source dest : AxisPort)
+private def refinesAlong (m : Sim) (depth : Nat) (source dest : AxisPort)
     (rst : Option ResetSpec) (abstraction : Nat → State → Option AbstractFifoModel) :
     Nat → State → AbstractFifoModel → Schedule → Bool
   | _, _, _, [] => true
@@ -192,10 +196,10 @@ private def refinesAlong (m : Module) (depth : Nat) (source dest : AxisPort)
 thing an implementation has to supply. `warm` runs two idle ticks first, which a design whose
 flags are not valid at power-up needs; `asyncFifo` is one such and `shiftFifo4` is not. `rst` is
 needed only by schedules that actually assert reset. -/
-def refinesAlongAll (m : Module) (depth : Nat) (source dest : AxisPort) (schedules : List Schedule)
+def refinesAlongAll (m : Sim) (depth : Nat) (source dest : AxisPort) (schedules : List Schedule)
     (abstraction : Nat → State → Option AbstractFifoModel) (warm : Bool := true)
     (rst : Option ResetSpec := none) : Bool :=
-  match (if warm then warmUp m source dest rst else .ok m.initState) with
+  match (if warm then warmUp m source dest rst else .ok m.init) with
   | .error _ => false
   | .ok σ =>
       schedules.all
@@ -212,7 +216,7 @@ word that was written into the FIFO.** Checking only at transfer time would acce
 drives the right word exactly when `m.ready` happens to be high and garbage otherwise -- which is
 what `dataOnlyWhenReady_rejected` exhibits. It also rules out asserting `m.valid` with nothing in
 the FIFO, since an empty model has no head for the data to match. -/
-private def stepQueue (m : Module) (source dest : AxisPort) (rst : Option ResetSpec) (clk : Name)
+private def stepQueue (m : Sim) (source dest : AxisPort) (rst : Option ResetSpec) (clk : Name)
     (offer : Option Nat) (accept : Bool) (σ : State) (model : AbstractQueueModel) :
     Except EvalError (Option (State × AbstractQueueModel)) := do
   let driven : State :=
@@ -232,7 +236,7 @@ private def stepQueue (m : Module) (source dest : AxisPort) (rst : Option ResetS
   let model := if took then model.popped else model
   return some (σ', model)
 
-private def refinesQueueAlong (m : Module) (depth : Nat) (source dest : AxisPort)
+private def refinesQueueAlong (m : Sim) (depth : Nat) (source dest : AxisPort)
     (rst : Option ResetSpec) (abstraction : Nat → State → Option AbstractQueueModel) :
     Nat → State → AbstractQueueModel → Schedule → Bool
   | _, _, _, [] => true
@@ -258,11 +262,11 @@ private def refinesQueueAlong (m : Module) (depth : Nat) (source dest : AxisPort
 
 Offered words are a counter from 1, so every word in flight is distinct and distinguishable from
 the zeros an untouched memory holds. -/
-def refinesQueueAll (m : Module) (depth : Nat) (source dest : AxisPort)
+def refinesQueueAll (m : Sim) (depth : Nat) (source dest : AxisPort)
     (schedules : List Schedule)
     (abstraction : Nat → State → Option AbstractQueueModel) (warm : Bool := true)
     (rst : Option ResetSpec := none) : Bool :=
-  match (if warm then warmUp m source dest rst else .ok m.initState) with
+  match (if warm then warmUp m source dest rst else .ok m.init) with
   | .error _ => false
   | .ok σ =>
       schedules.all
