@@ -1,4 +1,5 @@
 import CircuitHdl
+import Veir.Interpreter.Netlist
 import CircuitHdl.Examples.AbstractFifoModel
 import CircuitHdl.Examples.AbstractQueueModel
 
@@ -9,9 +10,12 @@ Generic over the design and over how to read a model state out of a concrete one
 machinery serves `asyncFifo` and `shiftFifo4` -- which share no structure beyond their interface.
 An implementation supplies an abstraction function; everything else is here.
 
-It is also generic over the *semantics*. What it drives is a `Sim` rather than a `Module`, so one
-check can serve more than one meaning of a design. A `Module` coerces to its own `Sim`, which is
-why every call here still names a design directly.
+It is also generic over the *semantics*. What it drives is a `Sim`, so the same check runs a design
+under `CircuitHdl.Semantics` or the same design after `Module.toNetlist` under
+`CircuitHdl.NetlistSemantics`. A `Module` coerces to its own `Sim`, which is why every call here
+still names a design directly. The point of that is in each test file's final section: a refinement
+result at the `Module` level says nothing about what would be synthesised, and re-running the very
+same check through the lowered netlist is what makes it say something.
 
 Two checks, one per model:
 
@@ -272,6 +276,171 @@ def refinesQueueAll (m : Sim) (depth : Nat) (source dest : AxisPort)
       schedules.all
         (refinesQueueAlong m depth source dest rst abstraction 1 σ
           (AbstractQueueModel.empty depth))
+
+/-! ### Driving the lowered design
+
+`Veir.Netlist` simulates a `hw.module`; the harness drives a `Sim` keyed by the source module's
+own signal names. This is the join between them, and it is the whole reason the netlist checks can
+reuse the abstraction functions written for the evaluator: the names the FIFO tests read --
+`count`, `r0`, `wbin`, `mem`, and the handshake ports -- all survive the lowering, registers and
+memories as `seq.firreg`/`seq.firmem` name attributes and ports as `hw.modty` port names.
+
+Unnamed wires (`wfire`, `widx`) do not survive, and nothing here needs them.
+-/
+
+structure VeirBridge where
+  ctx : Veir.WfIRContext Veir.OpCode
+  info : Veir.Netlist.Info
+  /-- Module input ports in block-argument order, with their widths. -/
+  inputs : Array (Name × Nat)
+  /-- Output ports in `hw.output` operand order. -/
+  outputs : Array (Name × Nat)
+  /-- Register names, parallel to `info.regs`. -/
+  regNames : Array Name
+  /-- Memory names, parallel to `info.mems`. -/
+  memNames : Array Name
+  /-- A zeroed state, so `decode` does not rebuild one every tick. -/
+  blank : Veir.Netlist.State
+  /-- Register widths, parallel to `info.regs`. -/
+  regWidths : Array Nat
+
+private def attrName (s : Veir.StringAttr) : Name := Name.mkSimple (String.fromUTF8! s.value)
+
+/-- Descend from the top-level `builtin.module` to the `hw.module` inside it. -/
+def hwModuleOf (ctx : Veir.WfIRContext Veir.OpCode) (top : Veir.OperationPtr) :
+    Option Veir.OperationPtr := do
+  if top.getNumRegions! ctx.raw == 0 then none
+  let region := top.getRegion! ctx.raw 0
+  let some block := region.getFirstBlock! ctx.raw | none
+  block.getFirstOp! ctx.raw
+
+/-- The bridge over an IR context the caller already has -- and may have altered. Separate from
+`VeirBridge.of` so that a test can perturb the built IR and drive the result, which is how the
+netlist checks are shown to be reading the operations at all. -/
+def VeirBridge.ofVeir (m : Module) (ctx : Veir.WfIRContext Veir.OpCode)
+    (top : Veir.OperationPtr) : Option VeirBridge := do
+  let some hwModule := hwModuleOf ctx top | none
+  let some info := Veir.Netlist.Info.of ctx hwModule | none
+  let mut regNames : Array Name := #[]
+  for (op, _) in info.regs do
+    regNames := regNames.push (attrName (op.getProperties! ctx.raw (Veir.OpCode.seq Veir.Seq.firreg)).name)
+  let mut memNames : Array Name := #[]
+  for (op, _) in info.mems do
+    let props := op.getProperties! ctx.raw (Veir.OpCode.seq Veir.Seq.firmem)
+    let some nm := props.name | none
+    memNames := memNames.push (attrName nm)
+  let some blank := Veir.Netlist.State.init ctx info | none
+  let mut regWidths : Array Nat := #[]
+  for (op, _) in info.regs do
+    let some cur := blank.regs[op.id]? | none
+    regWidths := regWidths.push (match cur with | .int w _ => w | _ => 0)
+  return { ctx, info, inputs := m.inputs.toArray, outputs := m.outputs.toArray,
+           regNames, memNames, blank, regWidths }
+
+def VeirBridge.of (m : Module) : Option VeirBridge := do
+  let .ok (ctx, top) := m.toVeir | none
+  VeirBridge.ofVeir m ctx top
+
+private def rv (w v : Nat) : Veir.RuntimeValue := .int w (.val (BitVec.ofNat w v))
+
+private def toNat? (v : Veir.RuntimeValue) : Option Nat :=
+  match v with
+  | .int _ (.val b) => some b.toNat
+  | _ => none
+
+/-- Decode the harness's `State` into the simulator's. -/
+private def decode (b : VeirBridge) (σ : State) : Option (Array Veir.RuntimeValue × Veir.Netlist.State) := do
+  let mut args : Array Veir.RuntimeValue := #[]
+  for (x, w) in b.inputs do
+    args := args.push (rv w ((σ.valueOf? x).getD 0))
+  let mut regs := b.blank.regs
+  for (rg, i) in b.info.regs.zipIdx do
+    let (op, _) := rg
+    let some nm := b.regNames[i]? | none
+    let some w := b.regWidths[i]? | none
+    regs := regs.setIfInBounds op.id (rv w ((σ.valueOf? nm).getD 0))
+  let mut st : Veir.Netlist.State := { b.blank with regs }
+  for (memEntry, i) in b.info.mems.zipIdx do
+    let (op, memType) := memEntry
+    let some nm := b.memNames[i]? | none
+    match σ.memOf? nm with
+    | some words =>
+        let contents := (words.map (rv memType.width)).toArray
+        st := { st with mems := st.mems.setIfInBounds op.id contents }
+    | none => pure ()
+  return (args, st)
+
+/-- Write the simulator's state and settled outputs back into the harness's `State`. -/
+private def encode (b : VeirBridge) (st : Veir.Netlist.State)
+    (vals : Array Veir.RuntimeValue) (σ : State) : Option State := do
+  let mut out := σ
+  for (rg, i) in b.info.regs.zipIdx do
+    let (op, _) := rg
+    let some nm := b.regNames[i]? | none
+    let some v := st.regs[op.id]? | none
+    let some n := toNat? v | none
+    let w := match v with | .int w _ => w | _ => 0
+    out := out.set nm (Value.ofNat w n)
+  for (memEntry, i) in b.info.mems.zipIdx do
+    let (op, memType) := memEntry
+    let some nm := b.memNames[i]? | none
+    let some words := st.mems[op.id]? | none
+    let some ns := words.mapM toNat? | none
+    out := out.setCell nm (.mem (ns.toList.map (Value.ofNat memType.width)))
+  let some outs := Veir.Netlist.outputs b.ctx b.info vals | none
+  for (port, i) in b.outputs.zipIdx do
+    let (x, w) := port
+    let some v := outs[i]? | none
+    let some n := toNat? v | none
+    out := out.set x (Value.ofNat w n)
+  return out
+
+private def fail : EvalError := .check (.unbound `veir_bridge)
+
+def VeirBridge.sim (b : VeirBridge) : Sim :=
+  { init :=
+      (b.inputs.toList.map (fun (x, w) => (x, Cell.sig (Value.ofNat w 0))))
+      ++ (b.outputs.toList.map (fun (x, w) => (x, Cell.sig (Value.ofNat w 0))))
+      ++ (b.regNames.toList.zipIdx.map (fun (nm, i) =>
+            (nm, Cell.sig (Value.ofNat (match b.info.regs[i]? with
+              | some (op, _) => match (Veir.Netlist.State.init b.ctx b.info).bind (·.regs[op.id]?) with
+                | some (.int w _) => w
+                | _ => 0
+              | none => 0) 0))))
+      ++ (b.memNames.toList.zipIdx.map (fun (nm, i) =>
+            (nm, Cell.mem (match b.info.mems[i]? with
+              | some (_, mt) => List.replicate mt.depth (Value.ofNat mt.width 0)
+              | none => []))))
+    settle := fun σ => do
+      let some (args, st) := decode b σ | .error fail
+      let some (vals, _) := Veir.Netlist.settle b.ctx b.info args st | .error fail
+      let some σ' := encode b st vals σ | .error fail
+      return σ'
+    stepClock := fun clk σ inputs => do
+      let σ := σ.apply inputs
+      let some (args, st) := decode b σ | .error fail
+      let some clkIdx := b.inputs.findIdx? (·.1 == clk) | .error fail
+      let some st' := Veir.Netlist.stepClock b.ctx b.info clkIdx args st | .error fail
+      let some (vals, _) := Veir.Netlist.settle b.ctx b.info args st' | .error fail
+      let some σ' := encode b st' vals σ | .error fail
+      return σ' }
+
+/-- The design as `CircuitHdl.Circt` lowers it, as something the two checks above can drive.
+
+A lowering failure becomes a `Sim` whose every step errors, so a theorem stated over it comes out
+`false`. The alternative -- falling back to the `Module` -- would make a design that does not lower
+at all *pass* its netlist checks, which is the one result that must not be reachable. -/
+def lowered (m : Module) : Sim :=
+  match VeirBridge.of m with
+  | some b => b.sim
+  | none => { init := [], settle := fun _ => .error fail, stepClock := fun _ _ _ => .error fail }
+
+/-- The same, over an IR context supplied by the caller. -/
+def loweredFrom (m : Module) (ctx : Veir.WfIRContext Veir.OpCode) (top : Veir.OperationPtr) : Sim :=
+  match VeirBridge.ofVeir m ctx top with
+  | some b => b.sim
+  | none => { init := [], settle := fun _ => .error fail, stepClock := fun _ _ _ => .error fail }
+
 
 /-! ### Schedule families
 

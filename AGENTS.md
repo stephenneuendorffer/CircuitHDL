@@ -29,9 +29,13 @@ file passes `lake build` and fails `lake test`. Use `lake test` before claiming 
   `firtool-1.162`-era veir; if you see that error, check `git log` in `../veir` first.
 - A veir rebuild is ~2.5 minutes. Budget for it.
 
-Only `CircuitHdl/Circt.lean` may import VeIR. The rest of the package builds on core `Lean` and
-`BitVec` alone — no Mathlib — and that is worth preserving. `le_of_eq` and friends do not exist;
-use `Nat.le_of_eq`.
+`CircuitHdl/Circt.lean` and `CircuitHdlTest/FifoHarness.lean` import VeIR — the lowering, and the
+bridge from VeIR's netlist simulator to the test harness. The rest of the package builds on core
+`Lean` and `BitVec` alone — no Mathlib — and that is worth preserving. `le_of_eq` and friends do
+not exist; use `Nat.le_of_eq`.
+
+**VeIR is on the proving path.** The netlist refinement theorems execute `Veir.Netlist`, so a
+change in `../veir` can turn them red, and a rebuild there is ~2.5 minutes before you see it.
 
 ## Tests are compile-time, and a test is not a proof
 
@@ -136,6 +140,75 @@ Things that cost time to get right:
   MLIR infers it, and real CIRCT rejects the attribute if present. `write_port` and
   `read_write_port` do take them. VeIR's `Seq.propertiesOf` already encodes this.
 
+### The lowered form has its own semantics, and three layers check it
+
+A refinement theorem about a design is a theorem about `CircuitHdl/Semantics.lean` and about
+nothing that would be built. Three things close that gap, and they overlap less than they look:
+
+| Where | What it compares | Trust |
+|---|---|---|
+| `CircuitHdlTest/{ShiftFifo,AsyncFifo}.lean`, final sections | the same refinement checks re-run on `lowered design` | `native_decide`, bounded by schedule |
+| `#guard_msgs` in `CircuitHdlTest/Circt.lean` | what `Veir.Printer` makes of the built IR | kernel |
+
+The harness in `CircuitHdlTest/FifoHarness.lean` drives a `Sim`, not a `Module`, which is what
+lets one check serve both semantics. `Module` coerces to `Sim`; `lowered m` builds the IR and
+wraps `Veir.Netlist` around it.
+
+**The netlist semantics lives in `../veir`, not here.** `Veir/Interpreter/Netlist.lean` simulates
+a `hw.module`; `Veir/Data/Comb/Basic.lean` and `Veir/Dialects/Comb/OpInfo.lean` say what the
+operations mean. That is on purpose and it is the point: a semantics written in the same file as
+the lowering agrees with it by construction and catches nothing. Keeping it upstream makes it
+genuinely third-party to the thing it checks -- and it is how VeIR got a `comb`/`seq` interpreter
+it did not have. **Do not reimplement any of it in this repository.**
+
+`VeirBridge` in `CircuitHdlTest/FifoHarness.lean` is the join: it keys the simulator's state by
+the source module's own names, which works because the lowering preserves them -- registers and
+memories as `seq.firreg`/`seq.firmem` `name` attributes, ports as `hw.modty` port names. Unnamed
+wires (`wfire`, `widx`) do not survive and nothing needs them.
+
+Five lowering mutations, all currently caught — swap `adaptWidth`'s `comb.concat` operands (2
+failures in `CircuitHdlTest/Circt.lean`), force `comb.extract`'s `lowBit` to 0 (5 in `AsyncFifo`),
+set `ruw = new` (7 in `AsyncFifo`), swap the `if`-reconciliation mux arms (12 in `ShiftFifo`), and
+lower `comb.and` as `comb.or` (11 in `ShiftFifo`). If you change the lowering, re-run them.
+
+#### What the VeIR simulator refuses
+
+`ruw` other than `old`, `wuw` other than `port_order`, a non-zero read latency or a write latency
+other than one, `seq.firmem.read_write_port`, an asynchronous reset, a `preset`, a clock that is
+not a `seq.to_clock` of a block argument, a wrong number of arguments, and any operand used before
+it is defined. Each is a real CIRCT behaviour it does not model, and it returns `none` rather than
+simulating something else.
+
+**`isAsync` and `preset` were listed in that paragraph before they were implemented.** The header
+said they were refused; the code did not check, so a `seq.firreg` with an asynchronous reset would
+have simulated as an ordinary synchronous one. Nothing caught it because nothing tested it.
+`UnitTest/Netlist.lean`'s `testRefusals` does now, and pairs every case with the unaltered module
+so a refusal is known to be about the thing that changed.
+
+#### Performance, measured
+
+Simulating VeIR IR is slower than a bespoke flat netlist would be, and two things kept it close:
+`Veir.Netlist.Info` caches a flat execution plan (opcode, operands, result types) per operation so
+a settle does not re-read the arena, and `settle` uses a parallel `defined : Array Bool` rather
+than `Array (Option RuntimeValue)` so it does not allocate per value. Those two took one theorem
+from 9.0s to 5.5s against 2.6s for the old in-repo semantics -- about 2.1x. **Do not use
+`VariableState` in that loop**: it is a hash map carrying proof fields with a `Conforms` check on
+every write, which is right for a rewriter and wrong for a `native_decide`.
+
+Whole-file costs: `CircuitHdlTest/ShiftFifo.lean` 41s → 65s, `AsyncFifo.lean` 85s → 101s.
+
+#### Trust, checked rather than assumed
+
+`#print axioms` on a netlist theorem should show `propext`, `Classical.choice`, `Quot.sound` and
+its own `_native.native_decide.ax_*`, and **nothing else** — the same footing the in-repo
+semantics had.
+
+It did not, at first. `Veir.Netlist.settle` called the global `Veir.interpretOp'`, which is one
+match over every dialect, so a FIFO theorem that never loads a byte picked up
+`Veir.MemoryState.llvmLoad._native.bv_decide.ax_8` and `…loadByte64…ax_5` from the LLVM memory
+model. The driver now dispatches `comb` and `hw` directly and refuses everything else, which drops
+them. **If you touch that dispatch, re-run `#print axioms`** — nothing else would have noticed.
+
 ### firtool
 
 Installed at `/proj/xsjhdstaff2/stephenn/tools/circt-1.113.0/firtool-1.113.0/bin`. **Do not
@@ -169,7 +242,15 @@ This codebase is about proving things, and the same standard applies to claims m
 
 - A `#guard` that cannot fail proves nothing. When adding one, break the thing it checks and
   confirm it goes red. Several assertions here survived only because that caught them passing
-  vacuously.
+  vacuously. In `../veir` the form is `#guard_msgs in #eval! test` returning `"ok"`, and the
+  mutation shows up as the returned string, which is why each check returns a *different* message
+  rather than a bare `false`. The netlist work added two: a perturbation control that passed
+  because the bent design merely became *conservative* (refinement is built to tolerate a FIFO
+  that refuses), and a check in `Module.toVeir` that counted the registers it had just patched in
+  the loop that patched them, so the count could only ever agree with itself.
+- **Mutate the thing you are checking, not the checker.** Mutating `../veir`'s comb/seq semantics
+  tells you VeIR's unit tests bite; only mutating `Circt.lean` tells you the design-level theorems
+  do.
 - Before writing "the theorems already cover this" or "X is load-bearing", mutate X and see. Two
   justifications in the model unit tests were written, checked, and found false that way.
 - Negative controls belong next to the results they protect: `wrap_correction_matters`,

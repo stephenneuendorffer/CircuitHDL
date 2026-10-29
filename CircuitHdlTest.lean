@@ -35,4 +35,10 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 tick where `valid` is asserted rather than only at a transfer
 - `CircuitHdlTest.ShiftFifo` -- the shift-register FIFO: that it carries traffic, and that it
                                 refines the same two models by entirely different means
+
+`ShiftFifo` and `AsyncFifo` each end by re-running their refinement checks against the design as
+`CircuitHdl.Circt` lowers it, under `Veir.Netlist` -- the same harness, schedules and abstraction
+functions, a different semantics underneath, and one written in another repository. Those results are what connect the
+proofs to something that would be synthesised. `scripts/arccheck.sh` is the layer below them, and
+is not run by `lake test`; `AGENTS.md` says why.
 -/
