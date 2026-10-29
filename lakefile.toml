@@ -20,3 +20,10 @@ name = "CircuitHdl"
 
 [[lean_lib]]
 name = "CircuitHdlTest"
+
+# The arcilator cross-check generator. Writes build/arc/*.{mlir,expected}; scripts/arccheck.sh
+# runs them through CIRCT's simulator and diffs. Deliberately *not* a test: it needs a CIRCT
+# install, and `lake test` has to keep working against a bare toolchain.
+[[lean_exe]]
+name = "arccheck"
+root = "ArcCheck"

@@ -149,6 +149,7 @@ nothing that would be built. Three things close that gap, and they overlap less 
 |---|---|---|
 | `CircuitHdlTest/{ShiftFifo,AsyncFifo}.lean`, final sections | the same refinement checks re-run on `lowered design` | `native_decide`, bounded by schedule |
 | `#guard_msgs` in `CircuitHdlTest/Circt.lean` | what `Veir.Printer` makes of the built IR | kernel |
+| `scripts/arccheck.sh` | the **emitted MLIR** under `arcilator` vs `Veir.Netlist` | external, not a theorem |
 
 The harness in `CircuitHdlTest/FifoHarness.lean` drives a `Sim`, not a `Module`, which is what
 lets one check serve both semantics. `Module` coerces to `Sim`; `lowered m` builds the IR and
@@ -165,6 +166,16 @@ it did not have. **Do not reimplement any of it in this repository.**
 the source module's own names, which works because the lowering preserves them -- registers and
 memories as `seq.firreg`/`seq.firmem` `name` attributes, ports as `hw.modty` port names. Unnamed
 wires (`wfire`, `widx`) do not survive and nothing needs them.
+
+**The two layers catch disjoint things, and this was measured rather than assumed:**
+
+| Mutation | netlist theorems | `arccheck.sh` |
+|---|---|---|
+| lowering emits the wrong op | **red** | green -- both sides move together |
+| the netlist semantics misreads an op | green -- it agrees with itself | **red** |
+
+So neither is redundant, and a change that makes `arccheck.sh` pass by editing `Circt.lean` has
+not fixed anything.
 
 Five lowering mutations, all currently caught — swap `adaptWidth`'s `comb.concat` operands (2
 failures in `CircuitHdlTest/Circt.lean`), force `comb.extract`'s `lowBit` to 0 (5 in `AsyncFifo`),
@@ -226,7 +237,7 @@ them. **If you touch that dispatch, re-run `#print axioms`** — nothing else wo
   and the divergence is pinned in `CircuitHdlTest/Circt.lean` so it cannot change quietly. If
   you ever make `module!` accept an address wider than the depth needs, this becomes real.
 
-### firtool
+### firtool and arcilator
 
 Installed at `/proj/xsjhdstaff2/stephenn/tools/circt-1.113.0/firtool-1.113.0/bin`. **Do not
 upgrade blindly**: CIRCT 1.123.0 and later need glibc 2.36+ (`GLIBC_ABI_DT_RELR`) and this host
@@ -241,6 +252,33 @@ firtool --format=mlir --strip-debug-info --disable-all-randomization design.mlir
 `circt-opt --export-verilog` also works but needs `--lower-seq-firmem --lower-seq-to-sv
 --hw-memory-sim` for anything with registers or memory, and then still fails on `sv.macro.decl`
 symbols that firtool's own pipeline supplies.
+
+#### arcilator
+
+Same directory, and it is the only external oracle in the repository:
+
+```sh
+scripts/arccheck.sh          # lake exe arccheck, then arcilator, then diff
+```
+
+There is no Verilog simulator on this host -- no `iverilog`, no `verilator` -- so this, and not a
+Verilog testbench, is the way to run what the backend emits. Things that cost time to establish:
+
+- It **JITs what `Veir.Printer` produces, unmodified** -- including the `^4` block labels and
+  `%arg4_0` argument names, which are not the spelling MLIR's own printer uses. Append a
+  `func.func @main` inside the `builtin.module` block and run `arcilator --run --jit-entry=main`.
+  `ArcCheck.lean` generates that by dropping the printed module's last line and re-adding it.
+- `arc.sim.step` fires `seq.firreg` on a **rising edge of the `i1` feeding `seq.to_clock`**. So
+  one tick of clock `c` is `set_input c = 0; step; set_input c = 1; step`, and holding another
+  clock still leaves its domain unadvanced -- which is how `asyncFifo`'s two domains are driven
+  independently. Drive every clock low once before the first tick or the first edge is missed.
+- `seq.firmem` with `read_port`/`write_port` JITs correctly, `operandSegmentSizes` and all.
+- **It prints values in hex, unprefixed** (`4d`, not `77` and not `0x4d`). `arccheck.sh` converts
+  with `strtonum` rather than having Lean predict the format.
+- Define `hw.constant`s *outside* the `arc.sim.instantiate` region.
+
+What it does **not** cover: `arc.sim.get_port` reads ports only, so registers and memory contents
+are compared only through their effect on the outputs. The netlist theorems are what cover those.
 
 ## Conventions
 
