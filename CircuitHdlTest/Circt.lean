@@ -1,4 +1,5 @@
 import CircuitHdl
+import CircuitHdlTest.FifoHarness
 
 /-!
 Tests for the lowering to the CIRCT dialects.
@@ -141,5 +142,131 @@ private def badWidthMod : Module :=
 
 /-- info: "width mismatch in assignment to 'y': expected 4 bits, got 8 bits" -/
 #guard_msgs in #eval err badWidthMod
+
+
+/-! ### Resizing a memory address
+
+`adaptWidth` widens or narrows a memory address to the width CIRCT gives the port, with a
+`comb.concat` against a zero or a `comb.extract`. **Neither branch is reached by any design in
+`CircuitHdl.Examples`**: `asyncFifo` slices its pointers to exactly `addrW` before indexing, so
+the resize is dead code there.
+
+That was found by mutation rather than by reading -- swapping the concat's operands, which would
+put the zero pad in the low bits and send every write to the wrong address, left the whole suite
+green. `memAdapt` exists only to reach it.
+
+Note what the *first* version of this test got wrong: it read the memory through the same adapted
+address it wrote through, so a wrong address was computed twice, the word was stored and fetched
+from the same wrong place, and the design behaved identically. **Both memories here are read at
+`raddr`, which is already 2 bits and so is not adapted at all.** That asymmetry is the test.
+-/
+
+/-- A memory written through too narrow an address and one written through too wide an address, so
+both arms of `adaptWidth` are emitted. Depth 4 gives a 2-bit port address; `narrow` is 1 bit and
+`wide` is 3. -/
+private def memAdapt : Module :=
+  module! memAdapt (clk : 1, we : 1, narrow : 1, wide : 3, raddr : 2, din : 8)
+      -> (dn : 8, dw : 8) {
+    reg lo[4] : 8;
+    reg hi[4] : 8;
+    assign dn = lo[raddr];
+    assign dw = hi[raddr];
+    always @(posedge clk) {
+      if we {
+        assign lo[narrow] = din;
+        assign hi[wide] = din;
+      } else { }
+    }
+  }
+
+#guard (Module.check memAdapt).isOk
+#guard verifies memAdapt
+
+/-- The opcodes the lowering emitted, as strings, so a guard can name them. -/
+private def opcodesOf (m : Module) : List String :=
+  match m.toVeir with
+  | .error _ => ["<lowering failed>"]
+  | .ok (ctx, top) =>
+    match (do
+      let some hwModule := hwModuleOf ctx top | none
+      let some info := Veir.Netlist.Info.of ctx hwModule | none
+      return info.ops.toList.filterMap fun step =>
+        match step.opType with
+        | .comb .concat => some "comb.concat"
+        | .comb .extract => some "comb.extract"
+        | _ => none) with
+    | some l => l
+    | none => ["<could not read>"]
+
+-- One adaptation per write port; the reads go through `raddr` and need none. The concat's two
+-- operands are both 1 bit wide, so swapping them is exactly the kind of mistake that still
+-- type-checks, still verifies, and silently writes to the wrong address.
+#guard opcodesOf memAdapt = ["comb.concat", "comb.extract"]
+
+/-- Drive both semantics over the same ticks and report whether every observed signal agreed at
+every one. The FIFO test files do this at scale through `refinesAlongAll`; this is the same idea
+sized to one feature. -/
+private def agreesOn (m : Module) (observe : List Name) (ticks : List (Name × State)) : Bool :=
+  Id.run do
+    let a := m.sim
+    let b := lowered m
+    let mut σa := a.init
+    let mut σb := b.init
+    for (clk, ins) in ticks do
+      match a.stepClock clk σa ins, b.stepClock clk σb ins with
+      | .ok x, .ok y =>
+          if observe.any (fun n => x.valueOf? n != y.valueOf? n) then return false
+          σa := x; σb := y
+      | _, _ => return false
+    return true
+
+private def adaptTick (we narrow wide raddr din : Nat) : Name × State :=
+  (`clk, [(`we, Cell.sig (Value.ofNat 1 we)), (`narrow, Cell.sig (Value.ofNat 1 narrow)),
+          (`wide, Cell.sig (Value.ofNat 3 wide)), (`raddr, Cell.sig (Value.ofNat 2 raddr)),
+          (`din, Cell.sig (Value.ofNat 8 din))])
+
+-- Write `lo[1]` through the 1-bit address and `hi[2]` through the 3-bit one, then read every
+-- address back through the unadapted port. A swapped concat puts the `lo` word at 2 rather than
+-- 1; a `comb.extract` at the wrong `lowBit` puts the `hi` word at 1 rather than 2 -- `wide = 2`
+-- is `010`, so bits [1:0] are `2` and bits [2:1] are `1`.
+#guard agreesOn memAdapt [`dn, `dw]
+  [ adaptTick 1 1 2 0 77,
+    adaptTick 0 0 0 0 0, adaptTick 0 0 0 1 0, adaptTick 0 0 0 2 0, adaptTick 0 0 0 3 0 ]
+
+-- And the comparison is not vacuous: the words really did land where the evaluator says.
+#guard (match (lowered memAdapt).stepClock `clk (lowered memAdapt).init (adaptTick 1 1 2 1 77).2 with
+        | .ok σ => (σ.valueOf? `dn, σ.valueOf? `dw)
+        | .error _ => (none, none)) = (some 77, some 0)
+
+/-! #### An address out of range for the depth is where the two semantics part
+
+Found by the same mutation run, and it is a property of the lowering rather than of either
+semantics being wrong.
+
+`CircuitHdl.Semantics` indexes a memory by the address's full value and `State.setMem` raises
+`indexOutOfRange` past the depth. The lowered design cannot: a `seq.firmem` port is `addrW` bits
+wide, so the address is truncated to fit and the write lands somewhere in range. At depth 4 and a
+3-bit address, writing to 5 is an error in the evaluator and a write to address 1 in the netlist.
+
+So `Module.toVeir` is **not** behaviour-preserving for out-of-range addresses -- the source
+semantics is strictly stricter than what would be built. No design in `CircuitHdl.Examples`
+reaches it: `asyncFifo` slices its pointers to exactly `addrW` first, which is why every
+refinement theorem in `CircuitHdlTest.AsyncFifo` holds under both. These pin the divergence so it
+cannot change quietly.
+-/
+
+private def oobTick : Name × State := adaptTick 1 0 5 1 22
+
+-- The evaluator refuses.
+#guard (memAdapt.sim.stepClock `clk memAdapt.sim.init oobTick.2).isOk = false
+
+-- The lowered design truncates 5 to 1 and carries on, so `hi[1]` now holds the word.
+#guard ((lowered memAdapt).stepClock `clk (lowered memAdapt).init oobTick.2).toOption.bind
+  (fun σ => (σ.apply (adaptTick 0 0 0 1 0).2 |> (lowered memAdapt).settle).toOption.bind
+    (·.valueOf? `dw)) = some 22
+
+-- Which is to say: this is one of the schedules on which `agreesOn` comes out `false`, and that
+-- is the expected answer rather than a failure to be fixed.
+#guard agreesOn memAdapt [`dn, `dw] [oobTick] = false
 
 end CircuitHdl

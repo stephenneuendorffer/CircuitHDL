@@ -209,6 +209,23 @@ match over every dialect, so a FIFO theorem that never loads a byte picked up
 model. The driver now dispatches `comb` and `hw` directly and refuses everything else, which drops
 them. **If you touch that dispatch, re-run `#print axioms`** — nothing else would have noticed.
 
+#### Two findings from the mutation run, both still live
+
+- **`adaptWidth`'s two branches are reached by no design in `CircuitHdl/Examples`.** `asyncFifo`
+  slices its pointers to exactly `addrW` before indexing, so the memory-address resize is dead
+  code there. Swapping its `comb.concat` operands left the whole suite green. `memAdapt` in
+  `CircuitHdlTest/Circt.lean` exists only to reach it. Note what the *first* version of that test
+  got wrong: it read the memory through the same adapted address it wrote through, so a wrong
+  address was computed twice and the design behaved identically. **An address-computation test
+  needs a read path that is not adapted the same way**, or it tests nothing.
+- **The lowering is not behaviour-preserving for an out-of-range memory address.**
+  `CircuitHdl/Semantics.lean` indexes by the address's full value and raises `indexOutOfRange`;
+  a `seq.firmem` port is only `addrW` bits, so the netlist truncates and writes in range. At
+  depth 4 with a 3-bit address, writing to 5 is an error in the evaluator and a write to
+  address 1 in the netlist. No example design reaches it, every FIFO theorem holds under both,
+  and the divergence is pinned in `CircuitHdlTest/Circt.lean` so it cannot change quietly. If
+  you ever make `module!` accept an address wider than the depth needs, this becomes real.
+
 ### firtool
 
 Installed at `/proj/xsjhdstaff2/stephenn/tools/circt-1.113.0/firtool-1.113.0/bin`. **Do not
@@ -247,7 +264,9 @@ This codebase is about proving things, and the same standard applies to claims m
   rather than a bare `false`. The netlist work added two: a perturbation control that passed
   because the bent design merely became *conservative* (refinement is built to tolerate a FIFO
   that refuses), and a check in `Module.toVeir` that counted the registers it had just patched in
-  the loop that patched them, so the count could only ever agree with itself.
+  the loop that patched them, so the count could only ever agree with itself, and a coverage test
+  that passed because it read and wrote through the same wrong address. Each looked right when
+  written.
 - **Mutate the thing you are checking, not the checker.** Mutating `../veir`'s comb/seq semantics
   tells you VeIR's unit tests bite; only mutating `Circt.lean` tells you the design-level theorems
   do.
