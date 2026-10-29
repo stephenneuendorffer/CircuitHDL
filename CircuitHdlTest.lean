@@ -7,6 +7,7 @@ import CircuitHdlTest.AsyncFifo
 import CircuitHdlTest.Circt
 import CircuitHdlTest.FifoHarness
 import CircuitHdlTest.ShiftFifo
+import CircuitHdlTest.PipeFifo
 
 /-!
 Umbrella module for the test suite.
@@ -35,6 +36,8 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 tick where `valid` is asserted rather than only at a transfer
 - `CircuitHdlTest.ShiftFifo` -- the shift-register FIFO: that it carries traffic, and that it
                                 refines the same two models by entirely different means
+- `CircuitHdlTest.PipeFifo`  -- the pipeline FIFO: a valid bit per stage, so the queue is not a
+                                dense prefix and the gaps between words are permanent
 
 `ShiftFifo` and `AsyncFifo` each end by re-running their refinement checks against the design as
 `CircuitHdl.Circt` lowers it, under `Veir.Netlist` -- the same harness, schedules and abstraction

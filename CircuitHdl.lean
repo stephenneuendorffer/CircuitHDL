@@ -14,6 +14,7 @@ import CircuitHdl.Examples.AbstractFifoModel
 import CircuitHdl.Examples.AbstractQueueModel
 import CircuitHdl.Examples.AsyncFifo
 import CircuitHdl.Examples.ShiftFifo
+import CircuitHdl.Examples.PipeFifo
 
 /-!
 Umbrella module for the circuit HDL sketch.
@@ -47,4 +48,6 @@ language they need:
                                       itself a crossing
 - `CircuitHdl.Examples.ShiftFifo`  -- the same interface built the opposite way: data moves,
                                       pointers do not, and one clock means one reset
+- `CircuitHdl.Examples.PipeFifo`   -- a valid bit per stage and writes entering at the far end,
+                                      so latency is the depth and bubbles are permanent
 -/

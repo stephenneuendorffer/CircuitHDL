@@ -126,8 +126,14 @@ private def stepBoth (m : Sim) (source dest : AxisPort) (rst : Option ResetSpec)
   let wrote := offer.isSome && settled.valueOf? source.ready == some 1 && clk == source.clock
   let took := accept && settled.valueOf? dest.valid == some 1 && clk == dest.clock
   let σ' ← m.stepClock clk settled inputs
-  let model := if wrote then model.push else model
+  -- **Pop before push**, which matters only when both fire at a full FIFO. `push` at `depth` is a
+  -- silent no-op in both models, so pushing first would drop the word the design just accepted and
+  -- then pop another, leaving the model one short. A design may legitimately take a word in and
+  -- hand one out in the same cycle while full -- that is how a FIFO sustains full rate at full
+  -- occupancy -- and this order is what lets the model say so. It changes nothing for a design
+  -- whose `ready` is low when full, which is why `asyncFifo` and `shiftFifo4` never noticed.
   let model := if took then model.pop else model
+  let model := if wrote then model.push else model
   return (σ', model)
 
 /-- A reset tick: assert every domain's reset, offer nothing, accept nothing, and take an edge in
@@ -236,8 +242,9 @@ private def stepQueue (m : Sim) (source dest : AxisPort) (rst : Option ResetSpec
   let σ' ← m.stepClock clk settled inputs
   if offering && emitted != model.queue.head? then
     return none
-  let model := if wrote then model.push (offer.getD 0) else model
+  -- Pop before push; see the note in `stepBoth`.
   let model := if took then model.popped else model
+  let model := if wrote then model.push (offer.getD 0) else model
   return some (σ', model)
 
 private def refinesQueueAlong (m : Sim) (depth : Nat) (source dest : AxisPort)
