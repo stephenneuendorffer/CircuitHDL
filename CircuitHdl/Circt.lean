@@ -1,7 +1,12 @@
 import CircuitHdl.Core
 import CircuitHdl.Width
 import CircuitHdl.Clocks
-import Veir.Input
+import Veir.Rewriter.WfRewriter
+import Veir.Verifier
+import Veir.Printer
+import Veir.Dialects.Seq.OpInfo
+import Veir.Dialects.Comb.OpInfo
+import Veir.Dialects.HW.OpInfo
 
 /-!
 Lowering to the CIRCT dialects.
@@ -22,6 +27,10 @@ checkable by eye:
 So the `ProcKind` split that is semantically real in the evaluator stays real here: it is the
 difference between feeding a mux and feeding a register.
 
+Following it case for case is *not* evidence that it is right, which is why
+`Veir.Netlist` exists: the result of this file is simulated by VeIR's own netlist interpreter, and
+the FIFO tests run their refinement checks through that as well.
+
 ### What a signal lowers to
 
 The core AST has no wire/register distinction -- `Module.regs` is simply the local signals -- so
@@ -34,6 +43,13 @@ becomes a plain value; one nothing assigns becomes a zero, matching `Module.init
 `hw.module`'s body is a *graph* region, so a `seq.firreg` may be used above the point it is
 defined. That is what lets a counter read its own output: the register is emitted after the logic
 computing its input, and the logic refers to it anyway.
+
+### No text
+
+The result is VeIR IR, built operation by operation with `WfRewriter.createOp!` -- the builder
+VeIR's own MLIR parser uses. This file once serialised to MLIR text and handed that to the parser,
+which meant it owned a copy of MLIR's syntax that VeIR already owns. `Module.toMlir` is still
+here, and is now `Veir.Printer` applied to the result.
 -/
 
 namespace CircuitHdl
@@ -90,16 +106,33 @@ instance : ToString CirctError := ⟨render⟩
 
 end CirctError
 
-/-! ### Values and scopes -/
+/-! ### Scopes -/
 
-/-- A lowered SSA value: its name, and the width of its type.
+/-- A lowered SSA value: the VeIR value it is, and the width of its integer type.
 
-Only integers flow through the expression lowering. The two values that are not integers -- a
-`!seq.clock` and a `!seq.firmem` -- are held in the emitter state instead, so this stays uniform. -/
+The width is carried alongside rather than read back out of the IR because the lowering needs it
+constantly -- `~x` is `x ^ allOnes w`, a concatenation's result width is the sum of its operands' --
+and reading a type attribute for each would be noise. -/
 structure Val where
-  name : String
+  ptr : Veir.ValuePtr
   width : Nat
-  deriving Repr, Inhabited, DecidableEq
+deriving Inhabited, DecidableEq
+
+/-- A declared memory, as the lowering sees it. -/
+structure MemInfo where
+  /-- The `!seq.firmem` value that `seq.firmem` defined. -/
+  value : Veir.ValuePtr
+  depth : Nat
+  elemW : Nat
+  /-- The clock signal its ports are tied to -- the clock of the process that writes it. -/
+  clock : Name
+  /-- The width CIRCT gives its ports' address operand. -/
+  addrW : Nat
+deriving Inhabited
+
+/-- Turn a signal name into an MLIR identifier for a module port. Port names are parsed as bare
+identifiers, so the `.` an interface port carries -- `s.data` -- has to go. -/
+def portIdent (x : Name) : String := x.toString.replace "." "_"
 
 /-- What each signal currently holds, mirroring `State` in the evaluator. -/
 abbrev Scope := List (Name × Val)
@@ -109,35 +142,27 @@ def Scope.set (σ : Scope) (x : Name) (v : Val) : Scope :=
   if σ.any (·.1 == x) then σ.map (fun (y, u) => if y == x then (y, v) else (y, u))
   else σ ++ [(x, v)]
 
-/-- A declared memory, as the lowering sees it. -/
-structure MemInfo where
-  /-- The SSA name of the `seq.firmem` that declares it. -/
-  ssa : String
-  depth : Nat
-  elemW : Nat
-  /-- The SSA name of the `!seq.clock` its ports are tied to. -/
-  clock : String
-  /-- The width CIRCT gives its ports' address operand. -/
-  addrW : Nat
-  deriving Repr, Inhabited
-
 /-! ### The emitter
 
-Operations are accumulated as text in generic MLIR form, which VeIR then parses and verifies.
-VeIR exposes no builder for constructing IR directly -- creating operations lives inside its
-pattern-rewriter DSL -- so the parser is the way in, and it has the advantage that the result is
-checked by `WfIRContext.verify` rather than asserted.
+Operations are built **into a VeIR context** as they are lowered. They used to be accumulated as
+lines of MLIR text which VeIR then parsed back; that round trip meant this package owned a copy of
+MLIR's syntax -- operand spelling, type spelling, `operandSegmentSizes` -- that VeIR already owns
+and keeps correct. `WfRewriter.createOp!` is the builder VeIR's own parser uses.
 -/
 
-/-- The emitter's state: the operations so far, a counter for fresh names, and the caches that
-keep repeated constants and clock conversions down to one operation each. -/
+/-- The emitter's state: the context being built, where the next operation goes, and the caches
+that keep repeated constants and clock conversions down to one operation each. -/
 structure Emit where
-  body : Array String := #[]
-  next : Nat := 0
+  ctx : Veir.WfIRContext Veir.OpCode
+  /-- The `hw.module`'s block. -/
+  block : Veir.BlockPtr
+  /-- Where the next operation goes. Set to `.before` the first register once the registers
+  exist, so that the body is emitted above them -- see `Module.toVeir`. -/
+  insertAt : Veir.InsertPoint
   /-- One `hw.constant` per value and width, as CIRCT itself would leave them. -/
   consts : List ((Nat × Nat) × Val) := []
   /-- One `seq.to_clock` per clock signal. -/
-  clocks : List (Name × String) := []
+  clocks : List (Name × Val) := []
   mems : List (Name × MemInfo) := []
 
 /-- Lowering runs against a fixed `Ctx` -- the module's widths, inputs and memories, exactly the
@@ -151,51 +176,60 @@ private def ofExcept (x : Except CirctError α) : M α :=
   | .ok a => pure a
   | .error e => throw e
 
-private def ity (w : Nat) : String := "i" ++ toString w
+private def ity (w : Nat) : Veir.TypeAttr := Veir.IntegerType.signless w
 
-private def quoted (s : String) : String := "\"" ++ s ++ "\""
+private def iattr (w : Nat) (v : Int) : Veir.IntegerAttr :=
+  Veir.IntegerAttr.mk v (Veir.IntegerType.signless w)
 
-/-- A fresh SSA name. Values are numbered rather than named after signals, so a Lean `Name`
-never has to be escaped into an MLIR identifier. -/
-private def fresh : M String := do
+private def sattr (s : String) : Veir.StringAttr := Veir.StringAttr.mk s.toUTF8
+
+/-- Create one operation at the current insertion point.
+
+`createOp!` decides the in-bounds side conditions at run time and returns an `Option`, so nothing
+here has to carry a well-formedness proof through the walk -- which is what makes lowering a loop
+rather than a proof. -/
+private def build (opType : Veir.OpCode) (props : Veir.propertiesOf opType)
+    (resultTypes : Array Veir.TypeAttr) (operands : Array Veir.ValuePtr) :
+    M Veir.OperationPtr := do
   let s ← get
-  set { s with next := s.next + 1 }
-  return "%" ++ toString s.next
+  match Veir.WfRewriter.createOp! s.ctx opType resultTypes operands #[] #[] props
+      (some s.insertAt) with
+  | none => throw (.verifier "could not create operation")
+  | some (ctx, op) =>
+      set { s with ctx }
+      return op
 
-private def push (line : String) : M Unit :=
-  modify fun s => { s with body := s.body.push line }
-
-/-- Emit one operation in generic form, with its operand and result types given as written. -/
-private def emitRaw (result : Option String) (op : String) (args argTys : List String)
-    (resultTy : Option String) (attrs : String) : M Unit := do
-  let lhs := match result with | some r => r ++ " = " | none => ""
-  let props := if attrs.isEmpty then "" else " <{" ++ attrs ++ "}>"
-  push <| lhs ++ quoted op ++ "(" ++ ", ".intercalate args ++ ")" ++ props
-    ++ " : (" ++ ", ".intercalate argTys ++ ") -> "
-    ++ (match resultTy with | some t => t | none => "()")
-
-/-- Emit an operation over integer operands producing one integer result, the shape every `comb`
-operation here has. The ops with a `!seq.clock` or `!seq.firmem` operand go through `emitRaw`. -/
-private def emitOp (op : String) (args : List Val) (resultW : Nat) (attrs : String := "") :
-    M Val := do
-  let r ← fresh
-  emitRaw (some r) op (args.map (·.name)) (args.map fun v => ity v.width) (some (ity resultW)) attrs
-  return { name := r, width := resultW }
+/-- Emit an operation producing one integer result, returning the value it defines. -/
+private def emit (opType : Veir.OpCode) (props : Veir.propertiesOf opType) (w : Nat)
+    (operands : Array Val) : M Val := do
+  let op ← build opType props #[ity w] (operands.map Val.ptr)
+  return { ptr := .opResult ⟨op, 0⟩, width := w }
 
 /-- An `hw.constant`, shared between every use of the same value at the same width.
 
-The value is written as an ordinary natural: VeIR's parser normalises an integer attribute to its
+The value is kept as an ordinary natural: VeIR's parser normalises an integer attribute to its
 type, so `255 : i8` is stored, and printed back, as `-1 : i8`. -/
 private def constant (w n : Nat) : M Val := do
   match (← get).consts.lookup (w, n) with
   | some v => pure v
   | none => do
-      let r ← fresh
-      emitRaw (some r) "hw.constant" [] [] (some (ity w))
-        (quoted "value" ++ " = " ++ toString n ++ " : " ++ ity w)
-      let v : Val := { name := r, width := w }
+      -- `IntegerAttr` holds the bits as MLIR reads them back, and the reading depends on the
+      -- type: **unsigned at a signless `i1`** -- so a set bit is `1`, spelled `true` -- and
+      -- signed at anything wider, so 255 at `i8` is `-1`. Getting this wrong does not produce
+      -- wrong hardware, it produces IR the verifier rejects with
+      -- "value -1 is not normalized for i1".
+      let bits := BitVec.ofNat w n
+      let v ← emit (.hw .constant) { value := iattr w (if w = 1 then bits.toNat else bits.toInt) }
+        w #[]
       modify fun s => { s with consts := ((w, n), v) :: s.consts }
       return v
+
+/-- The `!seq.clock` a clock signal was converted to. Every clock is converted once, before any
+operation that names one, so this is total in practice. -/
+private def clockValue (c : Name) : M Val := do
+  match (← get).clocks.lookup c with
+  | some v => pure v
+  | none => throw (.multiplyClocked c)
 
 /-- Narrow or widen a value to `w`, for the address of a memory port: the core AST lets an address
 be any width, while CIRCT fixes it at the memory's index width. -/
@@ -203,28 +237,18 @@ private def adaptWidth (v : Val) (w : Nat) : M Val := do
   if v.width = w then
     return v
   else if w < v.width then
-    emitOp "comb.extract" [v] w (quoted "lowBit" ++ " = 0 : i32")
-  else
+    emit (.comb .extract) { lowBit := iattr 32 0 } w #[v]
+  else do
     let pad ← constant (w - v.width) 0
-    emitOp "comb.concat" [pad, v] w
+    emit (.comb .concat) () w #[pad, v]
 
 /-! ### Expressions -/
 
-private def binOpName : BinOp → String
-  | .add => "comb.add"
-  | .and => "comb.and"
-  | .or => "comb.or"
-  | .xor => "comb.xor"
-
 /-- CIRCT's `ICmpPredicate`. The comparisons are unsigned, matching `CmpOp.apply`. -/
-private def cmpPredicate : CmpOp → Nat
+private def cmpPredicate : CmpOp → Int
   | .eq => 0
   | .lt => 6  -- ult
   | .le => 7  -- ule
-
-private def shiftOpName : ShiftOp → String
-  | .shl => "comb.shl"
-  | .shr => "comb.shru"
 
 /-- The value of a signal: whatever the walk has bound, or its reset zero. A register or an input
 is always bound, so the fallback is reached only by a signal read before anything drives it --
@@ -252,14 +276,9 @@ private def readPort (m : Name) (addr : Val) : M Val := do
   | none => throw (.check (.unboundMem m))
   | some info => do
       let addr ← adaptWidth addr info.addrW
-      let memTy := "!seq.firmem<" ++ toString info.depth ++ " x " ++ toString info.elemW ++ ">"
-      let r ← fresh
-      -- A read port takes no `operandSegmentSizes`: its one optional operand, `enable`, comes
-      -- last, so MLIR reads its presence off the operand count. The write port, which has two
-      -- optional operands, does need them.
-      emitRaw (some r) "seq.firmem.read_port" [info.ssa, addr.name, info.clock]
-        [memTy, ity info.addrW, "!seq.clock"] (some (ity info.elemW)) ""
-      return { name := r, width := info.elemW }
+      let op ← build (.seq .firmem__read_port) () #[ity info.elemW]
+        #[info.value, addr.ptr, (← clockValue info.clock).ptr]
+      return { ptr := .opResult ⟨op, 0⟩, width := info.elemW }
 
 /-- Lower an expression to the value it computes, one case per rule in `Expr.width?`. -/
 private def lowerExpr (σ : Scope) : Expr → M Val
@@ -268,38 +287,47 @@ private def lowerExpr (σ : Scope) : Expr → M Val
   | .bin op w a b => do
       let a ← lowerExpr σ a
       let b ← lowerExpr σ b
-      emitOp (binOpName op) [a, b] w
+      -- One case per operator rather than a `BinOp → Veir.Comb` function: `propertiesOf` only
+      -- reduces to `Unit` for a concrete opcode. It also puts the mapping in plain sight, and
+      -- that mapping is exactly what `Veir.Netlist` checks when it runs the result.
+      match op with
+      | .add => emit (.comb .add) () w #[a, b]
+      | .and => emit (.comb .and) () w #[a, b]
+      | .or => emit (.comb .or) () w #[a, b]
+      | .xor => emit (.comb .xor) () w #[a, b]
   | .cmp op _ a b => do
       let a ← lowerExpr σ a
       let b ← lowerExpr σ b
-      emitOp "comb.icmp" [a, b] 1
-        (quoted "predicate" ++ " = " ++ toString (cmpPredicate op) ++ " : i64")
+      emit (.comb .icmp) { predicate := iattr 64 (cmpPredicate op) } 1 #[a, b]
   | .not w a => do
       let a ← lowerExpr σ a
       -- CIRCT has no `comb.not`; complementing against all ones is its idiom.
       let ones ← constant w (2 ^ w - 1)
-      emitOp "comb.xor" [a, ones] w
+      emit (.comb .xor) () w #[a, ones]
   | .shift op w a s => do
       let a ← lowerExpr σ a
       -- A shift at or past the width is zero in `ShiftOp.apply`, but poison in CIRCT, so it is
-      -- folded here rather than handed over.
+      -- folded here rather than handed over. The netlist semantics relies on this: it reads
+      -- `comb.shl` as an ordinary shift, which is only faithful where the amount is in range.
       if s ≥ w then constant w 0
       else do
         let amount ← constant w s
-        emitOp (shiftOpName op) [a, amount] w
+        match op with
+        | .shl => emit (.comb .shl) () w #[a, amount]
+        | .shr => emit (.comb .shru) () w #[a, amount]
   | .mux c t f => do
       let c ← lowerExpr σ c
       let t ← lowerExpr σ t
       let f ← lowerExpr σ f
-      emitOp "comb.mux" [c, t, f] t.width
+      emit (.comb .mux) () t.width #[c, t, f]
   | .concat a b => do
       let a ← lowerExpr σ a
       let b ← lowerExpr σ b
       -- `comb.concat` takes its most significant operand first, as `BitVec.++` does.
-      emitOp "comb.concat" [a, b] (a.width + b.width)
+      emit (.comb .concat) () (a.width + b.width) #[a, b]
   | .slice e hi lo => do
       let e ← lowerExpr σ e
-      emitOp "comb.extract" [e] (hi - lo + 1) (quoted "lowBit" ++ " = " ++ toString lo ++ " : i32")
+      emit (.comb .extract) { lowBit := iattr 32 lo } (hi - lo + 1) #[e]
   | .index m elemW addr => do
       let addr ← lowerExpr σ addr
       let v ← readPort m addr
@@ -325,7 +353,7 @@ private def muxSignal (cond : Val) (x : Name) (t f fallback : Scope) : M Val := 
   let fv ← lookupVal (f ++ fallback) x
   -- Nothing to choose between when both arms left the signal as it was.
   if tv == fv then return tv
-  else emitOp "comb.mux" [cond, tv, fv] tv.width
+  else emit (.comb .mux) () tv.width #[cond, tv, fv]
 
 mutual
 
@@ -357,11 +385,11 @@ private def writePort (m : Name) (enable : Val) (addr data : Val) : M Unit := do
   | none => throw (.check (.unboundMem m))
   | some info => do
       let addr ← adaptWidth addr info.addrW
-      let memTy := "!seq.firmem<" ++ toString info.depth ++ " x " ++ toString info.elemW ++ ">"
-      emitRaw none "seq.firmem.write_port"
-        [info.ssa, addr.name, info.clock, enable.name, data.name]
-        [memTy, ity info.addrW, "!seq.clock", "i1", ity info.elemW] none
-        (quoted "operandSegmentSizes" ++ " = array<i32: 1, 1, 1, 1, 1, 0>")
+      let segs : Veir.DenseArrayAttr :=
+        { elementType := Veir.IntegerType.signless 32, values := #[1, 1, 1, 1, 1, 0] }
+      let _ ← build (.seq .firmem__write_port) { operandSegmentSizes := segs } #[]
+        #[info.value, addr.ptr, (← clockValue info.clock).ptr, enable.ptr, data.ptr]
+      return ()
 
 /-- The path condition reaching a statement: each enclosing `if`'s condition, paired with the arm
 it was taken into, innermost first.
@@ -377,10 +405,12 @@ private def materialize : Guards → M Val
   | (c, taken) :: rest => do
       let head ← if taken then pure c else do
         let ones ← constant 1 1
-        emitOp "comb.xor" [c, ones] 1
+        emit (.comb .xor) () 1 #[c, ones]
       match rest with
       | [] => return head
-      | _ => do emitOp "comb.and" [head, ← materialize rest] 1
+      | _ => do
+          let tail ← materialize rest
+          emit (.comb .and) () 1 #[head, tail]
 
 mutual
 
@@ -446,51 +476,97 @@ def Process.clockOf (p : Process) : Except CirctError Name :=
   | [] => .error .unclockedProcess
   | ev :: _ => .error (.multiplyClocked ev.signal)
 
-/-- Turn a signal name into an MLIR identifier for a module port. Port names are parsed as bare
-identifiers, so the `.` an interface port carries -- `s.data` -- has to go. -/
-def portIdent (x : Name) : String := x.toString.replace "." "_"
-
 /-! ### Modules -/
 
-/-- Convert a `Module` to a `hw.module`, in generic MLIR form.
+/-- Convert a `Module` to VeIR IR in the CIRCT dialects, verified.
 
-The result is a whole `builtin.module`, ready for `Module.toVeir` to parse. Instances need no
-handling of their own: `Module.ofItems` flattens them at assembly time, so by the time a module
-gets here it is already one flat netlist. -/
-def Module.toMlir (m : Module) : Except CirctError String := do
+The result is a `builtin.module` wrapping one `hw.module`, built operation by operation. It has
+been through `WfIRContext.verify`, so a success here means the IR is well-formed -- its types line
+up, its `seq.firmem` ports match their memories, and so on.
+
+Instances need no handling of their own: `Module.ofItems` flattens them at assembly time, so by the
+time a module gets here it is already one flat netlist.
+
+### Register feedback, and why the registers are built first
+
+`hw.module`'s body is a *graph* region, and this lowering depends on it: the logic computing a
+register's input refers to that register's own output, above the point the register is defined.
+`createOp!` will not accept an operand that does not exist yet, so the order of *construction*
+cannot be the order of the result.
+
+So every `seq.firreg` is created first, with a placeholder operand, which is what brings its
+result into existence. The body is then built with the insertion point set *before* the first
+register, so the operations still read body, registers, `hw.output`. Finally each register's input
+operand is replaced with the value the body computed, and the placeholders are erased.
+
+A placeholder left unpatched would be an `hw.constant` feeding a register at exactly the right
+width -- perfectly well-formed IR that the verifier has no reason to object to. So after patching,
+every placeholder is checked to have no uses left before it is erased. Counting the patches would
+not do: the loop that patches is the loop that counts, so the count can only ever agree with
+itself.
+-/
+def Module.toVeir (m : Module) :
+    Except CirctError (Veir.WfIRContext Veir.OpCode × Veir.OperationPtr) := do
   match m.check with
   | .error e => throw (.check e)
   | .ok () => pure ()
   let env ← match m.declEnv with
     | .ok env => pure env
     | .error e => throw (.check e)
-  let ctx : Ctx := { env := env, inputs := m.inputs.map Prod.fst, mems := m.mems }
+  let lctx : Ctx := { env := env, inputs := m.inputs.map Prod.fst, mems := m.mems }
 
   -- Ports. Inputs become block arguments, in order; outputs become `hw.output` operands.
-  let ports := m.inputs.map (fun (x, w) => ("input", x, w))
-    ++ m.outputs.map (fun (x, w) => ("output", x, w))
-  for (_, x, _) in ports do
-    for (_, y, _) in ports do
+  let portNames := m.inputs.map Prod.fst ++ m.outputs.map Prod.fst
+  for x in portNames do
+    for y in portNames do
       if x ≠ y && portIdent x == portIdent y then throw (.portNameCollision x y)
 
-  let (body, _) ← StateT.run (ReaderT.run (α := Array String) (do
+  -- The `builtin.module`, and the `hw.module` inside it with a block whose arguments are the
+  -- input ports.
+  let (vctx, topOp) := Veir.WfIRContext.create! Veir.OpCode
+  let topRegion := topOp.getRegion! vctx.raw 0
+  let some topBlock := topRegion.getFirstBlock! vctx.raw
+    | throw (.verifier "the created module has no block")
+  let (vctx, bodyRegion) := Veir.WfRewriter.createRegion! vctx
+  let (vctx, bodyBlock) := Veir.WfRewriter.createBlock! vctx
+    (m.inputs.map (fun (_, w) => (Veir.IntegerType.signless w : Veir.TypeAttr))).toArray
+    (some (.atEnd bodyRegion))
+  let modTy : Veir.HW.ModuleType :=
+    { ports := (m.inputs.map (fun (x, w) =>
+          ({ name := portIdent x, type := Veir.IntegerType.signless w, dir := .input } :
+            Veir.HW.ModulePort))
+        ++ m.outputs.map (fun (x, w) =>
+          ({ name := portIdent x, type := Veir.IntegerType.signless w, dir := .output } :
+            Veir.HW.ModulePort))).toArray }
+  let modProps : Veir.HWModuleProperties :=
+    { module_type := modTy, sym_name := Veir.StringAttr.mk m.name.toString.toUTF8,
+      per_port_attrs := Veir.ArrayAttr.mk #[], parameters := Veir.ArrayAttr.mk #[] }
+  let some (vctx, hwModuleOp) :=
+      Veir.WfRewriter.createOp! vctx (Veir.OpCode.hw Veir.HW.module) #[] #[] #[] #[bodyRegion]
+        modProps (some (.atEnd topBlock))
+    | throw (.verifier "could not create the hw.module")
+
+  let args : Scope := m.inputs.zipIdx.map fun ((x, w), i) =>
+    (x, { ptr := .blockArgument ⟨bodyBlock, i⟩, width := w })
+
+  let init : Emit := { ctx := vctx, block := bodyBlock, insertAt := .atEnd bodyBlock }
+
+  let (_, fin) ← StateT.run (ReaderT.run (α := Unit) (do
     -- Every clock a process runs on, converted once.
     for p in m.body do
       if p.isSequential then
         let c ← ofExcept (Process.clockOf p)
         unless ((← get).clocks.lookup c).isSome do
-          let arg ← lookupVal (m.inputs.zipIdx.map fun ((x, w), i) =>
-            (x, { name := "%arg" ++ toString i, width := w })) c
-          let r ← fresh
-          emitRaw (some r) "seq.to_clock" [arg.name] [ity 1] (some "!seq.clock") ""
-          modify fun s => { s with clocks := (c, r) :: s.clocks }
+          let arg ← lookupVal args c
+          let op ← build (.seq .to_clock) () #[Veir.TypeAttr.of Veir.Seq.ClockType {}] #[arg.ptr]
+          let v : Val := { ptr := .opResult ⟨op, 0⟩, width := 1 }
+          modify fun s => { s with clocks := (c, v) :: s.clocks }
 
     -- Memories, each tied to the clock of the process that writes it.
     for (x, depth, elemW) in m.mems do
       let clock ← match (m.driversOf x).eraseDups with
-        | [c] => match (← get).clocks.lookup c with
-            | some r => pure r
-            | none => throw (.undrivenMemory x)
+        | [c] =>
+            if ((← get).clocks.lookup c).isSome then pure c else throw (.undrivenMemory x)
         | [] =>
             -- `driversOf` counts only clocked processes, so a memory with no driver is either
             -- written combinationally -- which has no clock to offer a port -- or not at all.
@@ -498,38 +574,42 @@ def Module.toMlir (m : Module) : Except CirctError String := do
               throw (.combinationalStore x)
             else throw (.undrivenMemory x)
         | _ => throw (.multiplyClocked x)
-      let r ← fresh
-      emitRaw (some r) "seq.firmem" [] []
-        (some ("!seq.firmem<" ++ toString depth ++ " x " ++ toString elemW ++ ">"))
-        (quoted "name" ++ " = " ++ quoted x.toString
-          ++ ", " ++ quoted "readLatency" ++ " = 0 : i32"
-          ++ ", " ++ quoted "writeLatency" ++ " = 1 : i32"
-          -- A non-blocking store leaves reads in the same cycle seeing the old contents, and two
-          -- stores in one process land in order, which is `old` and `port_order`.
-          ++ ", " ++ quoted "ruw" ++ " = 1 : i32"
-          ++ ", " ++ quoted "wuw" ++ " = 1 : i32")
+      let memTy := Veir.TypeAttr.of Veir.Seq.FirMemType
+        { depth, width := elemW, maskWidth := none }
+      -- A non-blocking store leaves reads in the same cycle seeing the old contents, and two
+      -- stores in one process land in order, which is `old` and `port_order`.
+      let props : Veir.SeqFirMemProperties :=
+        { name := some (sattr x.toString), readLatency := iattr 32 0,
+          writeLatency := iattr 32 1, ruw := iattr 32 1, wuw := iattr 32 1 }
+      let op ← build (.seq .firmem) props #[memTy] #[]
       modify fun s => { s with
-        mems := (x, { ssa := r, depth, elemW, clock,
+        mems := (x, { value := .opResult ⟨op, 0⟩, depth, elemW, clock,
                       addrW := Veir.Seq.firMemAddressWidth depth }) :: s.mems }
 
-    -- The starting scope: inputs on their block arguments, registers on their own outputs. A
-    -- register's name is chosen now and defined further down, which the graph region allows.
-    let mut σ : Scope := []
-    for ((x, w), i) in m.inputs.zipIdx do
-      σ := σ.set x { name := "%arg" ++ toString i, width := w }
+    -- The registers, created before the logic that feeds them so that their results exist. The
+    -- placeholder is a dedicated constant rather than a cached one, so that erasing it later
+    -- cannot pull a value the design is still using.
+    let mut σ : Scope := args
     -- `declEnv` accumulates front to back, so reversing it restores declaration order.
-    let mut registers : List (Name × Val × String) := []
+    let mut registers : List (Name × Val × Veir.OperationPtr × Veir.OperationPtr) := []
     for (x, w) in env.reverse do
       match ← ofExcept (Module.driveOf m x) with
       | .register c =>
-          let clock ← match (← get).clocks.lookup c with
-            | some r => pure r
-            | none => throw (.multiplyClocked c)
-          let r ← fresh
-          let v : Val := { name := r, width := w }
+          let some clockVal := (← get).clocks.lookup c | throw (.multiplyClocked c)
+          let placeholder ← build (.hw .constant) { value := iattr w 0 } #[ity w] #[]
+          let props : Veir.SeqFirRegProperties :=
+            { name := sattr x.toString, isAsync := false, preset := none }
+          let regOp ← build (.seq .firreg) props #[ity w]
+            #[.opResult ⟨placeholder, 0⟩, clockVal.ptr]
+          let v : Val := { ptr := .opResult ⟨regOp, 0⟩, width := w }
           σ := σ.set x v
-          registers := registers ++ [(x, v, clock)]
+          registers := registers ++ [(x, v, regOp, placeholder)]
       | _ => pure ()
+
+    -- From here the body goes *above* the registers, so the result reads in dependency order.
+    match registers with
+    | (_, _, firstReg, _) :: _ => modify fun s => { s with insertAt := .before firstReg }
+    | [] => pure ()
 
     -- Settle: the combinational processes, in source order.
     for p in m.body do
@@ -544,43 +624,45 @@ def Module.toMlir (m : Module) : Except CirctError String := do
         for (x, v) in pending do
           next := next.set x v
 
-    -- The registers themselves, fed by what accumulated.
-    for (x, v, clock) in registers do
+    -- Patch each register's input, then drop the placeholders.
+    for (x, _, regOp, _) in registers do
       -- What the process accumulated, or -- for a register no arm assigned -- its own output,
       -- which is the structural reading of "hold".
       let input ← lookupVal (next ++ σ) x
-      emitRaw (some v.name) "seq.firreg" [input.name, clock] [ity v.width, "!seq.clock"]
-        (some (ity v.width)) (quoted "name" ++ " = " ++ quoted x.toString)
+      modify fun s => { s with
+        ctx := Veir.WfRewriter.replaceOperand! s.ctx (regOp.getOpOperand 0) input.ptr }
+    for (_, _, _, placeholder) in registers do
+      let s ← get
+      -- See the header: an unpatched placeholder is well-formed IR, so its *use list* is the only
+      -- thing that gives it away.
+      if ((Veir.ValuePtr.opResult ⟨placeholder, 0⟩).getFirstUse! s.ctx.raw).isSome then
+        throw (.verifier "a register placeholder was left connected")
+      set { s with ctx := Veir.WfRewriter.eraseOp! s.ctx placeholder }
 
+    -- `hw.output` closes the block, below the registers.
     let outputs ← m.outputs.mapM fun (x, _) => lookupVal σ x
-    emitRaw none "hw.output" (outputs.map (·.name)) (outputs.map fun v => ity v.width) none ""
-    return (← get).body) ctx) {}
+    modify fun s => { s with insertAt := .atEnd s.block }
+    let _ ← build (.hw .output) () #[] (outputs.map Val.ptr).toArray
+    return ()) lctx) init
 
-  let modty := ", ".intercalate (ports.map fun (dir, x, w) =>
-    dir ++ " " ++ portIdent x ++ " : " ++ ity w)
-  let args := ", ".intercalate (m.inputs.zipIdx.map fun ((_, w), i) =>
-    "%arg" ++ toString i ++ ": " ++ ity w)
-  let indented := body.toList.map fun line => "    " ++ line
-  return String.intercalate "\n" <|
-    [ "\"builtin.module\"() ({",
-      "^bb0():",
-      "  \"hw.module\"() <{module_type = !hw.modty<" ++ modty ++ ">, parameters = [], "
-        ++ "per_port_attrs = [], sym_name = " ++ quoted m.name.toString ++ "}> ({",
-      "  ^bb1(" ++ args ++ "):" ]
-    ++ indented
-    ++ [ "  }) : () -> ()",
-         "}) : () -> ()" ]
-
-/-- Convert a `Module` to VeIR IR in the CIRCT dialects, verified.
-
-The returned context holds a `builtin.module` wrapping one `hw.module`. It has been through
-`WfIRContext.verify`, so a success here means the IR is well-formed -- its types line up, its
-`seq.firmem` ports match their memories, and so on -- not merely that it printed. -/
-def Module.toVeir (m : Module) :
-    Except CirctError (Veir.WfIRContext Veir.OpCode × Veir.OperationPtr) := do
-  let text ← m.toMlir
-  match Veir.Input.parseSourceString text.toUTF8 m.name.toString with
-  | .ok (ctx, op, _) => return (ctx, op)
+  match fin.ctx.verify topOp with
+  | .ok () => return (fin.ctx, topOp)
   | .error e => throw (.verifier e)
+
+/-- The emitted IR as MLIR text, in generic form.
+
+`Veir.Printer` does the printing. This package used to own that -- it built the text and handed it
+to VeIR's parser -- which meant owning a copy of MLIR's syntax alongside the one VeIR already
+maintains. The text is now a *view* of the IR rather than the route to it, which is why this is
+`IO`: VeIR's printer writes through a sink.
+
+Nothing on the proving path needs it. It exists for the two places text is genuinely the artifact:
+the readable `#guard_msgs` in `CircuitHdlTest.Circt`, and `ArcCheck`, which has to hand something
+to `arcilator`. -/
+def Module.toMlir (m : Module) : IO (Except CirctError String) := do
+  match m.toVeir with
+  | .error e => return .error e
+  | .ok (ctx, op) =>
+      return .ok (← Veir.Printer.printModuleToString ctx.raw op { printGenericOpForm := true })
 
 end CircuitHdl

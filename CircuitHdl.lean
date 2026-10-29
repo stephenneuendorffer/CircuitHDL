@@ -26,8 +26,9 @@ The language itself:
 - `CircuitHdl.Syntax`    -- the `module!` surface syntax, its lowering and width inference
 - `CircuitHdl.Semantics` -- evaluation over core `BitVec`
 - `CircuitHdl.Transactions` -- driving AXI-Stream ports at transaction level
-- `CircuitHdl.Circt`     -- lowering to the CIRCT dialects, via VeIR. The one module with a
-                            dependency outside core `Lean`.
+- `CircuitHdl.Circt`     -- lowering to the CIRCT dialects: builds VeIR IR directly, and prints
+                            it through VeIR when text is wanted. The one module with a dependency
+                            outside core `Lean`.
 
 Example designs, each written in the `module!` surface syntax, in rough order of how much of the
 language they need:

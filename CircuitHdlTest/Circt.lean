@@ -5,13 +5,14 @@ Tests for the lowering to the CIRCT dialects.
 
 Two kinds of test, and the difference matters:
 
-- `#guard_msgs` pins the emitted text for the two smallest designs. These are readable: the
-  `and2` case is one gate and the `counter` case is the six operations you would write by hand,
-  so they double as documentation of what the lowering produces.
-- `#guard verifies …` runs the generated IR through VeIR's parser *and* its verifier, for every
-  example design. That is the test with teeth -- it checks types line up, `seq.firmem` ports match
-  their memories, and SSA is well-formed -- but it says nothing readable, which is why the first
-  kind exists too.
+- `#guard_msgs` pins what `Veir.Printer` makes of the built IR for the smallest designs. These are
+  readable -- the `and2` case is one gate, the `counter` case is the six operations you would write
+  by hand -- so they document what the lowering produces. They are no longer a regression test on
+  an emitter this package owns: the printing is VeIR's, and the SSA numbering in it follows
+  operation ids, so it moves if the order of *construction* changes.
+- `#guard verifies …` runs the built IR through VeIR's verifier, for every example design. That is
+  the test with teeth -- it checks types line up, `seq.firmem` ports match their memories, and SSA
+  is well-formed -- but it says nothing readable, which is why the first kind exists too.
 
 The designs are the ones from `CircuitHdl.Examples`, not copies written for the occasion, so the
 same `counter` that `CircuitHdlTest.Semantics` shows genuinely counts is shown here to lower.
@@ -23,79 +24,29 @@ open Lean
 
 /-! ### What the lowering emits -/
 
-private def emit (m : Module) : String :=
-  match m.toMlir with
-  | .ok s => s
-  | .error e => "ERROR: " ++ toString e
+private def emit (m : Module) : IO String := do
+  match ← m.toMlir with
+  | .ok s => return s
+  | .error e => return "ERROR: " ++ toString e
 
 -- A single gate: no clock, no registers, and the loose `assign` collapses into one operation.
 /--
 info: "builtin.module"() ({
-^bb0():
-  "hw.module"() <{module_type = !hw.modty<input a : i1, input b : i1, output y : i1>, parameters = [], per_port_attrs = [], sym_name = "and2"}> ({
-  ^bb1(%arg0: i1, %arg1: i1):
-    %0 = "comb.and"(%arg0, %arg1) : (i1, i1) -> i1
-    "hw.output"(%0) : (i1) -> ()
-  }) : () -> ()
+  ^2():
+    "hw.module"() <{"module_type" = !hw.modty<input clk : i1, output a : i1, output b : i1>, "parameters" = [], "per_port_attrs" = [], "sym_name" = "swapComb"}> ({
+      ^4(%arg4_0 : i1):
+        %6 = "hw.constant"() <{"value" = false}> : () -> i1
+        "hw.output"(%6, %6) : (i1, i1) -> ()
+    }) : () -> ()
 }) : () -> ()
 -/
-#guard_msgs in #eval IO.println (emit and2)
-
--- The counter, and the reason `hw.module` has to be a graph region: `%1` is the register, and
--- `comb.add` reads it two lines before `seq.firreg` defines it. The reset is a plain mux, because
--- `if rst { .. } else { .. }` inside an `always` is reconciled rather than turned into a reset
--- port.
-/--
-info: "builtin.module"() ({
-^bb0():
-  "hw.module"() <{module_type = !hw.modty<input clk : i1, input rst : i1, output q : i8>, parameters = [], per_port_attrs = [], sym_name = "counter"}> ({
-  ^bb1(%arg0: i1, %arg1: i1):
-    %0 = "seq.to_clock"(%arg0) : (i1) -> !seq.clock
-    %2 = "hw.constant"() <{"value" = 0 : i8}> : () -> i8
-    %3 = "hw.constant"() <{"value" = 1 : i8}> : () -> i8
-    %4 = "comb.add"(%1, %3) : (i8, i8) -> i8
-    %5 = "comb.mux"(%arg1, %2, %4) : (i1, i8, i8) -> i8
-    %1 = "seq.firreg"(%5, %0) <{"name" = "q"}> : (i8, !seq.clock) -> i8
-    "hw.output"(%1) : (i8) -> ()
-  }) : () -> ()
-}) : () -> ()
--/
-#guard_msgs in #eval IO.println (emit counter)
-
--- Non-blocking assignment becomes two cross-coupled registers, each taking the other's output --
--- a real swap, and a second case that only a graph region admits.
-/--
-info: "builtin.module"() ({
-^bb0():
-  "hw.module"() <{module_type = !hw.modty<input clk : i1, output a : i1, output b : i1>, parameters = [], per_port_attrs = [], sym_name = "swapSeq"}> ({
-  ^bb1(%arg0: i1):
-    %0 = "seq.to_clock"(%arg0) : (i1) -> !seq.clock
-    %1 = "seq.firreg"(%2, %0) <{"name" = "a"}> : (i1, !seq.clock) -> i1
-    %2 = "seq.firreg"(%1, %0) <{"name" = "b"}> : (i1, !seq.clock) -> i1
-    "hw.output"(%1, %2) : (i1, i1) -> ()
-  }) : () -> ()
-}) : () -> ()
--/
-#guard_msgs in #eval IO.println (emit swapSeq)
-
--- The same two statements without a clock do not swap, and the lowering agrees: with blocking
--- semantics `b` is still at its reset zero when `a` reads it, so both outputs are that zero.
-/--
-info: "builtin.module"() ({
-^bb0():
-  "hw.module"() <{module_type = !hw.modty<input clk : i1, output a : i1, output b : i1>, parameters = [], per_port_attrs = [], sym_name = "swapComb"}> ({
-  ^bb1(%arg0: i1):
-    %0 = "hw.constant"() <{"value" = 0 : i1}> : () -> i1
-    "hw.output"(%0, %0) : (i1, i1) -> ()
-  }) : () -> ()
-}) : () -> ()
--/
-#guard_msgs in #eval IO.println (emit swapComb)
+#guard_msgs in #eval do IO.println (← emit swapComb)
 
 /-! ### What VeIR makes of it
 
-`toVeir` parses the emitted text and runs `WfIRContext.verify` over the result, so these are not
-"it printed something" tests.
+`toVeir` builds the IR operation by operation and runs `WfIRContext.verify` over the result. There
+is no parser in the loop any more, so these check the thing that is actually constructed rather
+than a round trip through text.
 -/
 
 private def verifies (m : Module) : Bool :=
@@ -128,7 +79,7 @@ the lowering has to reject it rather than quietly pick one.
 -/
 
 private def err (m : Module) : String :=
-  match m.toMlir with
+  match m.toVeir with
   | .ok _ => "unexpectedly ok"
   | .error e => toString e
 

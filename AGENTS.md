@@ -108,14 +108,33 @@ ambition to prove things about designs *for all sizes* runs into this first.
 
 ## The CIRCT backend
 
-`CircuitHdl/Circt.lean` lowers a `Module` to `hw`/`comb`/`seq` as MLIR text, then parses it with
-VeIR, which verifies it. Two facts that are easy to get wrong:
+`CircuitHdl/Circt.lean` builds VeIR IR **directly**, operation by operation, with
+`Veir.WfRewriter.createOp!` — the builder VeIR's own MLIR parser uses. It used to serialise to
+MLIR text and hand that to the parser; that meant this package owned a copy of MLIR's syntax
+alongside the one VeIR maintains. `Module.toMlir` is still there and is now `Veir.Printer` applied
+to the result, so text is a *view* of the IR rather than the route to it (and is therefore `IO`).
 
+Things that cost time to get right:
+
+- **`createOp!` decides its in-bounds side conditions at run time** and returns an `Option`, so
+  building IR is a loop and not a proof. The `WfRewriter.*!` variants are the ones to reach for.
+- **Register feedback forces the construction order.** `hw.module` is a graph region and the
+  lowering uses that: the logic computing a register's input refers to the register's own output.
+  `createOp!` will not take an operand that does not exist yet, so every `seq.firreg` is created
+  *first* with a placeholder `hw.constant`, the body is then built with
+  `InsertPoint.before firstFirreg` so the printed order still reads body → registers →
+  `hw.output`, and the placeholders are patched out with `replaceOperand!` and erased. A
+  placeholder left unpatched is well-formed IR that the verifier will not complain about, which
+  is why `toVeir` counts the patches.
+- **`hw.constant` normalisation.** `IntegerAttr` holds the bits as MLIR reads them back, and the
+  reading depends on the type: **unsigned at a signless `i1`**, signed at anything wider. So 1 at
+  `i1` is `1` and 255 at `i8` is `-1`. Get it wrong and the verifier says
+  `value -1 is not normalized for i1`.
 - VeIR carries dialect enums as plain integers (`comb.icmp` predicate, `seq.firmem` `ruw`/`wuw`).
   This matches what CIRCT itself prints in generic form; it is not a divergence.
 - `seq.firmem.read_port` takes **no** `operandSegmentSizes` — its one optional operand is last, so
   MLIR infers it, and real CIRCT rejects the attribute if present. `write_port` and
-  `read_write_port` do take them.
+  `read_write_port` do take them. VeIR's `Seq.propertiesOf` already encodes this.
 
 ### firtool
 
