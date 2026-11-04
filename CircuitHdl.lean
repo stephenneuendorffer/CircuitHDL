@@ -15,6 +15,8 @@ import CircuitHdl.Examples.AbstractQueueModel
 import CircuitHdl.Examples.AsyncFifo
 import CircuitHdl.Examples.ShiftFifo
 import CircuitHdl.Examples.PipeFifo
+import CircuitHdl.Examples.MeshRoutingModel
+import CircuitHdl.Examples.MeshSwitch
 
 /-!
 Umbrella module for the circuit HDL sketch.
@@ -50,4 +52,7 @@ language they need:
                                       pointers do not, and one clock means one reset
 - `CircuitHdl.Examples.PipeFifo`   -- a valid bit per stage and writes entering at the far end,
                                       so latency is the depth and bubbles are permanent
+- `CircuitHdl.Examples.MeshRoutingModel` -- what a routing policy on a mesh is, and why
+                                      dimension-order routing cannot deadlock. No HDL; the one
+                                      headline property here that is kernel-proved
 -/

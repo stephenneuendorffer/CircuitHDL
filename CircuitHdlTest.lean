@@ -8,6 +8,8 @@ import CircuitHdlTest.Circt
 import CircuitHdlTest.FifoHarness
 import CircuitHdlTest.ShiftFifo
 import CircuitHdlTest.PipeFifo
+import CircuitHdlTest.MeshRoutingModel
+import CircuitHdlTest.MeshSwitch
 
 /-!
 Umbrella module for the test suite.
