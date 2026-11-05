@@ -23,8 +23,9 @@ where the process graph is not, and one pass then suffices.
 
 **Registering the switch's ports did not make this unnecessary**, which is worth saying because it
 looks as though it should have. Registers removed the combinational *cycle*; the ordering problem
-is separate and remains. A link's `ready` is still driven by the switch downstream of it and read
-by the switch upstream, and the upstream switch's statements still come first.
+is separate and remains. `l000_ready` is still driven by switch `(1,0)` and read by switch `(0,0)`,
+and `(0,0)`'s statements still come first. Reverting `SettleOrder.of` to the identity loses packets
+in three of the scenarios in `CircuitHdlTest/Mesh4x4.lean`.
 
 ### What the two failures looked like
 

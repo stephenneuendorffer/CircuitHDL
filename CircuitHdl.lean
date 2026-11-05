@@ -18,6 +18,7 @@ import CircuitHdl.Examples.ShiftFifo
 import CircuitHdl.Examples.PipeFifo
 import CircuitHdl.Examples.MeshRoutingModel
 import CircuitHdl.Examples.MeshSwitch
+import CircuitHdl.Examples.Mesh4x4
 
 /-!
 Umbrella module for the circuit HDL sketch.
@@ -59,4 +60,8 @@ language they need:
 - `CircuitHdl.Examples.MeshRoutingModel` -- what a routing policy on a mesh is, and why
                                       dimension-order routing cannot deadlock. No HDL; the one
                                       headline property here that is kernel-proved
+- `CircuitHdl.Examples.MeshSwitch` -- a wormhole switch implementing that policy, five ports and
+                                      a registered allocator so traversal is multi-cycle
+- `CircuitHdl.Examples.Mesh4x4`    -- sixteen of them, assembled by a Lean function over the
+                                      coordinates rather than by the surface syntax
 -/

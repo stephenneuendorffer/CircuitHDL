@@ -128,4 +128,22 @@ private def loopyPlus : Module :=
 #guard loopyPlus.settleOrder.unresolved.length = 2
 #guard loopyPlus.settleOrder.steps.map Stmt.targets = [[`s], [`p], [`q]]
 
+/-! ### The mesh, which is the case the file was written for
+
+`meshSwitch` on its own has always been orderable -- the loop only appears once two of them face
+each other. So the switch proves nothing here and the mesh is the test.
+
+**These two numbers are load-bearing.** Removing the output register from `meshSwitch` -- making
+`oJ.valid`/`oJ.data` combinational in the inputs again, or putting an `oJ.ready` term back into
+`iK.ready` -- sends `mesh4x4`'s `unresolved` from zero to the hundreds. That is the regression this
+guards, and it is not visible from any end-to-end test: the old switch delivered flits under
+`Module.settle` perfectly well.
+-/
+
+#guard (meshSwitch 13).settleOrder.unresolved = []
+#guard (mesh4x4 13).settleOrder.unresolved = []
+
+-- Not vacuous: the mesh really does have logic to order, and a good deal of it.
+#guard (mesh4x4 13).settleOrder.steps.length = 1440
+
 end CircuitHdl

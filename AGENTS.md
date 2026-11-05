@@ -70,14 +70,15 @@ alone means kernel-only; anything named `_native.*` means the compiler is truste
 ### One `#eval` beats twenty `#guard`s on a big design
 
 **Every `#guard` is a separate evaluation, and a top-level `def` is not cached across commands.**
-Measured on a sixteen-instance design: five `#guard`s touching one `lowered` definition cost 30s
-against 11s for one, so each command pays the whole lowering again — about **4.8s**, against 0.25s
-for a simulated tick.
+Measured on `mesh4x4`: five `#guard`s touching one `lowered` definition cost 30s against 11s for
+one, so each command pays the whole lowering again — about **4.8s**, against 0.25s for a simulated
+tick. The first `CircuitHdlTest/Mesh4x4.lean` was twenty assertions and took 204s, most of it
+rebuilding the same IR.
 
 So for anything expensive to construct, run the scenarios once inside a single `#eval` and pin a
-*report* with `#guard_msgs` — the `../veir` form. Make each line name itself and print the value it
-actually got, not `false`: a mutation then says which check it broke, which a conjunction of twenty
-guards cannot.
+*report* with `#guard_msgs` — the `../veir` form. Same file, 77s. Make each line name itself and
+print the value it actually got, not `false`: a mutation then says which check it broke, which a
+conjunction of twenty guards cannot.
 
 ## Elaboration traps
 
@@ -121,10 +122,10 @@ Instances are flattened by `Module.ofItems`, so the width rules and the semantic
 existed, source order *was* the order, which is right exactly when the designer happened to write
 the datapath front to back. Every design here did, so nothing noticed for a long time.
 
-A mesh of `meshSwitch`es is the first design for which **no source order exists**, and the reason
-generalises: a switch drives `oJ.valid` downstream and reads `oJ.ready` back upstream, so for any
-two adjacent switches each must come before the other. The unit of ordering was the *process*, and
-a flattened instance is one process. Sorting at statement granularity fixes it.
+`mesh4x4` is the first design for which **no source order exists**, and the reason generalises: a
+switch drives `oJ.valid` downstream and reads `oJ.ready` back upstream, so for any two adjacent
+switches each must come before the other. The unit of ordering was the *process*, and a flattened
+instance is one process. Sorting at statement granularity fixes it.
 
 The failure was invisible from inside either semantics, which is the part worth remembering:
 
@@ -133,7 +134,9 @@ The failure was invisible from inside either semantics, which is the part worth 
 | `Module.settle` | the **previous** value | works, everything a tick late |
 | `Module.toVeir` | a **constant zero** (`lookupVal`'s fallback) | a disconnected wire |
 
-Reverting `SettleOrder.of` to the identity reddens eight checks in
+So the mesh "worked" under the evaluator while the lowering produced hardware in which no flit was
+ever acknowledged. Reverting `SettleOrder.of` to the identity reddens three of the mesh scenarios
+(`corner-SW` delivers nothing, `contend` and `wormhole` each lose a packet) and eight checks in
 `CircuitHdlTest/SettleOrder.lean` — measured, not assumed.
 
 ### A genuine loop is reported, not fixed
@@ -142,6 +145,16 @@ Reverting `SettleOrder.of` to the identity reddens eight checks in
 for every design here; `CircuitHdlTest/SettleOrder.lean` builds two- and three-statement loops on
 purpose so the field is known to be reachable. `Module.check` does **not** consult it yet, and that
 is deliberate — no design has a loop, so the rule would be added without a case that exercises it.
+
+**Two combinational modules facing each other is a loop even when each is obviously fine.** The
+first `meshSwitch` was combinational end to end: `oJ.data` a mux over the input flits, `iK.ready`
+an OR over the output readies. Both are reasonable in isolation and the switch simulated
+correctly on its own. In a mesh it closed a cycle in *both* directions at once —
+`mesh4x4.settleOrder.unresolved` had **672** signals. The fix is the one real routers use: each
+output carries a one-flit register, so every path between two switches is register to register.
+That took `mesh4x4 13` from 160 to **320 `seq.firreg`s** and about 7200 lowered operations.
+The buffer deliberately does not bypass, which caps a link at one flit every two cycles and is
+what keeps `iK.ready` free of any `oJ.ready` term. Bypassing reintroduces the backward loop.
 
 ## Known blocker
 
@@ -195,6 +208,12 @@ nothing that would be built. Three things close that gap, and they overlap less 
 The harness in `CircuitHdlTest/FifoHarness.lean` drives a `Sim`, not a `Module`, which is what
 lets one check serve both semantics. `Module` coerces to `Sim`; `lowered m` builds the IR and
 wraps `Veir.Netlist` around it.
+
+**The first layer has now paid for itself twice over, on the mesh.** The `agree` line of
+`CircuitHdlTest/Mesh4x4.lean` runs one scenario on both and is the only check in the package that
+compares them directly rather than running the same assertion against each. It is worth keeping
+for a design of this size: the two semantics' failure modes for an unordered combinational read
+are a stale value and a constant zero, and neither side can tell on its own which it is doing.
 
 **The netlist semantics lives in `../veir`, not here.** `Veir/Interpreter/Netlist.lean` simulates
 a `hw.module`; `Veir/Data/Comb/Basic.lean` and `Veir/Dialects/Comb/OpInfo.lean` say what the
@@ -320,6 +339,48 @@ Verilog testbench, is the way to run what the backend emits. Things that cost ti
 
 What it does **not** cover: `arc.sim.get_port` reads ports only, so registers and memory contents
 are compared only through their effect on the outputs. The netlist theorems are what cover those.
+
+## The mesh NoC, and what its tests actually catch
+
+Three files, three different kinds of claim, and they are not interchangeable:
+
+| File | Claim | Trust |
+|---|---|---|
+| `CircuitHdl/Examples/MeshRoutingModel.lean` | XY routing has an acyclic channel dependency graph, so it cannot deadlock — at any mesh size | **kernel** (`propext`, `Quot.sound`) |
+| `CircuitHdlTest/MeshSwitch.lean` | the hardware computes that policy, and offers no turn it forbids — all 256 (position, destination) pairs | interpreter |
+| `CircuitHdlTest/Mesh4x4.lean` | packets are delivered, to the right node, without interleaving | `native_decide` via VeIR, a handful of traffic patterns |
+
+`mesh4x4 13` is 1810 signals, 129 processes, 1440 combinational statements and 320 registers,
+lowering to about 7200 operations — against `asyncFifo`'s 55. A tick costs about **0.25s** on the
+netlist path and about **3.5s** on the association-list evaluator, so mesh tests are a handful of
+concrete traffic patterns rather than the schedule *families* the FIFOs get.
+
+The deadlock theorem is the only headline property in this package that is kernel-proved, and it
+is proved by a **rank function**, not by enumerating a graph — which is why it holds for an
+arbitrary `MeshRoutingModel` rather than for a 4x4. Enumerating the ~1500 edges of a 4x4 CDG would
+have been a `native_decide` over a list the kernel cannot reduce.
+
+**One step is prose.** Relating the mesh's actual wait-for graph — which packet holds which channel
+at which instant — to the model's `Depends` relation is an argument, written out at the end of
+`CircuitHdlTest/MeshSwitch.lean` and not formalised. What *is* mechanical is the part where a bug
+would be: the policy the hardware computes.
+
+### Design-level mutations, measured
+
+- **YX instead of XY** (swap the two pairs of tests in `meshRouteUnit`): reddens five checks in
+  `CircuitHdlTest/MeshSwitch.lean`, including the no-forbidden-turn obligation, and leaves
+  `CircuitHdlTest/Mesh4x4.lean` **entirely green** — both halves run, not assumed. That asymmetry
+  is the whole argument for the turn check: a YX switch in an XY mesh is the deadlock-introducing
+  bug, it delivers every packet, and no amount of end-to-end testing would find it.
+- **`rel4 = take4`** — every flit releases the ejection channel instead of only the tail, so the
+  switch does per-flit rather than wormhole allocation. `wormhole-order` goes from
+  `[1,1,1,2,2,2]` to `[1,2,1,2,1,2]`: **all six flits still arrive**, perfectly interleaved, and
+  *nothing else in the suite moves*. That check is the only thing in the package that can see it.
+- **Releasing on `take` of any flit via `alloc4`** loses the second packet outright rather than
+  interleaving it, so it reddens `contend` as well. Prefer the `rel4` mutation when checking
+  whether the wormhole property specifically is covered — it isolates it.
+- **Reverting `SettleOrder.of` to the identity** reddens `corner-SW`, `contend` and `wormhole`,
+  and eight checks in `CircuitHdlTest/SettleOrder.lean`. See the combinational-order section.
 
 ## Conventions
 

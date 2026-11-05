@@ -11,6 +11,7 @@ import CircuitHdlTest.ShiftFifo
 import CircuitHdlTest.PipeFifo
 import CircuitHdlTest.MeshRoutingModel
 import CircuitHdlTest.MeshSwitch
+import CircuitHdlTest.Mesh4x4
 
 /-!
 Umbrella module for the test suite.
@@ -49,6 +50,11 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 deadlock freedom is kernel-proved
 - `CircuitHdlTest.MeshSwitch` -- that the switch computes `xyRoute` over all 256 (position,
                                 destination) pairs, and never offers a turn the policy forbids
+- `CircuitHdlTest.Mesh4x4`   -- that the assembled mesh delivers: corner to corner in each
+                                direction, under contention, and without interleaving two packets
+                                sharing an output. One `#eval` rather than many `#guard`s, because
+                                each command would re-lower the whole mesh
+
 `ShiftFifo` and `AsyncFifo` each end by re-running their refinement checks against the design as
 `CircuitHdl.Circt` lowers it, under `Veir.Netlist` -- the same harness, schedules and abstraction
 functions, a different semantics underneath, and one written in another repository. Those results are what connect the
