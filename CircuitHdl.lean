@@ -1,6 +1,7 @@
 import CircuitHdl.Core
 import CircuitHdl.Width
 import CircuitHdl.Clocks
+import CircuitHdl.SettleOrder
 import CircuitHdl.Syntax
 import CircuitHdl.Semantics
 import CircuitHdl.Transactions
@@ -26,6 +27,9 @@ The language itself:
 - `CircuitHdl.Core`      -- the typed AST and module assembly
 - `CircuitHdl.Width`     -- the width rules over the AST
 - `CircuitHdl.Clocks`    -- clock-domain analysis
+- `CircuitHdl.SettleOrder` -- dependency order for combinational logic, which both the evaluator
+                            and the lowering walk. The mesh is the first design for which source
+                            order is not one
 - `CircuitHdl.Syntax`    -- the `module!` surface syntax, its lowering and width inference
 - `CircuitHdl.Semantics` -- evaluation over core `BitVec`
 - `CircuitHdl.Transactions` -- driving AXI-Stream ports at transaction level

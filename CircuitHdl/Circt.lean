@@ -1,6 +1,7 @@
 import CircuitHdl.Core
 import CircuitHdl.Width
 import CircuitHdl.Clocks
+import CircuitHdl.SettleOrder
 import Veir.Rewriter.WfRewriter
 import Veir.Verifier
 import Veir.Printer
@@ -611,10 +612,12 @@ def Module.toVeir (m : Module) :
     | (_, _, firstReg, _) :: _ => modify fun s => { s with insertAt := .before firstReg }
     | [] => pure ()
 
-    -- Settle: the combinational processes, in source order.
-    for p in m.body do
-      if !p.isSequential then
-        σ := ← lowerStmtList σ p.body
+    -- Settle: the combinational statements, in dependency order. Source order is not enough --
+    -- see `CircuitHdl.SettleOrder`. A signal read before its driver had been emitted used to fall
+    -- through `lookupVal` to a constant zero, which is a *disconnected wire* in the result: the
+    -- mesh's backward `ready` path lowered to a hard-wired 0 and no end-to-end flit was ever
+    -- acknowledged.
+    σ := ← lowerStmtList σ m.settleOrder.steps
 
     -- The clock edge: each sequential process against the settled scope.
     let mut next : Scope := []

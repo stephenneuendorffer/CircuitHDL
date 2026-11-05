@@ -67,6 +67,18 @@ expressions — gray-code adjacency, flag correctness — in seconds. Two caveat
 **Check trust claims with `#print axioms` rather than asserting them.** `propext` and `Quot.sound`
 alone means kernel-only; anything named `_native.*` means the compiler is trusted.
 
+### One `#eval` beats twenty `#guard`s on a big design
+
+**Every `#guard` is a separate evaluation, and a top-level `def` is not cached across commands.**
+Measured on a sixteen-instance design: five `#guard`s touching one `lowered` definition cost 30s
+against 11s for one, so each command pays the whole lowering again — about **4.8s**, against 0.25s
+for a simulated tick.
+
+So for anything expensive to construct, run the scenarios once inside a single `#eval` and pin a
+*report* with `#guard_msgs` — the `../veir` form. Make each line name itself and print the value it
+actually got, not `false`: a mutation then says which check it broke, which a conjunction of twenty
+guards cannot.
+
 ## Elaboration traps
 
 - **`autoImplicit` is on.** An identifier that does not resolve — including one that is `private`
@@ -101,6 +113,35 @@ Things the surface syntax does *not* have, each of which has bitten:
 
 Instances are flattened by `Module.ofItems`, so the width rules and the semantics never see one —
 `InstInfo` survives only so bindings can be checked.
+
+## Combinational order, and the loop that used to hide in it
+
+`CircuitHdl/SettleOrder.lean` sorts a module's combinational statements into dependency order, and
+**both** `Module.settle` and `Module.toVeir` walk that order rather than source order. Before it
+existed, source order *was* the order, which is right exactly when the designer happened to write
+the datapath front to back. Every design here did, so nothing noticed for a long time.
+
+A mesh of `meshSwitch`es is the first design for which **no source order exists**, and the reason
+generalises: a switch drives `oJ.valid` downstream and reads `oJ.ready` back upstream, so for any
+two adjacent switches each must come before the other. The unit of ordering was the *process*, and
+a flattened instance is one process. Sorting at statement granularity fixes it.
+
+The failure was invisible from inside either semantics, which is the part worth remembering:
+
+| | undriven read returns | looks like |
+|---|---|---|
+| `Module.settle` | the **previous** value | works, everything a tick late |
+| `Module.toVeir` | a **constant zero** (`lookupVal`'s fallback) | a disconnected wire |
+
+Reverting `SettleOrder.of` to the identity reddens eight checks in
+`CircuitHdlTest/SettleOrder.lean` — measured, not assumed.
+
+### A genuine loop is reported, not fixed
+
+`SettleOrder.unresolved` names the signals no order could drive before they were read. It is empty
+for every design here; `CircuitHdlTest/SettleOrder.lean` builds two- and three-statement loops on
+purpose so the field is known to be reachable. `Module.check` does **not** consult it yet, and that
+is deliberate — no design has a loop, so the rule would be added without a case that exercises it.
 
 ## Known blocker
 

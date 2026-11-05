@@ -3,6 +3,7 @@ import CircuitHdlTest.AbstractQueueModel
 import CircuitHdlTest.Syntax
 import CircuitHdlTest.Semantics
 import CircuitHdlTest.Clocks
+import CircuitHdlTest.SettleOrder
 import CircuitHdlTest.AsyncFifo
 import CircuitHdlTest.Circt
 import CircuitHdlTest.FifoHarness
@@ -40,7 +41,14 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 refines the same two models by entirely different means
 - `CircuitHdlTest.PipeFifo`  -- the pipeline FIFO: a valid bit per stage, so the queue is not a
                                 dense prefix and the gaps between words are permanent
-
+- `CircuitHdlTest.SettleOrder` -- that combinational statements are ordered by dependency rather
+                                than by source, that an already-ordered module is left alone, and
+                                that a real combinational loop is reported instead of miscompiled
+- `CircuitHdlTest.MeshRoutingModel` -- the routing theory: that `xyRoute` delivers, that the
+                                dependency relation it is quantified over is inhabited, and that
+                                deadlock freedom is kernel-proved
+- `CircuitHdlTest.MeshSwitch` -- that the switch computes `xyRoute` over all 256 (position,
+                                destination) pairs, and never offers a turn the policy forbids
 `ShiftFifo` and `AsyncFifo` each end by re-running their refinement checks against the design as
 `CircuitHdl.Circt` lowers it, under `Veir.Netlist` -- the same harness, schedules and abstraction
 functions, a different semantics underneath, and one written in another repository. Those results are what connect the

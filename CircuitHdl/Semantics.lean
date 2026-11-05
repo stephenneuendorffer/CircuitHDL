@@ -1,5 +1,6 @@
 import CircuitHdl.Core
 import CircuitHdl.Width
+import CircuitHdl.SettleOrder
 
 /-!
 Denotational semantics for the circuit HDL, over core `BitVec`.
@@ -251,9 +252,19 @@ def Module.initState (m : Module) : State :=
       if σ.any (·.1 == x) then σ else σ ++ [(x, Cell.mem (List.replicate d (Value.ofNat w 0)))])
     sigs
 
-/-- Run the combinational processes to a settled state. -/
+/-- Run the combinational logic to a settled state.
+
+One pass, over `Module.settleOrder` rather than over the processes in source order. The pass is
+single because the schedule is in dependency order, not the other way round: before
+`CircuitHdl.SettleOrder` existed this walked the processes as written, which is the same thing
+whenever source order happens to be a dependency order and silently reads stale values when it is
+not. Every design here except the mesh was in that happy case, which is why the difference went
+unnoticed for so long.
+
+The flattening is free: a combinational process has no sensitivity list and blocking assignment
+makes statement order the only thing the boundary expressed. -/
 def Module.settle (m : Module) (σ : State) : Except EvalError State :=
-  (m.body.filter Process.isCombinational).foldlM Process.exec σ
+  Stmt.execBlockingList σ m.settleOrder.steps
 
 /-- Take a clock edge: run the sequential processes. -/
 def Module.clockEdge (m : Module) (σ : State) : Except EvalError State :=
