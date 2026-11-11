@@ -465,8 +465,7 @@ private def staticIdx? (ctx : SymCtx) : TSyntax `circuit_expr → Option (TSynta
   | `(circuit_expr| $x:ident) => if isGenvar ctx x then some ⟨x.raw⟩ else none
   | _ => none
 
-/-- Does this expression mention a loop binder or a parameter anywhere? Used only to give a
-better error than "unknown signal 'i'" for an index like `r[i + 1]`. -/
+/-- Does this expression mention a loop binder or a parameter anywhere? -/
 private partial def mentionsGenvar (ctx : SymCtx) (stx : TSyntax `circuit_expr) : Bool :=
   go stx.raw
 where
@@ -475,9 +474,25 @@ where
     | .node _ _ args => args.any go
     | _ => false
 
-/-- Reject a dynamic index that was *meant* statically. -/
+/-- Does it read anything the design declares? -/
+private partial def mentionsSignal (ctx : SymCtx) (stx : TSyntax `circuit_expr) : Bool :=
+  go stx.raw
+where
+  go : Syntax → Bool
+    | .ident _ _ n _ =>
+        (ctx.env.lookup n).isSome || (ctx.arrays.lookup n).isSome
+          || (ctx.families.lookup n).isSome || (ctx.mems.lookup n).isSome
+    | .node _ _ args => args.any go
+    | _ => false
+
+/-- Reject an index that was *meant* statically: one built from loop binders and circuit syntax
+but reading nothing, like `r[i + 1]`, which is neither an element chosen before the design runs
+nor an address the hardware computes.
+
+An index that reads a signal is hardware however many binders it also mentions -- `idata[own[j]]`
+selects by a value, and `j` only says *which* register holds it. -/
 private def rejectComputedIndex (ctx : SymCtx) (i : TSyntax `circuit_expr) : MacroM Unit := do
-  if mentionsGenvar ctx i then
+  if mentionsGenvar ctx i && !mentionsSignal ctx i then
     Macro.throwErrorAt i
       "this index mixes a loop binder with circuit syntax, so it is neither an element selected \
        before the design runs nor an address computed by hardware; write `#(..)` around it to \

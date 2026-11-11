@@ -71,11 +71,12 @@ private def coord (x y : Nat) (which : String) : Name := Name.mkSimple s!"{which
 private def dead (x y d : Nat) (field : String) : Name :=
   Name.mkSimple s!"dead{x}{y}{d}_{field}"
 
-/-- A switch port name. These are *hierarchical* -- the `module!` syntax builds `i0.valid` as
-`i0 ++ valid`, not as a simple name containing a dot -- and binding to a simple name with a dot in
-it fails with "not a port of the module it instantiates". -/
-private def swPort (port field : String) : Name :=
-  Name.mkSimple port ++ Name.mkSimple field
+/-- A switch port name. The switch's ports are an *array*, so port `k` of side `i` carrying
+`valid` is `i.valid.k` -- a hierarchical name with an index on the end, which `indexedName`
+builds. Binding to a simple name containing dots fails with "not a port of the module it
+instantiates". -/
+private def swPort (side : String) (k : Nat) (field : String) : Name :=
+  indexedName (Name.mkSimple side ++ Name.mkSimple field) k
 
 /-! ### The module -/
 
@@ -126,18 +127,18 @@ def mesh4x4 (fw : Nat) : Module :=
           match neighbour x y k with
           | some (nx, ny) =>
               let j := opposite k
-              [(swPort s!"i{k}" "valid", lnk nx ny j "valid"),
-               (swPort s!"i{k}" "ready", lnk nx ny j "ready"),
-               (swPort s!"i{k}" "data", lnk nx ny j "data")]
+              [(swPort "i" k "valid", lnk nx ny j "valid"),
+               (swPort "i" k "ready", lnk nx ny j "ready"),
+               (swPort "i" k "data", lnk nx ny j "data")]
           | none =>
-              [(swPort s!"i{k}" "valid", dead x y k "valid"),
-               (swPort s!"i{k}" "ready", dead x y k "ready"),
-               (swPort s!"i{k}" "data", dead x y k "data")]
+              [(swPort "i" k "valid", dead x y k "valid"),
+               (swPort "i" k "ready", dead x y k "ready"),
+               (swPort "i" k "data", dead x y k "data")]
       let outBind : List (Name × Name) :=
         dirs.flatMap fun j =>
-          [(swPort s!"o{j}" "valid", lnk x y j "valid"),
-           (swPort s!"o{j}" "ready", lnk x y j "ready"),
-           (swPort s!"o{j}" "data", lnk x y j "data")]
+          [(swPort "o" j "valid", lnk x y j "valid"),
+           (swPort "o" j "ready", lnk x y j "ready"),
+           (swPort "o" j "data", lnk x y j "data")]
       -- Every binding here ties a port to a whole signal; `BindTarget` exists for the other case,
       -- a port tied to one element of an array, which this module has no arrays to use.
       Item.inst (Name.mkSimple s!"sw{x}{y}") (meshSwitch fw)
@@ -145,10 +146,10 @@ def mesh4x4 (fw : Nat) : Module :=
          ([(`clk, `clk), (`rst, `rst),
           (`myX, coord x y "mx"), (`myY, coord x y "my"),
           -- Local injection and ejection.
-          (`i4.valid, inj x y "valid"), (`i4.ready, inj x y "ready"),
-          (`i4.data, inj x y "data"),
-          (`o4.valid, ej x y "valid"), (`o4.ready, ej x y "ready"),
-          (`o4.data, ej x y "data")] ++ inBind ++ outBind))
+          (swPort "i" 4 "valid", inj x y "valid"), (swPort "i" 4 "ready", inj x y "ready"),
+          (swPort "i" 4 "data", inj x y "data"),
+          (swPort "o" 4 "valid", ej x y "valid"), (swPort "o" 4 "ready", ej x y "ready"),
+          (swPort "o" 4 "data", ej x y "data")] ++ inBind ++ outBind))
 
   Module.ofItems `mesh4x4 inputs outputs
     (linkWires ++ coordWires ++ edgeWires ++ coordDrives ++ edgeDrives ++ switches)

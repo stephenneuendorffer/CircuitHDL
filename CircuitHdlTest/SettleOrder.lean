@@ -201,6 +201,35 @@ private def dynOrder : Module :=
 #guard (dynOrder.settle (dynOrder.initState.apply [(`x, w8 42), (`i, w2 1)])).toOption.bind
   (State.valueOf? · `o) = some 42
 
+/-- **One statement reading several elements of one array.** The writers come after it in source
+order, so the schedule has to move it to the end.
+
+This is the shape that broke, and it broke quietly. The reader index is keyed by *name*, so a
+statement reading three elements of `a` was listed under `a` three times; the decrement that
+follows a completed driver rescans the reader's uses, so it ran three times too, and the reader's
+count reached zero after the **first** driver. It was then scheduled ahead of the other two and
+read values nothing had written. No cycle, so `unresolved` stayed empty and nothing in the package
+noticed until `meshSwitch` -- whose `anyReq[j]` ors five elements of one array -- lost every packet
+that crossed a switch boundary, in the netlist only, where an undriven read is a hard zero rather
+than a stale value.
+
+The three elements take *different* values on purpose: with the bug the output still had `a[0]`
+in it, so a test whose elements agreed would have passed. -/
+private def multiRead : Module :=
+  Module.ofItems `multiRead [(`x, 8)] [(`o, 8)]
+    [ Item.array `a 3 8,
+      Item.stmt (.assign `o
+        (.bin .add 8 (.elem `a 8 0) (.bin .add 8 (.elem `a 8 1) (.elem `a 8 2)))),
+      Item.stmt (.setElem `a 8 0 (.var `x)),
+      Item.stmt (.setElem `a 8 1 (.lit 8 2)),
+      Item.stmt (.setElem `a 8 2 (.lit 8 4)) ]
+
+#guard multiRead.settleOrder.unresolved = []
+#guard multiRead.settleOrder.steps.map Stmt.targets
+  = [[.elem `a 0], [.elem `a 1], [.elem `a 2], [.sig `o]]
+#guard (multiRead.settle (multiRead.initState.apply [(`x, w8 9)])).toOption.bind
+  (State.valueOf? · `o) = some 15
+
 /-- The negative control for arrays: a cycle *through* two elements is still a cycle, and is
 reported as the two elements rather than as the array. -/
 private def arrLoop : Module :=
@@ -228,6 +257,11 @@ guards, and it is not visible from any end-to-end test: the old switch delivered
 #guard (mesh4x4 13).settleOrder.unresolved = []
 
 -- Not vacuous: the mesh really does have logic to order, and a good deal of it.
-#guard (mesh4x4 13).settleOrder.steps.length = 1440
+--
+-- 1600 and not the 1440 it was before `meshSwitch` was written in loops: the switch copies its
+-- five input ports into two arrays so the crossbar can select one by value, which is ten
+-- statements apiece across sixteen switches. Every other statement is the one it was.
+#guard (mesh4x4 13).settleOrder.steps.length = 1600
+#guard (meshSwitch 13).settleOrder.steps.length = 95
 
 end CircuitHdl

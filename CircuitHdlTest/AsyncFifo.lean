@@ -189,11 +189,16 @@ of this reads a width, so nothing gets stuck on a symbolic `Nat`.
 -/
 
 -- The partition the FIFO is built around, read straight out of the design.
+--
+-- `mem` is in it, and belongs there: a memory written from two domains is the same race a
+-- register would be, which `singleClocked` always said and `clockDomains` used to leave out. It
+-- comes last because `Module.stateNames` lists scalars, then arrays, then memories.
 #guard fifo4.clockDomains =
   [(`wbin, [`wclk]), (`wptr, [`wclk]), (`wq1, [`wclk]), (`wq2, [`wclk]), (`wfull, [`wclk]),
    (`rbin, [`rclk]), (`rptr, [`rclk]), (`rq1, [`rclk]), (`rq2, [`rclk]), (`rempty, [`rclk]),
    (`wfire, []), (`rfire, []), (`wbnext, []), (`wgnext, []), (`wfullnext, []),
-   (`rbnext, []), (`rgnext, []), (`remptynext, []), (`waddr, []), (`raddr, [])]
+   (`rbnext, []), (`rgnext, []), (`remptynext, []), (`waddr, []), (`raddr, []),
+   (`mem, [`wclk])]
 
 /-- **No register in the FIFO is driven by more than one clock -- at any size.**
 

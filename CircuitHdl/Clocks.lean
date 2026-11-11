@@ -59,9 +59,19 @@ def Module.driversOf (m : Module) (x : Name) : List Name :=
   (m.body.filter fun p => p.isSequential && p.writes x).flatMap
     fun p => p.sensitivity.map Event.signal
 
-/-- Each declared signal paired with the clocks that drive it. For inspecting a design. -/
+/-- Everything that can hold state, by name: scalars, arrays and memories. The three are declared
+apart because they are indexed differently, but a clock domain is a property of the declaration
+and does not care which kind it is. -/
+def Module.stateNames (m : Module) : List Name :=
+  (m.regs.map Prod.fst) ++ (m.arrays.map Prod.fst) ++ (m.mems.map Prod.fst)
+
+/-- Each declared signal paired with the clocks that drive it. For inspecting a design.
+
+Arrays are included, and leaving them out was a real omission rather than a tidy-up: a design
+whose registers are *all* arrays -- `meshSwitch` is one -- reported no clock domains at all, so a
+check that the only clock is `clk` passed by having nothing to say. -/
 def Module.clockDomains (m : Module) : List (Name × List Name) :=
-  m.regs.map fun (x, _) => (x, (m.driversOf x).eraseDups)
+  m.stateNames.map fun x => (x, (m.driversOf x).eraseDups)
 
 /-- No signal is driven by more than one clock.
 
@@ -69,12 +79,11 @@ Arrays and memories are included alongside registers: either one written from tw
 same race. An array is judged whole rather than element by element, which is the rule a memory
 already has -- two domains writing two elements of one array is a design that wants two arrays. -/
 def Module.singleClocked (m : Module) : Bool :=
-  ((m.regs.map Prod.fst) ++ (m.arrays.map Prod.fst) ++ (m.mems.map Prod.fst)).all fun x =>
-    (m.driversOf x).eraseDups.length ≤ 1
+  m.stateNames.all fun x => (m.driversOf x).eraseDups.length ≤ 1
 
 /-- The signals that break it, for a readable failure. -/
 def Module.multiplyClocked (m : Module) : List (Name × List Name) :=
-  ((m.regs.map Prod.fst) ++ (m.arrays.map Prod.fst) ++ (m.mems.map Prod.fst)).filterMap fun x =>
+  m.stateNames.filterMap fun x =>
     let cs := (m.driversOf x).eraseDups
     if cs.length ≤ 1 then none else some (x, cs)
 

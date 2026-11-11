@@ -182,9 +182,18 @@ def of (stmts : List Stmt) : SettleOrder := Id.run do
       defs := defs.add t
   let mut readers : Std.HashMap Name (Array Nat) := {}
   for i in [0 : n] do
+    -- **Once per statement per name.** A statement reading several elements of one array --
+    -- `anyReq[j] = req[j] | req[5+j] | ..` in `meshSwitch` -- would otherwise be listed under
+    -- that array once per element, and the decrement below, which rescans the reader's uses,
+    -- would then run once per listing. Its count would reach zero after the *first* driver
+    -- completed and it would be scheduled ahead of the rest, reading values nothing had written.
+    -- That is not a cycle, so `unresolved` stays empty and nothing else notices.
+    let mut seen : List Name := []
     for u in uses[i]! do
       let k := u.name
-      readers := readers.insert k ((readers.getD k #[]).push i)
+      if !seen.contains k then
+        seen := k :: seen
+        readers := readers.insert k ((readers.getD k #[]).push i)
 
   -- A statement waits on one edge per (signal it reads, statement that drives that signal),
   -- except its own writes: `x = x | y` reads the value from before this pass, not its own result.
