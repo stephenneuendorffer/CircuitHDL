@@ -77,8 +77,9 @@ module shiftFifo4 #(parameter DW = 8) (
 endmodule
 ```
 
-`+ 7` is `- 1`: the core has no subtraction, and at three bits the two agree. Generally that is
-`#(2 ^ cw - 1)`, which is the same trick written at a width the design does not know yet.
+Both counters subtract. That used to be spelled `+ (2 ^ cw - 1)` -- the same value, since
+subtraction wraps -- because `BinOp` had no `sub`; it does now, and the arithmetic says what it
+means. The two are the same hardware: `comb.sub` against a `comb.add` of a constant.
 
 `cw` is wide enough for `depth` itself, not just for `depth - 1`, because `count` reaches the
 depth when the FIFO is full: at depth four it is 3 bits and counts 0 to 4.
@@ -114,10 +115,10 @@ module! shiftFifo #[(depth dw : Nat)]
   assign wfire = s.valid & s.ready;
   assign rfire = m.valid & m.ready;
   -- Where a new word lands: the first free slot, counted after whatever shift this cycle does.
-  assign widx = count + (rfire ? #(2 ^ cw - 1) : 0);
+  assign widx = count - (rfire ? 1 : 0);
 
   always @(posedge clk) {
-    assign count = rst ? 0 : count + (wfire ? 1 : 0) + (rfire ? #(2 ^ cw - 1) : 0);
+    assign count = rst ? 0 : count + (wfire ? 1 : 0) - (rfire ? 1 : 0);
     -- Every slot but the last: take the new word if it lands here, otherwise shift the slot above
     -- down on a read, otherwise hold.
     for i < (depth - 1) {

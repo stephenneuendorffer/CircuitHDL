@@ -37,7 +37,8 @@ Loosest to tightest, following Verilog:
 | 40 | `==` `!=` |
 | 45 | `<` `<=` `>` `>=` |
 | 60 | `<< n` `>> n` (constant amount) |
-| 65 | `+` |
+| 65 | `+` `-` |
+| 70 | `*` `/` `%` |
 | 75 | `~` bitwise not, `!` logical not (prefix) |
 | max | ident, num, `( e )`, `( e : w )`, `{ e, .. }`, `e[hi:lo]`, `e[i]` |
 
@@ -155,8 +156,9 @@ syntax:max num : circuit_expr
 /-- A Lean term used as a value: `#(depth - 1)`.
 
 Needed because the loop binder of a `for` is a Lean `Nat`, not a signal, and an expression over it
--- `#(i + 1)` -- has no spelling in `circuit_expr`, which has no subtraction and whose `+` means
-an adder. In value position it becomes a literal of the expected width; in an index position it
+-- `#(i + 1)` -- has no spelling in `circuit_expr`, whose arithmetic is hardware: `+` is an adder
+and `-` a subtractor, not elaboration-time arithmetic. In value position it becomes a literal of
+the expected width; in an index position it
 selects an element. A bare numeral and a bare loop binder are the two cases common enough to be
 written without it. -/
 syntax:max "#" "(" term ")" : circuit_expr
@@ -168,6 +170,10 @@ syntax:max circuit_expr:max "[" circuit_expr "]" : circuit_expr
 syntax:75 "~" circuit_expr:75 : circuit_expr
 syntax:75 "!" circuit_expr:75 : circuit_expr
 syntax:65 circuit_expr:65 " + " circuit_expr:66 : circuit_expr
+syntax:65 circuit_expr:65 " - " circuit_expr:66 : circuit_expr
+syntax:70 circuit_expr:70 " * " circuit_expr:71 : circuit_expr
+syntax:70 circuit_expr:70 " / " circuit_expr:71 : circuit_expr
+syntax:70 circuit_expr:70 " % " circuit_expr:71 : circuit_expr
 syntax:60 circuit_expr:60 " << " term:max : circuit_expr
 syntax:60 circuit_expr:60 " >> " term:max : circuit_expr
 syntax:45 circuit_expr:46 " < " circuit_expr:46 : circuit_expr
@@ -520,6 +526,10 @@ private partial def widthOf? (ctx : SymCtx) (stx : TSyntax `circuit_expr) :
   | `(circuit_expr| $e:circuit_expr << $_:term) => widthOf? ctx e
   | `(circuit_expr| $e:circuit_expr >> $_:term) => widthOf? ctx e
   | `(circuit_expr| $a:circuit_expr + $b:circuit_expr)
+  | `(circuit_expr| $a:circuit_expr - $b:circuit_expr)
+  | `(circuit_expr| $a:circuit_expr * $b:circuit_expr)
+  | `(circuit_expr| $a:circuit_expr / $b:circuit_expr)
+  | `(circuit_expr| $a:circuit_expr % $b:circuit_expr)
   | `(circuit_expr| $a:circuit_expr & $b:circuit_expr)
   | `(circuit_expr| $a:circuit_expr ^ $b:circuit_expr)
   | `(circuit_expr| $a:circuit_expr | $b:circuit_expr) =>
@@ -612,6 +622,14 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
       `(Expr.cmp CmpOp.eq $w $(← checkExpr ctx w e) (Expr.lit $w 0))
   | `(circuit_expr| $a:circuit_expr + $b:circuit_expr) =>
       `(Expr.bin BinOp.add $expected $(← checkExpr ctx expected a) $(← checkExpr ctx expected b))
+  | `(circuit_expr| $a:circuit_expr - $b:circuit_expr) =>
+      `(Expr.bin BinOp.sub $expected $(← checkExpr ctx expected a) $(← checkExpr ctx expected b))
+  | `(circuit_expr| $a:circuit_expr * $b:circuit_expr) =>
+      `(Expr.bin BinOp.mul $expected $(← checkExpr ctx expected a) $(← checkExpr ctx expected b))
+  | `(circuit_expr| $a:circuit_expr / $b:circuit_expr) =>
+      `(Expr.bin BinOp.divu $expected $(← checkExpr ctx expected a) $(← checkExpr ctx expected b))
+  | `(circuit_expr| $a:circuit_expr % $b:circuit_expr) =>
+      `(Expr.bin BinOp.modu $expected $(← checkExpr ctx expected a) $(← checkExpr ctx expected b))
   | `(circuit_expr| $a:circuit_expr & $b:circuit_expr) =>
       `(Expr.bin BinOp.and $expected $(← checkExpr ctx expected a) $(← checkExpr ctx expected b))
   | `(circuit_expr| $a:circuit_expr | $b:circuit_expr) =>

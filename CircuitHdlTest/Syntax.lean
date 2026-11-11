@@ -34,6 +34,9 @@ The expected width is pushed down from the right of the `:`.
 /-- info: Expr.bin BinOp.add 8 (Expr.var `q) (Expr.lit 8 1) -/
 #guard_msgs in #reduce [circuit_expr (q : 8) | q + 1 : 8]
 
+/-- info: Expr.bin BinOp.sub 8 (Expr.var `q) (Expr.lit 8 1) -/
+#guard_msgs in #reduce [circuit_expr (q : 8) | q - 1 : 8]
+
 -- The expected width reaches every node, including through parentheses.
 /--
 info: Expr.bin BinOp.and 4 (Expr.var `a) (Expr.bin BinOp.add 4 (Expr.var `b) (Expr.lit 4 2))
@@ -61,6 +64,18 @@ example : [circuit_expr (a : 4, b : 4, c : 4) | a ^ b & c : 4]
         = [circuit_expr (a : 4, b : 4, c : 4) | a ^ (b & c) : 4] := rfl
 example : [circuit_expr (a : 4, b : 4) | ~a + b : 4]
         = [circuit_expr (a : 4, b : 4) | (~a) + b : 4] := rfl
+-- `*`, `/` and `%` bind tighter than `+` and `-`, as in Verilog.
+example : [circuit_expr (a : 4, b : 4, c : 4) | a + b * c : 4]
+        = [circuit_expr (a : 4, b : 4, c : 4) | a + (b * c) : 4] := rfl
+example : [circuit_expr (a : 4, b : 4, c : 4) | a - b / c : 4]
+        = [circuit_expr (a : 4, b : 4, c : 4) | a - (b / c) : 4] := rfl
+example : [circuit_expr (a : 4, b : 4, c : 4) | a % b * c : 4]
+        = [circuit_expr (a : 4, b : 4, c : 4) | (a % b) * c : 4] := rfl
+-- `-` sits with `+`, as it does in Verilog, and associates to the left.
+example : [circuit_expr (a : 4, b : 4, c : 4) | a - b - c : 4]
+        = [circuit_expr (a : 4, b : 4, c : 4) | (a - b) - c : 4] := rfl
+example : [circuit_expr (a : 4, b : 4, c : 4) | a - b + c : 4]
+        = [circuit_expr (a : 4, b : 4, c : 4) | (a - b) + c : 4] := rfl
 example : [circuit_expr (a : 4, b : 4) | a + b << 1 : 4]
         = [circuit_expr (a : 4, b : 4) | (a + b) << 1 : 4] := rfl
 example : [circuit_expr (a : 4, b : 4) | a << 1 < b : 1]

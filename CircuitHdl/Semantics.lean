@@ -148,7 +148,9 @@ def Expr.eval (σ : State) : Expr → Except EvalError Value
   | .lit w n => .ok (Value.ofNat w n)
   | .bin op w a b => do
       let (a', b') ← operands op.symbol w (← Expr.eval σ a) (← Expr.eval σ b)
-      .ok ⟨w, op.apply a' b'⟩
+      match op.apply a' b' with
+      | some v => .ok ⟨w, v⟩
+      | none => .error (.divideByZero op.symbol)
   | .cmp op w a b => do
       let (a', b') ← operands op.symbol w (← Expr.eval σ a) (← Expr.eval σ b)
       .ok ⟨1, BitVec.ofBool (op.apply a' b')⟩

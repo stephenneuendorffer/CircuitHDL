@@ -115,6 +115,9 @@ inductive EvalError where
   | check : CheckError → EvalError
   /-- A memory or an array indexed past the last value it holds. -/
   | indexOutOfRange : Name → (index depth : Nat) → EvalError
+  /-- A zero divisor. The `String` is the operator, `/` or `%`. CIRCT makes this *poison*; this
+  evaluator has none, so it refuses, which is the same choice `indexOutOfRange` makes. -/
+  | divideByZero : String → EvalError
   deriving Repr, DecidableEq
 
 namespace EvalError
@@ -124,6 +127,7 @@ def render : EvalError → String
   -- Neutral about which kind of declaration it was: an array raises this too, and the one message
   -- has to read correctly for both.
   | indexOutOfRange m i d => s!"index {i} is out of range for '{m}', which holds {d} values"
+  | divideByZero sym => s!"the right operand of {sym} is zero"
 
 instance : ToString EvalError := ⟨render⟩
 

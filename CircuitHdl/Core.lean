@@ -18,9 +18,14 @@ operation, so the width rules and the evaluator each get one case per group rath
 operator.
 -/
 
-/-- Width-preserving binary operators: `w → w → w`. -/
+/-- Width-preserving binary operators: `w → w → w`.
+
+`sub` wraps, as `BitVec` subtraction does and as `comb.sub` does, so `0 - 1` is all ones at the
+declared width. It is a real operator rather than sugar for `+ (2 ^ w - 1)`: that idiom was what
+this language had before, it only works for a *constant* right-hand side, and it reads as an
+addition of a magic number. -/
 inductive BinOp where
-  | add | and | or | xor
+  | add | sub | mul | divu | modu | and | or | xor
   deriving Repr, DecidableEq
 
 /-- Comparisons: `w → w → 1`. Unsigned, matching Verilog's default for unsigned operands.
@@ -37,16 +42,32 @@ inductive ShiftOp where
 
 namespace BinOp
 
-def apply (op : BinOp) {n : Nat} (a b : BitVec n) : BitVec n :=
+/-- What the operator computes, or `none` where it is undefined.
+
+`none` is only ever a zero divisor. `Option` rather than `Except EvalError` because `EvalError`
+lives in `CircuitHdl.Width`, which imports this file; `Expr.eval` is what turns the `none` into
+the error, where the operator's symbol is in hand to name it. -/
+def apply (op : BinOp) {n : Nat} (a b : BitVec n) : Option (BitVec n) :=
   match op with
-  | .add => a + b
-  | .and => a &&& b
-  | .or => a ||| b
-  | .xor => a ^^^ b
+  | .add => some (a + b)
+  | .sub => some (a - b)
+  | .mul => some (a * b)
+  -- Division and modulo are the only partial operators here. CIRCT makes a zero divisor
+  -- *poison*; this evaluator has no poison, so it refuses instead, which is the same choice
+  -- `indexOutOfRange` makes for a memory.
+  | .divu => if b == 0 then none else some (a / b)
+  | .modu => if b == 0 then none else some (a % b)
+  | .and => some (a &&& b)
+  | .or => some (a ||| b)
+  | .xor => some (a ^^^ b)
 
 /-- How the operator is spelled in the surface syntax, for error messages. -/
 def symbol : BinOp → String
   | .add => "+"
+  | .sub => "-"
+  | .mul => "*"
+  | .divu => "/"
+  | .modu => "%"
   | .and => "&&"
   | .or => "||"
   | .xor => "^"

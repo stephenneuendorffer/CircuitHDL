@@ -365,6 +365,14 @@ private def lowerExpr (σ : Scope) : Expr → M Val
       -- that mapping is exactly what `Veir.Netlist` checks when it runs the result.
       match op with
       | .add => emit (.comb .add) () w #[a, b]
+      -- `comb.sub` is binary where `comb.add` is variadic, which makes no difference here: the
+      -- lowering emits exactly two operands for every `BinOp`.
+      | .sub => emit (.comb .sub) () w #[a, b]
+      | .mul => emit (.comb .mul) () w #[a, b]
+      -- A zero divisor is *poison* here and an `EvalError` in the evaluator: the one divergence
+      -- these operators add, pinned in `CircuitHdlTest/Circt.lean`.
+      | .divu => emit (.comb .divu) () w #[a, b]
+      | .modu => emit (.comb .modu) () w #[a, b]
       | .and => emit (.comb .and) () w #[a, b]
       | .or => emit (.comb .or) () w #[a, b]
       | .xor => emit (.comb .xor) () w #[a, b]

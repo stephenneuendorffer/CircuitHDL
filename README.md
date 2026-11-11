@@ -115,7 +115,8 @@ Loosest to tightest, following C:
 | 40 | `==` `!=` |
 | 45 | `<` `<=` `>` `>=` |
 | 60 | `<< n` `>> n` (constant amount) |
-| 65 | `+` |
+| 65 | `+` `-` |
+| 70 | `*` `/` `%` |
 | 75 | `~` bitwise not, `!` logical not (prefix) |
 | max | ident, num, `( e )`, `( e : w )`, `{ e, … }`, `e[hi:lo]`, `e[i]` |
 
@@ -346,8 +347,9 @@ happened to be constant. An index that mixes the two, like `r[i + 1]`, is reject
 naming `#(…)` rather than guessed at.
 
 `#(e)` is a Lean term used as a value: an element index, or a literal of whatever width the
-context wants. It exists because a loop binder is a `Nat`, and `circuit_expr` has no subtraction
-and means an adder by `+`.
+context wants. It exists because a loop binder is a `Nat`, and `circuit_expr`'s arithmetic is
+hardware -- `+` is an adder and `-` is a subtractor, not elaboration-time arithmetic on an
+index.
 
 A dynamic index is checked where it can be: an element index past the end of its array is a
 `CheckError`, because it is fixed before the design runs, while an address past the end is an

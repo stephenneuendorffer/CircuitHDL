@@ -27,6 +27,33 @@ private def σ8 : State := [(`a, Value.ofNat 8 12), (`b, Value.ofNat 8 5)]
 #guard (Expr.eval [(`a, Value.ofNat 8 255)]
           (Expr.bin BinOp.add 8 (Expr.var `a) (Expr.lit 8 1))).toOption.map Value.toNat = some 0
 
+#guard (Expr.eval σ8 (Expr.bin BinOp.sub 8 (Expr.var `a) (Expr.var `b))).toOption.map
+  Value.toNat = some 7
+-- And subtraction wraps the other way, which is what makes `0 - 1` all ones rather than an
+-- error. This design used to spell that `+ (2 ^ w - 1)`, for want of the operator.
+#guard (Expr.eval [(`a, Value.ofNat 8 0)]
+          (Expr.bin BinOp.sub 8 (Expr.var `a) (Expr.lit 8 1))).toOption.map Value.toNat = some 255
+
+-- Multiplication wraps too: 200 * 3 is 600, which is 88 in eight bits.
+#guard (Expr.eval [(`a, Value.ofNat 8 200)]
+          (Expr.bin BinOp.mul 8 (Expr.var `a) (Expr.lit 8 3))).toOption.map Value.toNat = some 88
+#guard (Expr.eval σ8 (Expr.bin BinOp.divu 8 (Expr.var `a) (Expr.var `b))).toOption.map
+  Value.toNat = some 2
+#guard (Expr.eval σ8 (Expr.bin BinOp.modu 8 (Expr.var `a) (Expr.var `b))).toOption.map
+  Value.toNat = some 2
+
+/-! Division and modulo are the only partial operators. CIRCT makes a zero divisor *poison*, and
+this evaluator has no poison, so it refuses -- the same choice `indexOutOfRange` makes. Neither
+side invents a value, which is what keeps the divergence narrow. -/
+
+/-- info: Except.error (CircuitHdl.EvalError.divideByZero "/") -/
+#guard_msgs in
+#eval Expr.eval σ8 (Expr.bin BinOp.divu 8 (Expr.var `a) (Expr.lit 8 0))
+
+/-- info: Except.error (CircuitHdl.EvalError.divideByZero "%") -/
+#guard_msgs in
+#eval Expr.eval σ8 (Expr.bin BinOp.modu 8 (Expr.var `a) (Expr.lit 8 0))
+
 /-- info: Except.error (CircuitHdl.EvalError.check (CircuitHdl.CheckError.unbound `nope)) -/
 #guard_msgs in #eval Expr.eval σ8 (Expr.var `nope)
 

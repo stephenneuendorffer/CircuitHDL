@@ -316,4 +316,38 @@ private def oobRead (s : Sim) (i : Nat) : Option Nat :=
 -- The lowered design reads element 0 and carries on.
 #guard oobRead (lowered oobArray) 5 = some 11
 
+/-! #### A zero divisor is where `/` and `%` part, and neither side invents a value
+
+CIRCT makes a zero divisor **poison**, and poison is not a number: `Veir.Netlist` produces it and
+the bridge cannot decode it, so the settle fails. `Expr.eval` has no poison at all, so it refuses
+with `divideByZero` instead.
+
+That is a narrower divergence than the two above. An out-of-range array read and an out-of-range
+memory address each produce a *wrong value* on one side and an error on the other; here both sides
+fail, and only the manner differs. Nothing silently carries on with a number it made up, which is
+why `/` and `%` were worth having at all given the evaluator cannot represent poison.
+-/
+
+module! divides #[] (a : 8, b : 8) -> (q : 8) {
+  assign q = a / b;
+}
+
+private def divAt (s : Sim) (x y : Nat) : Option Nat :=
+  (s.settle (s.init.apply
+    [(`a, Cell.sig (Value.ofNat 8 x)), (`b, Cell.sig (Value.ofNat 8 y))])).toOption.bind
+    (State.valueOf? · `q)
+
+-- With a divisor, the two agree, which is what makes the disagreement below about the zero.
+#guard divAt (divides : Sim) 200 3 = some 66
+#guard divAt (lowered divides) 200 3 = some 66
+
+-- At zero the evaluator names the failure.
+/-- info: Except.error (CircuitHdl.EvalError.divideByZero "/") -/
+#guard_msgs in
+#eval divides.settle (divides.initState.apply
+  [(`a, Cell.sig (Value.ofNat 8 7)), (`b, Cell.sig (Value.ofNat 8 0))])
+
+-- And the netlist fails too, because poison is not a value the harness can read back.
+#guard divAt (lowered divides) 7 0 = none
+
 end CircuitHdl

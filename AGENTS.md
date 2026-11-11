@@ -97,8 +97,26 @@ conjunction of twenty guards cannot.
 
 Things the surface syntax does *not* have, each of which has bitten:
 
-- **No subtraction.** `BinOp` is `add | and | or | xor`. Write `- 1` as `+ (2^w - 1)`; at three
-  bits, `count + 7` is `count - 1`.
+- **The arithmetic is complete now.** `BinOp` is `add | sub | mul | divu | modu | and | or | xor`.
+  `-` sits with `+` at 65, `*` `/` `%` at 70, as in Verilog. All of them lower to `comb` ops VeIR
+  already interpreted, so nothing in `../veir` had to move for any of this. `+`, `-` and `*` wrap,
+  and the two semantics agree on the wrap -- `0 - 1` is all ones and `200 * 3` is 88 at eight
+  bits, under the evaluator *and* the netlist, checked directly rather than reasoned about.
+  Designs used to write `+ (2 ^ w - 1)` for want of subtraction; `shiftFifo` no longer does, and
+  its refinement theorems held across the change, which is what says the two spellings are the
+  same hardware.
+- **`BinOp.apply` returns `Option`**, because `/` and `%` are partial. It is `Option` rather than
+  `Except EvalError` only because `EvalError` lives in `Width.lean`, which imports `Core.lean`;
+  `Expr.eval` turns the `none` into `divideByZero` where the operator's symbol is in hand.
+- **A zero divisor is the one thing `/` and `%` add to the divergence list, and it is the mildest
+  entry on it.** CIRCT makes it *poison*; this evaluator has no poison and refuses. Both sides
+  therefore fail -- the netlist because the bridge cannot decode poison -- where the array and
+  memory divergences each produce a *wrong value* on one side. Nothing carries on with an invented
+  number. Pinned in `CircuitHdlTest/Circt.lean`.
+- **Signed operations are deliberately absent.** VeIR has `divs`, `mods`, `shrs` and the `slt`/
+  `sle` predicates, but Verilog decides signedness from operand *declarations* and this language
+  has no such notion, so a signed form would mean inventing syntax for a case no design here
+  needs. `CmpOp` stays unsigned, matching Verilog's default for unsigned operands.
 - **Arrays and `for` exist, and the index rule is syntactic.** `reg r[depth] : dw;` is `depth`
   registers; `memory m[depth] : dw;` is one `seq.firmem`. An index is an *element* when it is a
   numeral, a loop binder or an explicit `#(..)`, and hardware otherwise — so `r[i + 1]` inside a
