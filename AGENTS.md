@@ -113,6 +113,22 @@ Things the surface syntax does *not* have, each of which has bitten:
   one `for`, in `circuit_stmt`; it reaches item position through `syntax circuit_stmt :
   circuit_item`. Adding a second rule for items made every `for` outside an `always` report
   "unsupported circuit item".
+- **A `for` body is `circuit_item*`, so a loop can generate instances.** Inside an `always` a body
+  item that is not a statement is rejected by name. An instance in a loop needs an indexed name
+  (`meshRouteUnit r[k] (..)`), since two iterations sharing one would collide on every local the
+  submodule has.
+- **A binding may name an array element**, which is not a name: flattening maps it through
+  `BindTarget`, so a read of the bound port becomes `Expr.elem` and a write `Stmt.setElem`. This
+  is what makes a mesh expressible — sixteen instances each wired to a different slice of the same
+  arrays.
+- **An array port is `n` ports, not an array.** `slave i[5] : axis fw` declares `i.valid.0 …`, and
+  `i.valid[k]` needed no new expression grammar: `qualify` already names a field with a dot and
+  Lean lexes `i.valid` as one identifier. They are scalars, so the index is elaboration-time only.
+- **`if #(cond)` is the elaboration-time conditional**, where `if c` on a signal is a mux. One arm
+  is built and the other does not exist.
+- **An index that reads a signal is hardware however many loop binders it mentions.**
+  `idata[own[j]]` selects by a value and `j` only says which register holds it; the rule that
+  rejects `r[i + 1]` has to let that through, and at first it did not.
 - **A loop bound is `term:max`**, so `for i < (depth - 1)` needs its parentheses. A plain `term`
   is greedy and takes the `{` that opens the body as a structure instance — the same trap that
   tightened `assign x : w = e`.
@@ -462,8 +478,14 @@ Three files, three different kinds of claim, and they are not interchangeable:
 | `CircuitHdlTest/MeshSwitch.lean` | the hardware computes that policy, and offers no turn it forbids — all 256 (position, destination) pairs | interpreter |
 | `CircuitHdlTest/Mesh4x4.lean` | packets are delivered, to the right node, without interleaving | `native_decide` via VeIR, a handful of traffic patterns |
 
-`mesh4x4 13` is 1810 signals, 129 processes, 1440 combinational statements and 320 registers,
-lowering to about 7200 operations — against `asyncFifo`'s 55. A tick costs about **0.25s** on the
+Both files are written in `module!` now. `mesh4x4` generates its sixteen instances from a `for`
+over the coordinates, which needed three things the loop did not have: bodies that carry items,
+instance names that index, and **bindings onto array elements** — a mesh is sixteen instances each
+wired to a different slice of the same link arrays, which name-to-name binding cannot express.
+`meshSwitch` is written over its five ports the same way, which took it from 287 lines to 234.
+
+`mesh4x4 13` is 1600 combinational statements and 320 registers, lowering to about 7200
+operations — against `asyncFifo`'s 55. A tick costs about **0.25s** on the
 netlist path and about **3.5s** on the association-list evaluator, so mesh tests are a handful of
 concrete traffic patterns rather than the schedule *families* the FIFOs get.
 
@@ -479,15 +501,20 @@ would be: the policy the hardware computes.
 
 ### Design-level mutations, measured
 
-- **YX instead of XY** (swap the two pairs of tests in `meshRouteUnit`): reddens five checks in
+All of these were re-run after the two mesh files were rewritten in `module!`, because a rewrite
+that quietly stopped a mutation from biting would look exactly like a rewrite that worked.
+
+- **YX instead of XY** (swap the two pairs of tests in `meshRouteUnit`): reddens six checks in
   `CircuitHdlTest/MeshSwitch.lean`, including the no-forbidden-turn obligation, and leaves
   `CircuitHdlTest/Mesh4x4.lean` **entirely green** — both halves run, not assumed. That asymmetry
   is the whole argument for the turn check: a YX switch in an XY mesh is the deadlock-introducing
   bug, it delivers every packet, and no amount of end-to-end testing would find it.
 - **`rel4 = take4`** — every flit releases the ejection channel instead of only the tail, so the
-  switch does per-flit rather than wormhole allocation. `wormhole-order` goes from
-  `[1,1,1,2,2,2]` to `[1,2,1,2,1,2]`: **all six flits still arrive**, perfectly interleaved, and
-  *nothing else in the suite moves*. That check is the only thing in the package that can see it.
+  switch does per-flit rather than wormhole allocation. Now that `rel` is written in a loop the
+  mutation is `if #(j == 4) { assign rel[j] = take[j]; }`, which is the static conditional earning
+  its keep on a mutation rather than on a design. `wormhole-order` goes from `[1,1,1,2,2,2]` to
+  `[1,2,1,2,1,2]`: **all six flits still arrive**, perfectly interleaved, and *nothing else in the
+  suite moves*. That check is the only thing in the package that can see it.
 - **Releasing on `take` of any flit via `alloc4`** loses the second packet outright rather than
   interleaving it, so it reddens `contend` as well. Prefer the `rel4` mutation when checking
   whether the wormhole property specifically is covered — it isolates it.

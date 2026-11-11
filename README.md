@@ -364,6 +364,26 @@ Declarations are not allowed inside a `for`: a `wire t[i]` per iteration would h
 to an environment the macro builds before it knows how many there are. Declare the array outside
 and index it, which is what the loop is for.
 
+A loop carries whole **items**, so it generates instances as well as statements:
+
+```
+slave i[5] : axis fw                      -- an array port: i.valid[k] is one of five ports
+for k < 5 {
+  meshRouteUnit r[k] (.dstX(dx[k]), .dir(rq[k]));
+}
+if #(isEdge x y d) { … } else { … }       -- elaboration time: one arm is built
+```
+
+An instance in a loop needs an indexed name, since two iterations sharing one would collide on
+every local the submodule has. A binding may name an **element** of an array, which is not a name
+at all — flattening maps it so that a read of the bound port becomes an element read and a write
+an element write. That is what makes a mesh expressible: sixteen instances each wired to a
+different slice of the same link arrays. `Examples/Mesh4x4.lean` is written this way.
+
+An array **port** is `n` ports rather than an array, because `Module.inputs` is a list of scalars
+and a port is one wire per element in any hardware. So they are indexed at elaboration time only;
+there is no cell to select from at run time.
+
 ### Interfaces
 
 An AXI port is one thing, but spelling it as three loose wires records neither that they belong
