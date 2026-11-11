@@ -131,7 +131,7 @@ to get there, and the only one that works from a state other than power-up. -/
 module! asyncFifo #[(depth dw : Nat) (_h : validDepth depth = true := by decide)]
     (wclk : 1, wrst : 1, rclk : 1, rrst : 1, slave s : axis dw) -> (master m : axis dw) {
     let n := Nat.log2 depth;
-    reg mem[depth] : dw;
+    memory mem[depth] : dw;
 
     -- Write domain: binary and gray pointers, plus the read pointer synchronized in.
     reg wbin : n+1;
@@ -185,7 +185,7 @@ module! asyncFifo #[(depth dw : Nat) (_h : validDepth depth = true := by decide)
     -- describe the same hardware, but `Stmt.targets` counts both branches of an `if`, so wrapping
     -- the block doubles the target list that `asyncFifo_singleClocked` and `asyncFifo_noRaces`
     -- have to reduce through at a symbolic width -- enough to push them past the default
-    -- heartbeat limit. `shiftFifo4` wraps its block, because nothing there is proved for all
+    -- heartbeat limit. `shiftFifo` wraps its block, because nothing there is proved for all
     -- sizes and the `if` reads closer to the Verilog.
     --
     -- The memory write needs no reset guard: `s.ready` is gated on `~wrst`, so `wfire` is low

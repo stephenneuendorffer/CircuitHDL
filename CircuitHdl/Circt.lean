@@ -80,6 +80,11 @@ inductive CirctError where
   | combinationalStore : Name → CirctError
   /-- A memory nothing ever writes, so there is no clock to tie its ports to. -/
   | undrivenMemory : Name → CirctError
+  /-- An array written at a dynamic index outside a clocked process. The decoder has to hold the
+  elements it does not write, so each element would feed its own mux -- a latch, not a wire. The
+  evaluator allows it, writing one element and leaving the rest, which is the same disagreement
+  `combinationalStore` names for a memory. -/
+  | combinationalArrayWrite : Name → CirctError
   /-- Two ports whose names collide once made into MLIR identifiers. -/
   | portNameCollision : (first second : Name) → CirctError
   /-- VeIR rejected the generated IR. The payload is its diagnostic. -/
@@ -100,6 +105,9 @@ def render : CirctError → String
   | combinationalStore m =>
       s!"memory '{m}' is written outside an 'always' block; a seq.firmem write port needs a clock"
   | undrivenMemory m => s!"memory '{m}' is never written, so its ports have no clock"
+  | combinationalArrayWrite a =>
+      s!"array '{a}' is written at a dynamic index outside an 'always' block; the elements it \
+         does not write would have to hold their own value, which is a latch"
   | portNameCollision a b => s!"ports '{a}' and '{b}' both become the same MLIR identifier"
   | verifier msg => s!"VeIR rejected the generated IR: {msg}"
 
@@ -135,13 +143,24 @@ deriving Inhabited
 identifiers, so the `.` an interface port carries -- `s.data` -- has to go. -/
 def portIdent (x : Name) : String := x.toString.replace "." "_"
 
-/-- What each signal currently holds, mirroring `State` in the evaluator. -/
-abbrev Scope := List (Name × Val)
+/-- What each signal currently holds, mirroring `State` in the evaluator.
+
+Keyed by `Signal` rather than by `Name` because an array is `count` separate values here: the
+evaluator can keep them in one cell and index it, but a netlist has a distinct SSA value per
+element, and `a[3]` has to name one of them. -/
+abbrev Scope := List (Signal × Val)
 
 /-- Rebind a signal, in place so declaration order is preserved. Mirrors `State.setCell`. -/
-def Scope.set (σ : Scope) (x : Name) (v : Val) : Scope :=
+def Scope.set (σ : Scope) (x : Signal) (v : Val) : Scope :=
   if σ.any (·.1 == x) then σ.map (fun (y, u) => if y == x then (y, v) else (y, u))
   else σ ++ [(x, v)]
+
+/-- The name a lowered array element carries, as a `seq.firreg` `name` attribute and therefore as
+the key the test harness reads it back by.
+
+`Name.num`, so `a[3]` prints as `a.3` and `portIdent` makes it `a_3`. It cannot collide with a
+signal the surface syntax can declare, which spells every name it builds with `Name.str`. -/
+def arrayRegName (a : Name) (i : Nat) : Name := Name.num a i
 
 /-! ### The emitter
 
@@ -254,13 +273,22 @@ private def cmpPredicate : CmpOp → Int
 /-- The value of a signal: whatever the walk has bound, or its reset zero. A register or an input
 is always bound, so the fallback is reached only by a signal read before anything drives it --
 which `Expr.eval` likewise reads as zero out of `Module.initState`. -/
-private def lookupVal (σ : Scope) (x : Name) : M Val := do
+private def lookupVal (σ : Scope) (x : Signal) : M Val := do
   match σ.lookup x with
   | some v => pure v
   | none =>
-      match (← read).env.lookup x with
-      | some w => constant w 0
-      | none => throw (.check (.unbound x))
+      match x with
+      | .sig x =>
+          match (← read).env.lookup x with
+          | some w => constant w 0
+          | none => throw (.check (.unbound x))
+      | .elem a _ =>
+          match (← read).arrays.lookup a with
+          | some (_, w) => constant w 0
+          | none => throw (.check (.unboundArray a))
+      -- A whole array is never a value: every access names an element, or is a mux over all of
+      -- them built one element at a time.
+      | .whole a => throw (.check (.notAnArray a))
 
 /-- Emit a memory read port, which is how `mem[addr]` lowers.
 
@@ -281,9 +309,55 @@ private def readPort (m : Name) (addr : Val) : M Val := do
         #[info.value, addr.ptr, (← clockValue info.clock).ptr]
       return { ptr := .opResult ⟨op, 0⟩, width := info.elemW }
 
+/-- The element count and width of a declared array. -/
+private def arrayInfo (a : Name) : M (Nat × Nat) := do
+  match (← read).arrays.lookup a with
+  | some cw => pure cw
+  | none => throw (.check (.unboundArray a))
+
+/-- Is `i` representable in `w` bits? An address that cannot hold an index can never select it,
+and emitting the comparison anyway would be worse than useless: `BitVec.ofNat` would truncate the
+literal and the arm would fire on the *wrong* address. -/
+private def reachable (w i : Nat) : Bool := i < 2 ^ w
+
+/-- `addr == i`, for one arm of a decoder or a mux chain. -/
+private def addrEq (addr : Val) (i : Nat) : M Val := do
+  let lit ← constant addr.width i
+  emit (.comb .icmp) { predicate := iattr 64 (cmpPredicate .eq) } 1 #[addr, lit]
+
+/-- A dynamic array read, as the mux chain it is.
+
+**`CircuitHdl.SelectChain` proves this right**, and kernel-checks it: `Expr.selectChain` is this
+shape as an expression, and `eval_select_eq_selectChain` says it means what `Expr.select` means
+at every width, depth and in-range address.
+
+What that proof cannot reach is *this function*, which builds operations in a monad rather than
+expressions. So the two are tied together by running them, in `CircuitHdlTest/SelectChain.lean`.
+**Change the shape here and that file is what notices** -- the theorem would stay true of a chain
+nothing emits any more.
+
+The address is lowered once and reused across the arms, which is the only reason this is not
+simply `lowerExpr` applied to `Expr.selectChain`: the expression names its address once per arm,
+so lowering it literally would emit the address's logic `count` times.
+
+**Element 0 is the final else**, so an index past the end reads element 0 here where `Expr.eval`
+raises `indexOutOfRange`. A mux tree has nowhere to put an error, and the alternative -- an extra
+comparison and a zero -- would be hardware that exists only to be wrong differently. The
+divergence is deliberate, pinned in `CircuitHdlTest/Circt.lean` alongside the one a `seq.firmem`
+address already has, and `selectChain_out_of_range` proves it is what a chain *must* do. -/
+private def selectChain (σ : Scope) (a : Name) (addr : Val) : M Val := do
+  let (count, elemW) ← arrayInfo a
+  let mut acc ← lookupVal σ (.elem a 0)
+  for i in [1 : count] do
+    if reachable addr.width i then
+      let eq ← addrEq addr i
+      let v ← lookupVal σ (.elem a i)
+      acc ← emit (.comb .mux) () elemW #[eq, v, acc]
+  return acc
+
 /-- Lower an expression to the value it computes, one case per rule in `Expr.width?`. -/
 private def lowerExpr (σ : Scope) : Expr → M Val
-  | .var x => lookupVal σ x
+  | .var x => lookupVal σ (.sig x)
   | .lit w n => constant w n
   | .bin op w a b => do
       let a ← lowerExpr σ a
@@ -334,6 +408,10 @@ private def lowerExpr (σ : Scope) : Expr → M Val
       let v ← readPort m addr
       if v.width = elemW then return v
       else throw (.check (.widthMismatch s!"element of memory '{m}'" elemW v.width))
+  | .elem a _ i => lookupVal σ (.elem a i)
+  | .select a _ addr => do
+      let addr ← lowerExpr σ addr
+      selectChain σ a addr
 
 /-! ### Statements
 
@@ -343,13 +421,23 @@ visible, and one where every read comes from the state at the clock edge.
 
 /-- The signals an `if` may have assigned, in a stable order. Memories are dropped: a `store` is
 lowered to a write port under a path condition, not reconciled with a mux. -/
-private def branchTargets (ctx : Ctx) (t f : List Stmt) : List Name :=
-  (Stmt.targetsList t ++ Stmt.targetsList f).eraseDups.filter fun x =>
-    (ctx.mems.lookup x).isNone
+private def branchTargets (ctx : Ctx) (t f : List Stmt) : List Signal :=
+  ((Stmt.targetsList t ++ Stmt.targetsList f).flatMap (expand ctx)).eraseDups.filter fun s =>
+    (ctx.mems.lookup s.name).isNone
+where
+  /-- A dynamic write is reconciled element by element, like any other assignment: there is no
+  single value a whole array could be muxed to, and each element already carries its own decoder
+  mux from `lowerSeqStmt`. -/
+  expand (ctx : Ctx) : Signal → List Signal
+    | .whole a =>
+        match ctx.arrays.lookup a with
+        | some (count, _) => (List.range count).map (Signal.elem a)
+        | none => []
+    | s => [s]
 
 /-- Reconcile the two arms of an `if` for one signal, taking each arm's value from its own scope
 and falling back through `fallback` for an arm that left the signal alone. -/
-private def muxSignal (cond : Val) (x : Name) (t f fallback : Scope) : M Val := do
+private def muxSignal (cond : Val) (x : Signal) (t f fallback : Scope) : M Val := do
   let tv ← lookupVal (t ++ fallback) x
   let fv ← lookupVal (f ++ fallback) x
   -- Nothing to choose between when both arms left the signal as it was.
@@ -363,8 +451,13 @@ mutual
 private def lowerStmt (σ : Scope) : Stmt → M Scope
   | .assign x e => do
       let v ← lowerExpr σ e
-      return σ.set x v
+      return σ.set (.sig x) v
   | .store m _ _ _ => throw (.combinationalStore m)
+  -- A statically indexed element is an ordinary wire, so this is `assign` with another key.
+  | .setElem a _ i e => do
+      let v ← lowerExpr σ e
+      return σ.set (.elem a i) v
+  | .setDyn a _ _ _ => throw (.combinationalArrayWrite a)
   | .if_ c t f => do
       let cv ← lowerExpr σ c
       let σt ← lowerStmtList σ t
@@ -420,12 +513,33 @@ settled state at the clock edge, and writes accumulate into `pending`. -/
 private def lowerSeqStmt (σ₀ : Scope) (guards : Guards) (pending : Scope) : Stmt → M Scope
   | .assign x e => do
       let v ← lowerExpr σ₀ e
-      return pending.set x v
+      return pending.set (.sig x) v
   | .store m _ addr data => do
       let addr ← lowerExpr σ₀ addr
       let data ← lowerExpr σ₀ data
       writePort m (← materialize guards) addr data
       return pending
+  | .setElem a _ i e => do
+      let v ← lowerExpr σ₀ e
+      return pending.set (.elem a i) v
+  -- The decoder. Every element gets a mux on its own address comparison, holding what it had
+  -- otherwise -- which is sound here only because this is a *clocked* write, where "what it had"
+  -- is the register's own output. The combinational case is refused in `lowerStmt`.
+  --
+  -- The path condition is not needed: an enclosing `if` reconciles each element through
+  -- `branchTargets`, exactly as it does an ordinary assignment. Only a memory write, which emits
+  -- a port rather than a value, has to take the guard as an enable.
+  | .setDyn a _ addr data => do
+      let addr ← lowerExpr σ₀ addr
+      let data ← lowerExpr σ₀ data
+      let (count, elemW) ← arrayInfo a
+      let mut out := pending
+      for i in [0 : count] do
+        if reachable addr.width i then
+          let eq ← addrEq addr i
+          let old ← lookupVal (out ++ σ₀) (.elem a i)
+          out := out.set (.elem a i) (← emit (.comb .mux) () elemW #[eq, data, old])
+      return out
   | .if_ c t f => do
       let cv ← lowerExpr σ₀ c
       let pt ← lowerSeqStmtList σ₀ ((cv, true) :: guards) pending t
@@ -463,7 +577,7 @@ inductive Drive where
 /-- Classify one signal. -/
 def Module.driveOf (m : Module) (x : Name) : Except CirctError Drive := do
   if m.inputs.any (·.1 == x) then return .input
-  let combinational := m.body.any fun p => !p.isSequential && p.targets.contains x
+  let combinational := m.body.any fun p => !p.isSequential && p.writes x
   match (m.driversOf x).eraseDups with
   | [] => return (if combinational then .wire else .undriven)
   | [c] => if combinational then throw (.mixedDrive x) else return (.register c)
@@ -514,7 +628,8 @@ def Module.toVeir (m : Module) :
   let env ← match m.declEnv with
     | .ok env => pure env
     | .error e => throw (.check e)
-  let lctx : Ctx := { env := env, inputs := m.inputs.map Prod.fst, mems := m.mems }
+  let lctx : Ctx :=
+    { env := env, inputs := m.inputs.map Prod.fst, arrays := m.arrays, mems := m.mems }
 
   -- Ports. Inputs become block arguments, in order; outputs become `hw.output` operands.
   let portNames := m.inputs.map Prod.fst ++ m.outputs.map Prod.fst
@@ -548,7 +663,7 @@ def Module.toVeir (m : Module) :
     | throw (.verifier "could not create the hw.module")
 
   let args : Scope := m.inputs.zipIdx.map fun ((x, w), i) =>
-    (x, { ptr := .blockArgument ⟨bodyBlock, i⟩, width := w })
+    (.sig x, { ptr := .blockArgument ⟨bodyBlock, i⟩, width := w })
 
   let init : Emit := { ctx := vctx, block := bodyBlock, insertAt := .atEnd bodyBlock }
 
@@ -558,7 +673,7 @@ def Module.toVeir (m : Module) :
       if p.isSequential then
         let c ← ofExcept (Process.clockOf p)
         unless ((← get).clocks.lookup c).isSome do
-          let arg ← lookupVal args c
+          let arg ← lookupVal args (.sig c)
           let op ← build (.seq .to_clock) () #[Veir.TypeAttr.of Veir.Seq.ClockType {}] #[arg.ptr]
           let v : Val := { ptr := .opResult ⟨op, 0⟩, width := 1 }
           modify fun s => { s with clocks := (c, v) :: s.clocks }
@@ -571,7 +686,7 @@ def Module.toVeir (m : Module) :
         | [] =>
             -- `driversOf` counts only clocked processes, so a memory with no driver is either
             -- written combinationally -- which has no clock to offer a port -- or not at all.
-            if m.body.any (fun p => !p.isSequential && p.targets.contains x) then
+            if m.body.any (fun p => !p.isSequential && p.writes x) then
               throw (.combinationalStore x)
             else throw (.undrivenMemory x)
         | _ => throw (.multiplyClocked x)
@@ -592,19 +707,28 @@ def Module.toVeir (m : Module) :
     -- cannot pull a value the design is still using.
     let mut σ : Scope := args
     -- `declEnv` accumulates front to back, so reversing it restores declaration order.
-    let mut registers : List (Name × Val × Veir.OperationPtr × Veir.OperationPtr) := []
-    for (x, w) in env.reverse do
-      match ← ofExcept (Module.driveOf m x) with
+    let mut registers : List (Signal × Val × Veir.OperationPtr × Veir.OperationPtr) := []
+    -- One `seq.firreg` per register, and per element of a clocked array: an array is `count`
+    -- independently driven registers, which is the whole difference between it and a memory.
+    -- `driveOf` reads the array as a whole -- `Process.writes` works at that granularity -- so
+    -- either every element is a register or none is, and an array driven both ways is the same
+    -- `mixedDrive` a scalar would be.
+    let elems : List (Signal × Name × Nat) :=
+      (env.reverse.map fun (x, w) => (Signal.sig x, x, w))
+      ++ (m.arrays.flatMap fun (a, count, elemW) =>
+            (List.range count).map fun i => (Signal.elem a i, arrayRegName a i, elemW))
+    for (key, regName, w) in elems do
+      match ← ofExcept (Module.driveOf m key.name) with
       | .register c =>
           let some clockVal := (← get).clocks.lookup c | throw (.multiplyClocked c)
           let placeholder ← build (.hw .constant) { value := iattr w 0 } #[ity w] #[]
           let props : Veir.SeqFirRegProperties :=
-            { name := sattr x.toString, isAsync := false, preset := none }
+            { name := sattr regName.toString, isAsync := false, preset := none }
           let regOp ← build (.seq .firreg) props #[ity w]
             #[.opResult ⟨placeholder, 0⟩, clockVal.ptr]
           let v : Val := { ptr := .opResult ⟨regOp, 0⟩, width := w }
-          σ := σ.set x v
-          registers := registers ++ [(x, v, regOp, placeholder)]
+          σ := σ.set key v
+          registers := registers ++ [(key, v, regOp, placeholder)]
       | _ => pure ()
 
     -- From here the body goes *above* the registers, so the result reads in dependency order.
@@ -643,7 +767,7 @@ def Module.toVeir (m : Module) :
       set { s with ctx := Veir.WfRewriter.eraseOp! s.ctx placeholder }
 
     -- `hw.output` closes the block, below the registers.
-    let outputs ← m.outputs.mapM fun (x, _) => lookupVal σ x
+    let outputs ← m.outputs.mapM fun (x, _) => lookupVal σ (.sig x)
     modify fun s => { s with insertAt := .atEnd s.block }
     let _ ← build (.hw .output) () #[] (outputs.map Val.ptr).toArray
     return ()) lctx) init

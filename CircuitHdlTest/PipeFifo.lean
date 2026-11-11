@@ -6,7 +6,7 @@ Tests for the pipeline FIFO, and its refinement of the same two abstract models.
 
 `pipeFifo4` is the third implementation to be checked against `AbstractFifoModel` and
 `AbstractQueueModel`, and it is the one that stops the models from being descriptions of a
-*dense* FIFO. `asyncFifo` stores its queue in a memory between two pointers; `shiftFifo4` stores
+*dense* FIFO. `asyncFifo` stores its queue in a memory between two pointers; `shiftFifo` stores
 it as a dense prefix `r0 .. r_{count-1}`; this one stores it scattered across four stages with a
 valid bit each, and the gaps between entries are permanent.
 
@@ -28,7 +28,7 @@ private def pipeRst : ResetSpec := ResetSpec.single `rst
 /-! ### It carries traffic
 
 The same scenarios the other two designs are driven through. `Module.transfer` holds `m.ready`
-high, so the rigid stall never engages and the only visible difference from `shiftFifo4` is that
+high, so the rigid stall never engages and the only visible difference from `shiftFifo` is that
 the words come out later.
 -/
 
@@ -52,7 +52,7 @@ def pipeAbstractionOf (depth : Nat) (σ : State) : Option AbstractFifoModel := d
   return { depth, count := (vs.filter (· == 1)).length }
 
 /-- The contents of a pipeline FIFO: the valid stages, oldest first. The gaps are skipped, which
-is the one thing this abstraction has to do that `shiftFifo4`'s does not. -/
+is the one thing this abstraction has to do that `shiftFifo`'s does not. -/
 def pipeQueueAbstractionOf (depth : Nat) (σ : State) : Option AbstractQueueModel := do
   let vs ← [`v0, `v1, `v2, `v3].mapM σ.valueOf?
   let rs ← [`r0, `r1, `r2, `r3].mapM σ.valueOf?
@@ -84,7 +84,7 @@ theorem pipe_refines_queue_burst :
     refinesQueueAll pipeFifo 4 pipeSource pipeDest burstSchedules pipeQueueAbstractionOf
       = true := by native_decide
 
-/-- **No warm-up needed**, for the same reason `shiftFifo4` needs none: the flags are functions of
+/-- **No warm-up needed**, for the same reason `shiftFifo` needs none: the flags are functions of
 local registers that reset to zero, so they are honest from the first cycle. -/
 theorem pipe_needs_no_warmup :
     refinesQueueAll pipeFifo 4 pipeSource pipeDest burstSchedules pipeQueueAbstractionOf
@@ -107,7 +107,7 @@ theorem pipe_refines_reset_exhaustive :
 /-! ### The bubbles are real, and the valid bits are what track them
 
 Everything above would also hold of a FIFO with no gaps, so none of it distinguishes this design
-from `shiftFifo4`. These do.
+from `shiftFifo`. These do.
 -/
 
 /-- Write, idle, write, with the consumer always taking. The two words end up one stage apart and
@@ -141,7 +141,7 @@ private def bubbleTrace : Option (List (List Nat)) := Id.run do
   = some [1, 1, 2, 2, 1]
 
 /-- **A dense reading of the stages is rejected.** `pipeQueueAbstractionOf` without the valid
-filter -- the `take count` that works for `shiftFifo4` -- reports whatever stale data a gap is
+filter -- the `take count` that works for `shiftFifo` -- reports whatever stale data a gap is
 sitting on. That it fails here and not there is the difference between the two designs, stated as
 a theorem rather than as a comment. -/
 private def pipeQueueDense (depth : Nat) (σ : State) : Option AbstractQueueModel := do
@@ -165,14 +165,14 @@ theorem pipe_queue_ordering_matters :
 
 /-! ### Full rate at full occupancy
 
-`shiftFifo4` drops `s.ready` when `count` reaches the depth, so it cannot take a word in and hand
+`shiftFifo` drops `s.ready` when `count` reaches the depth, so it cannot take a word in and hand
 one out in the same cycle while full -- it must drain first. `pipeFifo4` can: `advance` is true
 whenever the consumer is taking, which frees stage 3 in the same cycle the head leaves.
 
 This is what found the model-ordering bug in `CircuitHdlTest.FifoHarness`. The harness advanced
 the abstract model `push` then `pop`, and `push` at `depth` is a silent no-op in both models, so
 the word this design had just accepted was dropped and then another popped -- the model came out
-one short of the design. Neither `asyncFifo` nor `shiftFifo4` could expose it, because neither
+one short of the design. Neither `asyncFifo` nor `shiftFifo` could expose it, because neither
 ever writes while full.
 -/
 
@@ -204,9 +204,9 @@ private def fullRateOccupancy : Option (List Nat) := Id.run do
 
 #guard fullRateOccupancy = some [4, 4, 4, 4]
 
--- The contrast: `shiftFifo4` refuses the write while full, so its occupancy falls instead.
+-- The contrast: `shiftFifo` refuses the write while full, so its occupancy falls instead.
 private def shiftFullRateReady : Option Nat := Id.run do
-  let sim := (shiftFifo4 8).sim
+  let sim := (shiftFifo 4 8).sim
   let drive (offer accept : Bool) : State :=
     [ (`s.valid, Value.ofNat 1 (if offer then 1 else 0)),
       (`s.data, Value.ofNat 8 7), (`m.ready, Value.ofNat 1 (if accept then 1 else 0)),
@@ -225,7 +225,7 @@ private def shiftFullRateReady : Option Nat := Id.run do
 
 /-! ### Latency, which is the trade
 
-A word written into an empty FIFO is readable on the next cycle in `shiftFifo4` and four cycles
+A word written into an empty FIFO is readable on the next cycle in `shiftFifo` and four cycles
 later here. That is the price of the simpler per-stage mux, and it is worth measuring rather than
 asserting.
 -/
@@ -247,7 +247,7 @@ private def latencyOf (m : Module) : Option Nat := Id.run do
         if σ'.valueOf? `m.valid == some 1 then return some (t + 1)
   return none
 
-#guard latencyOf (shiftFifo4 8) = some 1
+#guard latencyOf (shiftFifo 4 8) = some 1
 #guard latencyOf (pipeFifo4 8) = some 4
 
 -- And the word that comes out is the one that went in, so the latency is a delay and not a drop.

@@ -22,6 +22,33 @@ namespace CircuitHdl
 
 open Lean
 
+/-! ### What two accesses share
+
+The scheduler asks whether one statement's write can reach another statement's read. For scalars
+that is name equality; for arrays it is not, because a dynamically indexed write touches every
+element without being equal to any of them.
+
+Each line below is a pair the scheduler will get wrong if `Signal.overlaps` is weakened, and the
+negative ones matter as much: an array that overlapped itself at every index would put two
+statements driving different elements in a cycle, which is the failure `SettleOrder` exists to
+prevent one level up.
+-/
+
+#guard Signal.overlaps (.sig `a) (.sig `a)
+#guard !Signal.overlaps (.sig `a) (.sig `b)
+-- Two elements meet only at the same index. This is the line that keeps an array schedulable.
+#guard Signal.overlaps (.elem `a 3) (.elem `a 3)
+#guard !Signal.overlaps (.elem `a 3) (.elem `a 2)
+#guard !Signal.overlaps (.elem `a 3) (.elem `b 3)
+-- A dynamic access is every element, so it meets each of them, in both directions.
+#guard Signal.overlaps (.whole `a) (.elem `a 3)
+#guard Signal.overlaps (.elem `a 0) (.whole `a)
+#guard Signal.overlaps (.whole `a) (.whole `a)
+#guard !Signal.overlaps (.whole `a) (.elem `b 0)
+-- A name is either an array or it is not, so these never meet whatever the index.
+#guard !Signal.overlaps (.sig `a) (.elem `a 0)
+#guard !Signal.overlaps (.sig `a) (.whole `a)
+
 /-! ### A module written back to front
 
 `b` reads `a`, and is written first. Under source order `b` would see `a`'s pre-pass value, which
@@ -35,6 +62,8 @@ private def reversed : Module :=
       Item.stmt (.assign `a (.bin .add 4 (.var `x) (.lit 4 1))) ]
 
 private def w4 (n : Nat) : Cell := .sig (Value.ofNat 4 n)
+private def w8 (n : Nat) : Cell := .sig (Value.ofNat 8 n)
+private def w2 (n : Nat) : Cell := .sig (Value.ofNat 2 n)
 
 private def settledAt (m : Module) (ins : State) (probe : Name) : Option Nat :=
   match m.settle (m.initState.apply ins) with
@@ -46,7 +75,7 @@ private def settledAt (m : Module) (ins : State) (probe : Name) : Option Nat :=
 #guard settledAt reversed [(`x, w4 5)] `b = some 7
 
 -- And the statements really were reordered, rather than the right answer arriving by luck.
-#guard reversed.settleOrder.steps.map Stmt.targets = [[`a], [`b]]
+#guard reversed.settleOrder.steps.map Stmt.targets = [[.sig `a], [.sig `b]]
 #guard reversed.settleOrder.unresolved = []
 
 /-! ### Stability
@@ -63,12 +92,12 @@ private def forward : Module :=
       Item.stmt (.assign `a (.bin .add 4 (.var `x) (.lit 4 1))),
       Item.stmt (.assign `b (.bin .add 4 (.var `a) (.lit 4 1))) ]
 
-#guard forward.settleOrder.steps.map Stmt.targets = [[`a], [`b]]
+#guard forward.settleOrder.steps.map Stmt.targets = [[.sig `a], [.sig `b]]
 #guard settledAt forward [(`x, w4 5)] `b = some 7
 
 -- The real designs are all in this case, which is why reordering them changes nothing.
 #guard (asyncFifo 4 8 (by decide)).settleOrder.unresolved = []
-#guard (shiftFifo4 8).settleOrder.unresolved = []
+#guard (shiftFifo 4 8).settleOrder.unresolved = []
 #guard (pipeFifo4 8).settleOrder.unresolved = []
 
 /-! ### A signal that reads itself is not a loop
@@ -100,8 +129,8 @@ private def loopy : Module :=
       Item.stmt (.assign `q (.var `p)) ]
 
 #guard loopy.settleOrder.unresolved.length = 2
-#guard loopy.settleOrder.unresolved.contains `p
-#guard loopy.settleOrder.unresolved.contains `q
+#guard loopy.settleOrder.unresolved.contains (.sig `p)
+#guard loopy.settleOrder.unresolved.contains (.sig `q)
 -- Nothing is dropped: a design with a loop still settles, to whatever the stale reads give, which
 -- is what it did before this file existed.
 #guard loopy.settleOrder.steps.length = 2
@@ -126,7 +155,62 @@ private def loopyPlus : Module :=
       Item.stmt (.assign `s (.var `x)) ]
 
 #guard loopyPlus.settleOrder.unresolved.length = 2
-#guard loopyPlus.settleOrder.steps.map Stmt.targets = [[`s], [`p], [`q]]
+#guard loopyPlus.settleOrder.steps.map Stmt.targets = [[.sig `s], [.sig `p], [.sig `q]]
+
+/-! ### Arrays, where the key type earns its keep
+
+An array is one declaration but many drivers, so the scheduler orders it element by element. The
+three modules below are what that buys, and each was checked by breaking `Signal.overlaps` so that
+two elements of one array always overlap -- the whole-array granularity an array would have if it
+were a single vertex.
+
+What that mutation does is worth recording, because it is **not** a reported loop:
+
+- `crossed` comes back ordered `a[1], o, a[0]` -- a schedule in which `a[1]` reads `a[0]` before
+  anything drives it -- and settles to `[42, 0]` with `o = 0` rather than `[42, 42]` and `42`;
+- `arrLoop`, which has a real cycle, comes back with `unresolved = []`.
+
+So the granularity is load-bearing in both directions at once: too coarse and correct designs
+silently read stale values, while the loop detector stops seeing the loops it is for.
+-/
+
+/-- Two statements driving different elements of one array, each reading the other's. There is an
+order -- `a[0]` then `a[1]` -- and finding it is the whole point. -/
+private def crossed : Module :=
+  Module.ofItems `crossed [(`x, 8)] [(`o, 8)]
+    [ Item.array `a 2 8,
+      Item.stmt (.assign `o (.elem `a 8 1)),
+      Item.stmt (.setElem `a 8 1 (.elem `a 8 0)),
+      Item.stmt (.setElem `a 8 0 (.var `x)) ]
+
+#guard crossed.settleOrder.unresolved = []
+#guard crossed.settleOrder.steps.map Stmt.targets
+  = [[.elem `a 0], [.elem `a 1], [.sig `o]]
+-- Both elements take `x`, and the output sees it in the same pass.
+#guard (crossed.settle (crossed.initState.apply [(`x, w8 42)])).toOption.bind
+  (State.memOf? · `a) = some [42, 42]
+
+/-- A dynamic write touches every element, so a static read of one of them waits for it. -/
+private def dynOrder : Module :=
+  Module.ofItems `dynOrder [(`x, 8), (`i, 2)] [(`o, 8)]
+    [ Item.array `a 2 8,
+      Item.stmt (.assign `o (.elem `a 8 1)),
+      Item.stmt (.setDyn `a 8 (.var `i) (.var `x)) ]
+
+#guard dynOrder.settleOrder.steps.map Stmt.targets = [[.whole `a], [.sig `o]]
+#guard (dynOrder.settle (dynOrder.initState.apply [(`x, w8 42), (`i, w2 1)])).toOption.bind
+  (State.valueOf? · `o) = some 42
+
+/-- The negative control for arrays: a cycle *through* two elements is still a cycle, and is
+reported as the two elements rather than as the array. -/
+private def arrLoop : Module :=
+  Module.ofItems `arrLoop [] [(`o, 1)]
+    [ Item.array `a 2 1,
+      Item.stmt (.setElem `a 1 0 (.elem `a 1 1)),
+      Item.stmt (.setElem `a 1 1 (.elem `a 1 0)),
+      Item.stmt (.assign `o (.elem `a 1 0)) ]
+
+#guard arrLoop.settleOrder.unresolved = [.elem `a 1, .elem `a 0]
 
 /-! ### The mesh, which is the case the file was written for
 

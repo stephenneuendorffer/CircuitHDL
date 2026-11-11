@@ -45,7 +45,8 @@ design would be — there are no hand-built `Module` literals here:
 | `Examples/Shifter.lean` | Nibble selection and rotation: slices and concatenation. |
 | `Examples/Swap.lean` | `swapSeq` and `swapComb` — identical statements, clocked and unclocked. |
 | `Examples/AsyncFifo.lean` | An asynchronous FIFO with AXI valid/ready ports: two clocks, gray-coded pointers, two-flop synchronizers. |
-| `Examples/ShiftFifo.lean` | The same interface built the opposite way: one clock, no memory, data moves instead of pointers. |
+| `Examples/ShiftFifo.lean` | The same interface built the opposite way: one clock, no memory, data moves instead of pointers. Its depth is a parameter, over an array of registers. |
+| `Examples/RegFile.lean` | Storage addressed by a value: two read ports as mux chains over an array, one write port as a decoder. |
 
 Alongside the designs, two *specifications* — what a FIFO is, with no reference to any
 implementation. Neither imports the HDL, which is what lets both FIFOs above be checked against
@@ -298,12 +299,18 @@ slice [9:2] is out of range for a 8-bit value
 ### Memories
 
 ```
-reg mem[4] : 8;          -- 4 words of 8 bits
-mem[addr]                -- read
-assign mem[addr] = d;    -- write
+memory m[4] : 8;         -- 4 words of 8 bits
+m[addr]                  -- read
+assign m[addr] = d;      -- write
 ```
 
-`mem[addr]` and the bit select `x[3]` are spelled identically, so **the declarations decide which is
+A memory has its own keyword because `reg m[4] : 8;` means something else — an array of four
+separate registers. The two are different hardware: one `seq.firmem` with clocked ports, against
+four `seq.firreg`s each independently driven. It is `memory` rather than `mem` because a keyword
+reserves its token across the whole file, and `mem` is far too useful a name for a signal to spend
+— `asyncFifo`'s memory is called exactly that.
+
+`m[addr]` and the bit select `x[3]` are spelled identically, so **the declarations decide which is
 meant** — exactly as in Verilog. A bit select still requires a literal index; a memory address can be
 any expression, of any width.
 
@@ -314,6 +321,48 @@ should surface, not silently alias. This is the one failure `EvalError` adds ove
 `wire x : w;` is accepted as a **synonym for `reg`**. It reads better for the intermediate
 combinational signals a design accumulates, but the AST does not distinguish the two; this is a
 surface alias, not real `wire` support.
+
+### Arrays, and the generate loop
+
+```
+reg r[depth] : dw;       -- `depth` registers, each independently driven
+wire a[4] : 8;           -- the same, as wires
+r[0]   r[i]   r[#(n-1)]  -- one element, chosen before the design runs
+r[addr]                  -- a mux chain over every element
+for i < (depth - 1) { assign r[i] = r[#(i + 1)]; }
+```
+
+An array is `depth` separate registers where a `memory` is one `seq.firmem`; which one a design
+wants is a question of cost, not of behaviour. A read port on an array is a mux over outputs that
+all exist anyway, so a second reader costs a second mux — but the mux is as wide as the array. A
+memory offers its contents through ports, so a second reader costs a port, but its cost barely
+grows with depth. `Examples/RegFile.lean` builds the same storage both ways and checks that they
+agree.
+
+**An index is an element when it is a numeral, a loop binder, or an explicit `#(…)`, and an
+address computed by hardware otherwise.** The two are different circuits — a wire against a mux
+chain — so they are different AST nodes, and the lowering is never left to notice that an address
+happened to be constant. An index that mixes the two, like `r[i + 1]`, is rejected with a message
+naming `#(…)` rather than guessed at.
+
+`#(e)` is a Lean term used as a value: an element index, or a literal of whatever width the
+context wants. It exists because a loop binder is a `Nat`, and `circuit_expr` has no subtraction
+and means an adder by `+`.
+
+A dynamic index is checked where it can be: an element index past the end of its array is a
+`CheckError`, because it is fixed before the design runs, while an address past the end is an
+`EvalError` for the same reason a memory address is. The **lowered** form cannot raise either, so
+`r[addr]` out of range reads element 0 in the netlist — a mux tree has nowhere to put an error.
+That divergence is deliberate and pinned in `CircuitHdlTest/Circt.lean`, next to the one a
+`seq.firmem` address already has.
+
+The loop bound is `term:max`, so a compound one needs parentheses — `for i < (depth - 1)`. A plain
+`term` there is greedy and swallows the `{` that opens the body, the same trap that tightened
+`assign x : w = e` and `a << 1 < b`.
+
+Declarations are not allowed inside a `for`: a `wire t[i]` per iteration would have to add signals
+to an environment the macro builds before it knows how many there are. Declare the array outside
+and index it, which is what the loop is for.
 
 ### Interfaces
 
@@ -497,7 +546,7 @@ module! asyncFifo #[(depth dw : Nat) (_h : validDepth depth = true := by decide)
     (wclk : 1, s_valid : 1, s_data : dw, rclk : 1, m_ready : 1)
  -> (s_ready : 1, m_valid : 1, m_data : dw) {
     let n := Nat.log2 depth;
-    reg mem[depth] : dw;
+    memory mem[depth] : dw;
     reg wbin : n+1;
     …
     assign waddr = wbin[n-1:0];

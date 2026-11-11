@@ -3,9 +3,9 @@ import CircuitHdl.Syntax
 import CircuitHdl.Examples.ShiftFifo
 
 /-!
-A pipeline FIFO: the same interface again, and the opposite trade from `shiftFifo4`.
+A pipeline FIFO: the same interface again, and the opposite trade from `shiftFifo`.
 
-`shiftFifo4` keeps the oldest word at `r0` and packs the queue into a dense prefix, so a word
+`shiftFifo` keeps the oldest word at `r0` and packs the queue into a dense prefix, so a word
 written into an empty FIFO is readable on the very next cycle. The price is that *every* occupied
 register moves on *every* read, and that each register's input is a mux selected by a comparison
 against `widx`.
@@ -14,10 +14,10 @@ This one is a plain shift register with a valid bit per stage. A word enters at 
 to stage 0, one stage per cycle. Each register's input is a two-way mux -- take the neighbour, or
 hold -- with no index arithmetic anywhere, which is as simple as a four-deep FIFO gets.
 
-Two consequences, and they are the whole point of having this next to `shiftFifo4`:
+Two consequences, and they are the whole point of having this next to `shiftFifo`:
 
 - **Latency is the depth.** A word written into an empty FIFO is not readable for four cycles,
-  where `shiftFifo4` offers it on the next one. For a FIFO used to decouple two rates that is
+  where `shiftFifo` offers it on the next one. For a FIFO used to decouple two rates that is
   irrelevant; for one in a latency-sensitive path it is the whole story.
 - **Bubbles exist, and they are never removed.** The queue is *not* a dense prefix: write, idle,
   write, and the two words travel one stage apart forever. `pipeQueueAbstractionOf` is what that
@@ -30,7 +30,7 @@ with three empty stages behind. That is what makes it *simple* rather than good 
 version would let each stage advance into any empty neighbour, which collapses bubbles and needs
 a per-stage enable. This design deliberately does not.
 
-Depth is fixed at four for the same reason `shiftFifo4`'s is: the stages are separate registers
+Depth is fixed at four for the same reason `shiftFifo`'s is: the stages are separate registers
 and the surface syntax has no loop to generate them.
 -/
 
@@ -72,7 +72,7 @@ endmodule
 way keeps the expression one gate deep.
 
 The data registers are *not* cleared when a stage empties -- only the valid bit is. A stale word
-sits behind a clear valid bit exactly as it does in `shiftFifo4`, and `pipeQueueAbstractionOf`
+sits behind a clear valid bit exactly as it does in `shiftFifo`, and `pipeQueueAbstractionOf`
 never reads it. Reset clears them anyway, so that the post-reset state is a single definite
 value. -/
 module! pipeFifo4 #[(dw : Nat)] (clk : 1, rst : 1, slave s : axis dw) -> (master m : axis dw) {

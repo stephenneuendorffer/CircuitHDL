@@ -56,7 +56,12 @@ end Value
 
 /-! ### State -/
 
-/-- What a name holds: either one value, or a memory's worth of them. -/
+/-- What a name holds: either one value, or several.
+
+A memory and an array share the second shape, and deliberately so -- a name holding `n` values is
+all either of them is at run time. What distinguishes them is how they may be accessed and what
+they are built as, both of which live in the declarations, exactly as the declarations are already
+what tell `mem[addr]` from the bit select `x[3]`. -/
 inductive Cell where
   | sig : Value → Cell
   | mem : List Value → Cell
@@ -120,8 +125,14 @@ end State
 
 /-! ### Expressions -/
 
-/-- View both operands of a binary operation at width `w`. -/
-private def operands (sym : String) (w : Nat) (a b : Value) :
+/-- View both operands of a binary operation at width `w`.
+
+Public, unlike the other helpers here, because a proof about `.bin` or `.cmp` has to unfold it --
+`CircuitHdl.SelectChain` reasons about what a comparison evaluates to. A `private` definition is
+worse than inconvenient in that position: an unresolved identifier silently becomes an implicit
+argument under `autoImplicit`, so the failure arrives as a confusing error about free variables
+rather than as "unknown identifier". -/
+def operands (sym : String) (w : Nat) (a b : Value) :
     Except EvalError (BitVec w × BitVec w) := do
   let a' ← a.atWidth w s!"left operand of {sym}"
   let b' ← b.atWidth w s!"right operand of {sym}"
@@ -167,6 +178,17 @@ def Expr.eval (σ : State) : Expr → Except EvalError Value
       let v ← σ.getMem? m i.toNat
       if v.width = elemW then .ok v
       else .error (.check (.widthMismatch s!"element of memory '{m}'" elemW v.width))
+  | .elem a elemW i => do
+      let v ← σ.getMem? a i
+      if v.width = elemW then .ok v
+      else .error (.check (.widthMismatch s!"element of array '{a}'" elemW v.width))
+  -- An index past the end is an error here and element 0 in the netlist, where the mux chain has
+  -- nowhere to put one. `CircuitHdlTest/Circt.lean` pins the divergence.
+  | .select a elemW addr => do
+      let i ← Expr.eval σ addr
+      let v ← σ.getMem? a i.toNat
+      if v.width = elemW then .ok v
+      else .error (.check (.widthMismatch s!"element of array '{a}'" elemW v.width))
 
 /-! ### Statements
 
@@ -185,6 +207,17 @@ def Stmt.execBlocking (σ : State) : Stmt → Except EvalError State
       if v.width != elemW then
         .error (.check (.widthMismatch s!"write to memory '{m}'" elemW v.width))
       else σ.setMem m i.toNat v
+  | .setElem a elemW i data => do
+      let v ← Expr.eval σ data
+      if v.width != elemW then
+        .error (.check (.widthMismatch s!"write to array '{a}'" elemW v.width))
+      else σ.setMem a i v
+  | .setDyn a elemW addr data => do
+      let i ← Expr.eval σ addr
+      let v ← Expr.eval σ data
+      if v.width != elemW then
+        .error (.check (.widthMismatch s!"write to array '{a}'" elemW v.width))
+      else σ.setMem a i.toNat v
   | .if_ c t f => do
       let cb ← (← Expr.eval σ c).atWidth 1 "if condition"
       if cb = 1#1 then Stmt.execBlockingList σ t else Stmt.execBlockingList σ f
@@ -194,6 +227,21 @@ def Stmt.execBlockingList (σ : State) : List Stmt → Except EvalError State
   | s :: rest => do Stmt.execBlockingList (← Stmt.execBlocking σ s) rest
 
 end
+
+/-- Write one value of a multi-valued cell into `pending`.
+
+Builds on an earlier pending write to the same name, so two writes in one clocked block both
+land, while everything else in the block still reads the pre-edge state. Shared by a memory store
+and an array write: the rule is about the cell, not about which kind of declaration it came
+from. -/
+private def pendingWord (σ₀ pending : State) (x : Name) (i : Nat) (v : Value) :
+    Except EvalError State := do
+  let base := if (pending.lookup x).isSome then pending else σ₀
+  let updated ← base.setMem x i v
+  match updated.lookup x with
+  -- Unreachable: `setMem` already found the cell.
+  | none => .error (.check (.unboundMem x))
+  | some c => .ok (pending.setCell x c)
 
 mutual
 
@@ -210,14 +258,18 @@ def Stmt.execNonBlocking (σ₀ : State) (pending : State) : Stmt → Except Eva
       let v ← Expr.eval σ₀ data
       if v.width != elemW then
         .error (.check (.widthMismatch s!"write to memory '{m}'" elemW v.width))
-      else
-        -- Build on an earlier pending write to the same memory, so two stores in one block both
-        -- land; everything else in the block still reads the pre-edge state.
-        let base := if (pending.lookup m).isSome then pending else σ₀
-        let updated ← base.setMem m i.toNat v
-        match updated.lookup m with
-        | some c => .ok (pending.setCell m c)
-        | none => .error (.check (.unboundMem m))
+      else pendingWord σ₀ pending m i.toNat v
+  | .setElem a elemW i data => do
+      let v ← Expr.eval σ₀ data
+      if v.width != elemW then
+        .error (.check (.widthMismatch s!"write to array '{a}'" elemW v.width))
+      else pendingWord σ₀ pending a i v
+  | .setDyn a elemW addr data => do
+      let i ← Expr.eval σ₀ addr
+      let v ← Expr.eval σ₀ data
+      if v.width != elemW then
+        .error (.check (.widthMismatch s!"write to array '{a}'" elemW v.width))
+      else pendingWord σ₀ pending a i.toNat v
   | .if_ c t f => do
       let cb ← (← Expr.eval σ₀ c).atWidth 1 "if condition"
       if cb = 1#1 then Stmt.execNonBlockingList σ₀ pending t
@@ -243,11 +295,11 @@ def Process.exec (σ : State) (p : Process) : Except EvalError State :=
       let pending ← Stmt.execNonBlockingList σ [] p.body
       .ok (σ.apply pending)
 
-/-- Every declared signal at zero, and every memory zero-filled to its depth. -/
+/-- Every declared signal at zero, and every array and memory zero-filled to its length. -/
 def Module.initState (m : Module) : State :=
   let sigs := (m.inputs ++ m.outputs ++ m.regs).foldl
     (fun σ (x, w) => if σ.any (·.1 == x) then σ else σ ++ [(x, Cell.sig (Value.ofNat w 0))]) []
-  m.mems.foldl
+  (m.arrays ++ m.mems).foldl
     (fun σ (x, d, w) =>
       if σ.any (·.1 == x) then σ else σ ++ [(x, Cell.mem (List.replicate d (Value.ofNat w 0)))])
     sigs

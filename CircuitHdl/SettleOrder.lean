@@ -60,8 +60,8 @@ mutual
 
 /-- Every signal an expression reads. Memories count: `mem[addr]` depends on the writes to `mem`
 that precede it, the same way a wire depends on its driver. -/
-def Expr.uses : Expr → List Name
-  | .var x => [x]
+def Expr.uses : Expr → List Signal
+  | .var x => [.sig x]
   | .lit _ _ => []
   | .bin _ _ a b => a.uses ++ b.uses
   | .cmp _ _ a b => a.uses ++ b.uses
@@ -70,7 +70,10 @@ def Expr.uses : Expr → List Name
   | .mux c t f => c.uses ++ t.uses ++ f.uses
   | .concat a b => a.uses ++ b.uses
   | .slice a _ _ => a.uses
-  | .index m _ a => m :: a.uses
+  | .index m _ a => .sig m :: a.uses
+  | .elem a _ i => [.elem a i]
+  -- A dynamic read is a mux over every element, so it waits on all of them.
+  | .select a _ addr => .whole a :: addr.uses
 
 end
 
@@ -81,12 +84,17 @@ mutual
 An `if` reads its condition and everything either arm reads, mirroring `Stmt.targets`, which
 counts what either arm *writes*. Treating the whole `if` as one node is what keeps the two
 consistent: scheduling an arm independently of its condition would be meaningless. -/
-def Stmt.uses : Stmt → List Name
+def Stmt.uses : Stmt → List Signal
   | .assign _ e => e.uses
   | .store _ _ addr data => addr.uses ++ data.uses
+  | .setElem _ _ _ data => data.uses
+  -- Only the address and the data. The *netlist's* decoder also reads each element, to hold the
+  -- ones it does not write -- which is a latch, and why a combinational `setDyn` is refused by
+  -- the lowering rather than ordered here.
+  | .setDyn _ _ addr data => addr.uses ++ data.uses
   | .if_ c t f => c.uses ++ Stmt.usesList t ++ Stmt.usesList f
 
-def Stmt.usesList : List Stmt → List Name
+def Stmt.usesList : List Stmt → List Signal
   | [] => []
   | s :: rest => s.uses ++ Stmt.usesList rest
 
@@ -102,7 +110,7 @@ in source order and read stale values, which is what happened everywhere before 
 structure SettleOrder where
   steps : List Stmt
   /-- Signals in a combinational cycle, so that no order drives them before they are read. -/
-  unresolved : List Name
+  unresolved : List Signal
   deriving Repr
 
 namespace SettleOrder
@@ -113,9 +121,45 @@ private instance : Inhabited Expr := ⟨.lit 0 0⟩
 private instance : Inhabited Stmt := ⟨.assign .anonymous (.lit 0 0)⟩
 
 /-- Dedup, preserving first occurrence. The lists here are short -- a statement's operands -- and
-`Name` has no `Ord` instance in core that would make sorting cheaper. -/
-private def nub (xs : List Name) : List Name :=
+`Signal` has no `Ord` instance that would make sorting cheaper. -/
+private def nub (xs : List Signal) : List Signal :=
   xs.foldl (fun acc x => if acc.contains x then acc else acc ++ [x]) []
+
+/-! ### Counting drivers through an overlap
+
+A statement waits on one edge per (signal it reads, statement that drives that signal), so the
+scheduler needs to know how many statements drive a given read. With arrays that is no longer a
+lookup, because a dynamic write to `a` drives `a[3]` without being equal to it.
+
+`Signal.overlaps` says which pairs touch, and these three tallies are what make counting the
+overlapping drivers a lookup again rather than a scan over every statement:
+
+- `exact` counts each target as written;
+- `wholeDefs` counts the dynamic writes to each array;
+- `elemDefs` counts the element writes to each array, at any index.
+
+A read of `a[3]` is driven by the `a[3]` writers *and* every dynamic writer of `a`; a dynamic read
+of `a` is driven by both kinds. Keeping the two apart is what stops a dynamic write from being
+counted twice against itself. -/
+private structure Defs where
+  exact : Std.HashMap Signal Nat := {}
+  wholeDefs : Std.HashMap Name Nat := {}
+  elemDefs : Std.HashMap Name Nat := {}
+
+private def Defs.add (d : Defs) (t : Signal) : Defs :=
+  let d := { d with exact := d.exact.insert t (d.exact.getD t 0 + 1) }
+  match t with
+  | .whole a => { d with wholeDefs := d.wholeDefs.insert a (d.wholeDefs.getD a 0 + 1) }
+  | .elem a _ => { d with elemDefs := d.elemDefs.insert a (d.elemDefs.getD a 0 + 1) }
+  | .sig _ => d
+
+/-- How many statement-targets overlap `u`. Equal by construction to
+`Σ over statements k, #{t ∈ targets k | t.overlaps u}`, which is what the decrement below undoes
+one statement at a time. -/
+private def Defs.driving (d : Defs) : Signal → Nat
+  | .sig x => d.exact.getD (.sig x) 0
+  | .elem a i => d.exact.getD (.elem a i) 0 + d.wholeDefs.getD a 0
+  | .whole a => d.wholeDefs.getD a 0 + d.elemDefs.getD a 0
 
 /-- Order `stmts` so every statement follows the statements that drive it.
 
@@ -129,15 +173,18 @@ def of (stmts : List Stmt) : SettleOrder := Id.run do
   let targets := arr.map (fun s => nub s.targets)
   let uses := arr.map (fun s => nub s.uses)
 
-  -- How many statements assign each signal, and which statements read it.
-  let mut defCount : Std.HashMap Name Nat := {}
+  -- How many statements assign each signal, and which statements read each *declaration*. The
+  -- reader index is keyed by name rather than by signal because a write to `a[3]` has to find the
+  -- statements that read `a` dynamically as well as those that read `a[3]`.
+  let mut defs : Defs := {}
   for ts in targets do
     for t in ts do
-      defCount := defCount.insert t (defCount.getD t 0 + 1)
+      defs := defs.add t
   let mut readers : Std.HashMap Name (Array Nat) := {}
   for i in [0 : n] do
     for u in uses[i]! do
-      readers := readers.insert u ((readers.getD u #[]).push i)
+      let k := u.name
+      readers := readers.insert k ((readers.getD k #[]).push i)
 
   -- A statement waits on one edge per (signal it reads, statement that drives that signal),
   -- except its own writes: `x = x | y` reads the value from before this pass, not its own result.
@@ -145,8 +192,8 @@ def of (stmts : List Stmt) : SettleOrder := Id.run do
   for i in [0 : n] do
     let mut d := 0
     for u in uses[i]! do
-      let c := defCount.getD u 0
-      d := d + (if targets[i]!.contains u then c - 1 else c)
+      let own := (targets[i]!.filter (·.overlaps u)).length
+      d := d + (defs.driving u - own)
     indeg := indeg.set! i d
 
   let mut done : Array Bool := Array.replicate n false
@@ -167,9 +214,14 @@ def of (stmts : List Stmt) : SettleOrder := Id.run do
     | some i =>
       done := done.set! i true
       out := out.push arr[i]!
+      -- Undo this statement's contribution to every reader's count, **once per overlapping
+      -- read** rather than once per reader: a statement reading both `a[0]` and `a[1]` waited on
+      -- a dynamic write to `a` twice, and decrementing once would leave it stuck forever.
       for t in targets[i]! do
-        for j in readers.getD t #[] do
-          if j != i then indeg := indeg.set! j (indeg[j]! - 1)
+        for j in readers.getD t.name #[] do
+          if j != i then
+            for u in uses[j]! do
+              if t.overlaps u then indeg := indeg.set! j (indeg[j]! - 1)
 
   if out.size == n then
     return { steps := out.toList, unresolved := [] }
@@ -177,18 +229,18 @@ def of (stmts : List Stmt) : SettleOrder := Id.run do
   -- A cycle. Keep the stuck statements in source order after the ordered prefix, and report the
   -- signals holding them there: read by something unscheduled and written by something
   -- unscheduled. A signal that is merely read by the stuck set is not at fault -- its driver ran.
-  let mut stillWritten : Std.HashMap Name Unit := {}
+  let mut stillWritten : List Signal := []
   for i in [0 : n] do
     if !done[i]! then
       for t in targets[i]! do
-        stillWritten := stillWritten.insert t ()
+        if !stillWritten.contains t then stillWritten := stillWritten ++ [t]
   let mut stuck : Array Stmt := #[]
-  let mut bad : List Name := []
+  let mut bad : List Signal := []
   for i in [0 : n] do
     if !done[i]! then
       stuck := stuck.push arr[i]!
       for u in uses[i]! do
-        if (stillWritten.contains u) && !bad.contains u then bad := bad ++ [u]
+        if (stillWritten.any (·.overlaps u)) && !bad.contains u then bad := bad ++ [u]
   return { steps := out.toList ++ stuck.toList, unresolved := bad }
 
 end SettleOrder

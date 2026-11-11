@@ -9,6 +9,8 @@ import CircuitHdlTest.Circt
 import CircuitHdlTest.FifoHarness
 import CircuitHdlTest.ShiftFifo
 import CircuitHdlTest.PipeFifo
+import CircuitHdlTest.RegFile
+import CircuitHdlTest.SelectChain
 import CircuitHdlTest.MeshRoutingModel
 import CircuitHdlTest.MeshSwitch
 import CircuitHdlTest.Mesh4x4
@@ -42,6 +44,11 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 refines the same two models by entirely different means
 - `CircuitHdlTest.PipeFifo`  -- the pipeline FIFO: a valid bit per stage, so the queue is not a
                                 dense prefix and the gaps between words are permanent
+- `CircuitHdlTest.RegFile`   -- the register file: that a dynamic index reads and writes where it
+                                says, that the lowered mux chain and decoder agree with the
+                                evaluator, and that an array and a memory are the same storage
+- `CircuitHdlTest.SelectChain` -- that the chain `CircuitHdl.SelectChain` proves things about is
+                                the one `CircuitHdl.Circt` emits, which no proof can establish
 - `CircuitHdlTest.SettleOrder` -- that combinational statements are ordered by dependency rather
                                 than by source, that an already-ordered module is left alone, and
                                 that a real combinational loop is reported instead of miscompiled

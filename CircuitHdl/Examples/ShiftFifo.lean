@@ -31,18 +31,23 @@ It has one reset, where `asyncFifo` has two. That is not a simplification of the
 single clock means there is only one domain for a reset to be released into, so the question that
 forces `wrst` and `rrst` apart over there does not arise here.
 
-The depth is fixed at four rather than parameterized. The registers have to be declared one by
-one -- a shift register is `depth` separate registers, not an array -- and the surface syntax has
-no loop to generate them. Fixing the depth is honest about that; the data width stays a parameter.
+**The depth is a parameter**, which it could not be until arrays and the generate loop existed: a
+shift register is `depth` separate registers, and the surface syntax had no way to declare a
+number of registers it did not know. `reg r[depth] : dw;` and a `for` are exactly what that
+needed, and nothing else about the design changed -- the same refinement theorems run over it.
+
+The top slot is written on its own line rather than inside the loop, because it is the one that
+differs: every other slot takes its neighbour's value on a read, and the last has no neighbour to
+take one from. That asymmetry was there when the registers were written out by hand as `r3`.
 -/
 
 namespace CircuitHdl
 
 open Lean
 
-/-- A depth-4 shift-register FIFO.
+/-- A shift-register FIFO, at any depth.
 
-Verilog equivalent:
+Verilog equivalent, at depth four:
 
 ```verilog
 module shiftFifo4 #(parameter DW = 8) (
@@ -72,49 +77,56 @@ module shiftFifo4 #(parameter DW = 8) (
 endmodule
 ```
 
-`+ 7` is `- 1`: the core has no subtraction, and at three bits the two agree.
+`+ 7` is `- 1`: the core has no subtraction, and at three bits the two agree. Generally that is
+`#(2 ^ cw - 1)`, which is the same trick written at a width the design does not know yet.
 
-The reset is synchronous and clears the data registers as well as `count`. Clearing `r0..r3` is
-not strictly needed -- `shiftQueueAbstractionOf` reads only the first `count` of them, so they are
+`cw` is wide enough for `depth` itself, not just for `depth - 1`, because `count` reaches the
+depth when the FIFO is full: at depth four it is 3 bits and counts 0 to 4.
+
+The reset is synchronous and clears the data registers as well as `count`. Clearing them is not
+strictly needed -- `shiftQueueAbstractionOf` reads only the first `count`, so the rest are
 don't-cares at `count = 0` -- but it keeps the post-reset state a single definite value, which is
 what lets the refinement check compare against `AbstractQueueModel.reset` without having to say
-which registers it is allowed to ignore. -/
-module! shiftFifo4 #[(dw : Nat)] (clk : 1, rst : 1, slave s : axis dw) -> (master m : axis dw) {
-  reg count : 3;
-  reg r0 : dw;
-  reg r1 : dw;
-  reg r2 : dw;
-  reg r3 : dw;
+which registers it is allowed to ignore.
+
+Each assignment resets itself with a ternary rather than the whole block sitting inside
+`if rst { .. } else { .. }`. Both describe the same hardware, but `Stmt.targets` counts *both*
+arms of an `if`, so wrapping the block doubles the target list that any proof about the design has
+to reduce through. `AGENTS.md` records where that cost became real. -/
+module! shiftFifo #[(depth dw : Nat)]
+    (clk : 1, rst : 1, slave s : axis dw) -> (master m : axis dw) {
+  -- Wide enough to hold `depth` itself: a full FIFO has `count = depth`.
+  let cw := Nat.log2 depth + 1;
+
+  reg count : cw;
+  reg r[depth] : dw;
 
   wire wfire : 1;
   wire rfire : 1;
-  wire widx : 3;
+  wire widx : cw;
 
   -- Both flags are exact, and correct from the first cycle: `count` is local, so neither has to
   -- cross a clock boundary and neither is conservative. Gating them on `rst` is what makes "no
   -- transfer completes during reset" true by construction rather than by assertion.
-  assign s.ready = ~rst & (count != 4);
+  assign s.ready = ~rst & (count != depth);
   assign m.valid = ~rst & (count != 0);
-  assign m.data = r0;
+  assign m.data = r[0];
   assign wfire = s.valid & s.ready;
   assign rfire = m.valid & m.ready;
   -- Where a new word lands: the first free slot, counted after whatever shift this cycle does.
-  assign widx = count + (rfire ? 7 : 0);
+  assign widx = count + (rfire ? #(2 ^ cw - 1) : 0);
 
   always @(posedge clk) {
-    if rst {
-      assign count = 0;
-      assign r0 = 0;
-      assign r1 = 0;
-      assign r2 = 0;
-      assign r3 = 0;
-    } else {
-      assign count = count + (wfire ? 1 : 0) + (rfire ? 7 : 0);
-      assign r0 = (wfire & (widx == 0)) ? s.data : (rfire ? r1 : r0);
-      assign r1 = (wfire & (widx == 1)) ? s.data : (rfire ? r2 : r1);
-      assign r2 = (wfire & (widx == 2)) ? s.data : (rfire ? r3 : r2);
-      assign r3 = (wfire & (widx == 3)) ? s.data : r3;
+    assign count = rst ? 0 : count + (wfire ? 1 : 0) + (rfire ? #(2 ^ cw - 1) : 0);
+    -- Every slot but the last: take the new word if it lands here, otherwise shift the slot above
+    -- down on a read, otherwise hold.
+    for i < (depth - 1) {
+      assign r[i] =
+        rst ? 0 : ((wfire & (widx == i)) ? s.data : (rfire ? r[#(i + 1)] : r[i]));
     }
+    -- The top slot has nothing above it to shift down, so a read leaves it alone.
+    assign r[#(depth - 1)] =
+      rst ? 0 : ((wfire & (widx == #(depth - 1))) ? s.data : r[#(depth - 1)]);
   }
 }
 

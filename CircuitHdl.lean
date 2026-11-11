@@ -2,6 +2,7 @@ import CircuitHdl.Core
 import CircuitHdl.Width
 import CircuitHdl.Clocks
 import CircuitHdl.SettleOrder
+import CircuitHdl.SelectChain
 import CircuitHdl.Syntax
 import CircuitHdl.Semantics
 import CircuitHdl.Transactions
@@ -16,6 +17,7 @@ import CircuitHdl.Examples.AbstractQueueModel
 import CircuitHdl.Examples.AsyncFifo
 import CircuitHdl.Examples.ShiftFifo
 import CircuitHdl.Examples.PipeFifo
+import CircuitHdl.Examples.RegFile
 import CircuitHdl.Examples.MeshRoutingModel
 import CircuitHdl.Examples.MeshSwitch
 import CircuitHdl.Examples.Mesh4x4
@@ -33,6 +35,9 @@ The language itself:
                             order is not one
 - `CircuitHdl.Syntax`    -- the `module!` surface syntax, its lowering and width inference
 - `CircuitHdl.Semantics` -- evaluation over core `BitVec`
+- `CircuitHdl.SelectChain` -- that a dynamic array read *is* a mux over every element, which is
+                            what the backend builds for one. Kernel-proved, at every width, depth
+                            and in-range address
 - `CircuitHdl.Transactions` -- driving AXI-Stream ports at transaction level
 - `CircuitHdl.Circt`     -- lowering to the CIRCT dialects: builds VeIR IR directly, and prints
                             it through VeIR when text is wanted. The one module with a dependency
@@ -57,6 +62,9 @@ language they need:
                                       pointers do not, and one clock means one reset
 - `CircuitHdl.Examples.PipeFifo`   -- a valid bit per stage and writes entering at the far end,
                                       so latency is the depth and bubbles are permanent
+- `CircuitHdl.Examples.RegFile`    -- storage addressed by a *value*: the one design whose index
+                                      is not known before it runs, so its read ports are mux
+                                      chains over an array and its write port is a decoder
 - `CircuitHdl.Examples.MeshRoutingModel` -- what a routing policy on a mesh is, and why
                                       dimension-order routing cannot deadlock. No HDL; the one
                                       headline property here that is kernel-proved

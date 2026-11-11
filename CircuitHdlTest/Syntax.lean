@@ -264,6 +264,38 @@ rules through the AST-level checker on hand-built modules.
     body := [{ kind := .combinational, sensitivity := []
                body := [Stmt.if_ (Expr.var `c) [] []] }] }
 
+/-! ### Array errors
+
+A static element index is fixed before the design runs, so unlike a memory address it is the
+checker's business rather than the evaluator's. The other three say what is wrong specifically --
+that the name is not declared, that it is declared as something else, or that the element width
+disagrees -- rather than collapsing into one "unknown signal".
+-/
+
+private def arrMod (items : List Item) : Module :=
+  Module.ofItems `arrMod [] [(`o, 8)] items
+
+/-- info: Except.error (CircuitHdl.CheckError.elemRange `a 7 3) -/
+#guard_msgs in
+#eval Module.check (arrMod [Item.array `a 3 8, Item.stmt (.assign `o (.elem `a 8 7))])
+
+/-- info: Except.error (CircuitHdl.CheckError.unboundArray `nope) -/
+#guard_msgs in #eval Module.check (arrMod [Item.stmt (.assign `o (.elem `nope 8 0))])
+
+-- A memory is not an array: the two are declared apart precisely so this is caught.
+/-- info: Except.error (CircuitHdl.CheckError.notAnArray `m) -/
+#guard_msgs in
+#eval Module.check (arrMod [Item.mem `m 4 8, Item.stmt (.assign `o (.elem `m 8 0))])
+
+/-- info: Except.error (CircuitHdl.CheckError.widthMismatch "element of array 'a'" 4 8) -/
+#guard_msgs in
+#eval Module.check (arrMod [Item.array `a 3 4, Item.stmt (.assign `o (.elem `a 8 0))])
+
+-- A dynamic index is *not* checked here, because whether it is in range depends on the value it
+-- evaluates to. That one is `EvalError.indexOutOfRange`, in `CircuitHdlTest/Semantics.lean`.
+#guard (Module.check (arrMod
+  [Item.array `a 3 8, Item.reg `i 8, Item.stmt (.assign `o (.select `a 8 (.var `i)))])).isOk
+
 /-! Slice and concat have no surface syntax, but the checker covers them. -/
 
 /-- info: Except.ok 5 -/
@@ -319,7 +351,7 @@ the parameter it was derived from; a `let` cannot be overridden.
 
 module! derivedWidths #[(depth : Nat)] (x : 1) -> (y : 1) {
   let n := Nat.log2 depth;
-  reg mem[depth] : n;
+  memory mem[depth] : n;
   reg acc : n+1;
   assign y = x;
 }
@@ -344,12 +376,110 @@ asyncFifo 5 8
 -/
 
 module! guardedMem #[(d : Nat) (_h : validDepth d = true := by decide)] (x : 1) -> (y : 1) {
-  reg m[d] : 8;
+  memory m[d] : 8;
   assign y = x;
 }
 
 #guard (guardedMem 16).mems = [(`m, 16, 8)]
 #guard (Module.check (guardedMem 64)).isOk
+
+/-! ### Arrays and the generate loop
+
+`reg r[n] : w;` is `n` registers, where `memory m[n] : w;` is one `seq.firmem`. Both are indexed
+`x[i]`, so -- as with the bit select -- **the declarations decide** which is meant.
+
+An index is an *element* when it is a numeral, a loop binder, or an explicit `#(..)`, and an
+address computed by hardware otherwise. The two produce different AST nodes, because they are
+different circuits: a wire against a mux chain.
+-/
+
+module! arrDecl #[(depth dw : Nat)] (clk : 1, d : dw) -> (o : dw) {
+  reg r[depth] : dw;
+  assign o = r[0];
+  always @(posedge clk) { assign r[0] = d; }
+}
+
+#guard (arrDecl 4 8).arrays = [(`r, 4, 8)]
+#guard (arrDecl 4 8).regs = []
+#guard (Module.check (arrDecl 4 8)).isOk
+-- `wire` and `reg` declare the same thing here too, as they do for a scalar.
+#guard (module! wireArr (x : 4) -> (y : 4) {
+  wire a[2] : 4;
+  assign a[0] = x;
+  assign a[1] = a[0];
+  assign y = a[1];
+}).arrays = [(`a, 2, 4)]
+
+-- A static index writes one element, by an index that is a Lean term and so survives a symbolic
+-- depth.
+#guard ((module! staticIdx (x : 4) -> (y : 4) {
+  wire a[2] : 4; assign a[1] = x; assign y = a[1];
+}).body.flatMap Process.body).any (· matches Stmt.setElem `a 4 1 _)
+
+-- An index naming a signal is `Expr.select` instead: a mux over every element.
+#guard ((module! dynIdx (x : 4, i : 1) -> (y : 4) {
+  wire a[2] : 4; assign a[0] = x; assign a[1] = x; assign y = a[i];
+}).body.flatMap Process.body).any (· matches Stmt.assign `y (Expr.select `a 4 _))
+
+-- And the same text with `a` declared a memory instead reaches `Expr.index`, which is the whole
+-- content of "the declarations decide".
+#guard ((module! memIdx (clk : 1, x : 4, i : 1) -> (y : 4) {
+  memory a[2] : 4;
+  assign y = a[i];
+  always @(posedge clk) { assign a[i] = x; }
+}).body.flatMap Process.body).any (· matches Stmt.assign `y (Expr.index `a 4 _))
+
+/-- An array and a memory, indexed identically and told apart only by their declarations. -/
+module! bothKinds #[] (clk : 1, i : 2) -> (fromArray : 8, fromMem : 8) {
+  reg arr[4] : 8;
+  memory m[4] : 8;
+  assign fromArray = arr[i];
+  assign fromMem = m[i];
+  always @(posedge clk) { assign m[i] = 1; }
+}
+
+#guard bothKinds.arrays = [(`arr, 4, 8)]
+#guard bothKinds.mems = [(`m, 4, 8)]
+#guard (Module.check bothKinds).isOk
+
+/-! The loop is the point: a design whose size is a parameter cannot write its registers out. -/
+
+module! loopForm #[] (clk : 1, d : 8) -> (o : 8) {
+  reg r[4] : 8;
+  assign o = r[3];
+  always @(posedge clk) { for i < 4 { assign r[i] = d; } }
+}
+
+module! writtenOut #[] (clk : 1, d : 8) -> (o : 8) {
+  reg r[4] : 8;
+  assign o = r[3];
+  always @(posedge clk) {
+    assign r[0] = d;
+    assign r[1] = d;
+    assign r[2] = d;
+    assign r[3] = d;
+  }
+}
+
+/-- **The loop is sugar and nothing more**: it builds the same module, statement for
+statement, as writing the four assignments out. -/
+example : { loopForm with name := `same } = { writtenOut with name := `same } := rfl
+
+/-- A loop binder in *value* position is a literal at whatever width the context wants, which
+is what lets a design compare a signal against the element it is looking at. -/
+module! onehot #[(n : Nat)] (sel : 3) -> (hit : 1) {
+  wire m[n] : 1;
+  for i < n {
+    assign m[i] = (sel == i) ? 1 : 0;
+  }
+  assign hit = m[0] | m[1];
+}
+
+#guard (Module.check (onehot 2)).isOk
+#guard ((onehot 2).settle ((onehot 2).initState.apply
+  [(`sel, Cell.sig (Value.ofNat 3 1))])).toOption.bind (State.valueOf? · `hit) = some 1
+#guard ((onehot 2).settle ((onehot 2).initState.apply
+  [(`sel, Cell.sig (Value.ofNat 3 5))])).toOption.bind (State.valueOf? · `hit) = some 0
 
 /-! ### Interfaces
 

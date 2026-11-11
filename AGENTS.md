@@ -99,8 +99,23 @@ Things the surface syntax does *not* have, each of which has bitten:
 
 - **No subtraction.** `BinOp` is `add | and | or | xor`. Write `- 1` as `+ (2^w - 1)`; at three
   bits, `count + 7` is `count - 1`.
-- **No loop.** A parameterized *number* of registers cannot be declared, which is why
-  `ShiftFifo.lean` fixes its depth at four and parameterizes only the width.
+- **Arrays and `for` exist, and the index rule is syntactic.** `reg r[depth] : dw;` is `depth`
+  registers; `memory m[depth] : dw;` is one `seq.firmem`. An index is an *element* when it is a
+  numeral, a loop binder or an explicit `#(..)`, and hardware otherwise — so `r[i + 1]` inside a
+  loop is **rejected**, not guessed at, and wants `r[#(i + 1)]`. The rule is deliberately shallow:
+  the alternative is a macro deciding whether `+` means an adder by inspecting its leaves.
+- **A keyword reserves its token for the whole file.** Lean's token table is not scoped to a
+  syntax category, which is why a memory is `memory` and not `mem` — `asyncFifo`'s memory is
+  *called* `mem`, and the keyword would have made that name unspellable. `&"mem"` does not rescue
+  it: the rule then sits in the same leading-identifier group as `ident ident ( .. ) ;`, which
+  commits after two identifiers, so `mem m[4]` fails at the `[`. Both measured.
+- **Two rules that parse the same text leave an ambiguity node neither pattern matches.** There is
+  one `for`, in `circuit_stmt`; it reaches item position through `syntax circuit_stmt :
+  circuit_item`. Adding a second rule for items made every `for` outside an `always` report
+  "unsupported circuit item".
+- **A loop bound is `term:max`**, so `for i < (depth - 1)` needs its parentheses. A plain `term`
+  is greedy and takes the `{` that opens the body as a structure instance — the same trap that
+  tightened `assign x : w = e`.
 - Binary operands must match width **exactly**. Zero-extend by concatenation: `{(0 : n), wfire}`.
 - A ternary `c ? t : f` does exist (precedence 20), and is usually clearer than nested `if`.
 - **An `if` around a clocked block doubles what the clock analysis has to reduce.** `Stmt.targets`
@@ -109,8 +124,8 @@ Things the surface syntax does *not* have, each of which has bitten:
   `asyncFifo_noRaces` are `rfl` at a *symbolic* width, and wrapping both of `asyncFifo`'s blocks
   put them over the 200,000-heartbeat default. Resetting per assignment (`wbin = wrst ? 0 :
   wbnext`) keeps the target list flat and the proofs at their original cost. Prefer the ternary
-  wherever a proof reduces through the block; `shiftFifo4` keeps its `if` because nothing there is
-  proved for all sizes.
+  wherever a proof reduces through the block. `shiftFifo` used to keep its `if` because nothing
+  there was proved for all sizes; now that its depth is a parameter it resets per assignment too.
 
 Instances are flattened by `Module.ofItems`, so the width rules and the semantics never see one —
 `InstInfo` survives only so bindings can be checked.
@@ -138,6 +153,49 @@ So the mesh "worked" under the evaluator while the lowering produced hardware in
 ever acknowledged. Reverting `SettleOrder.of` to the identity reddens three of the mesh scenarios
 (`corner-SW` delivers nothing, `contend` and `wormhole` each lose a packet) and eight checks in
 `CircuitHdlTest/SettleOrder.lean` — measured, not assumed.
+
+### The one array result that is kernel-proved
+
+`CircuitHdl/SelectChain.lean` proves `Expr.select` equal to the mux chain over `Expr.elem`, at
+every width, depth and in-range address, and `selectChain_out_of_range` proves the chain falls
+through to element 0 where the read raises. `#print axioms` shows `propext`, `Classical.choice`
+and `Quot.sound` and nothing else — no `native_decide`, so this sits with the mesh deadlock
+theorem rather than with the refinement results.
+
+**It is a theorem about a model of the lowering, not about the lowering.** `Circt.selectChain`
+builds operations in a monad; nothing proves that it builds *this* shape, and if the two drift
+the theorem stays true and stops describing anything that would be built.
+`CircuitHdlTest/SelectChain.lean` closes that by running both and comparing, with a chain missing
+its last arm as the control. If you change either shape, that file is what notices.
+
+Two things the proof needed that are worth knowing before attempting another one here:
+
+- **`Expr.eval` does not reduce by `rfl` at a symbolic width.** It is `do` notation over `Except`
+  and its width checks are `dite`s, so `Nat.decEq w w` is stuck whenever `w` is not a literal.
+  `SelectChain.lean` carries `bind_ok` and `Value.atWidth_mk` for exactly this, and the second is
+  stated over the *constructor* because `simp` will not match a literal width against `v.width`.
+- **`operands` in `Semantics.lean` is public for this reason**, not by oversight. A `private`
+  definition one module away is worse than inconvenient under `autoImplicit`: the identifier
+  silently becomes an implicit argument, and the error arrives as "expected type must not contain
+  free variables".
+
+### The unit of dependency is a `Signal`, not a `Name`
+
+`Stmt.targets` and `Stmt.uses` return `Signal` — `sig x`, `elem a i`, or `whole a` for an access
+whose index is a value. `Signal.overlaps` says which pairs touch, and `SettleOrder.of` counts
+drivers through it rather than by hashing a name.
+
+**An array that is one vertex in that graph is not merely conservative, it is wrong.** Weakening
+`overlaps` so two elements of one array always meet — the granularity an array would have as a
+single name — does *not* report a loop. It silently returns a bad order: the two-statement
+`crossed` in `CircuitHdlTest/SettleOrder.lean` comes back scheduled `a[1], o, a[0]`, so `a[1]`
+reads `a[0]` before anything drives it, and the module settles to `[42, 0]` instead of
+`[42, 42]`. At the same time `arrLoop`, which has a real cycle, comes back with `unresolved = []`.
+Too coarse breaks correct designs and blinds the loop detector at once. Measured, not assumed.
+
+`Clocks.lean` still asks its questions by name (`Module.driversOf`, `singleClocked`), because a
+clock domain is a property of the declaration: an array written from two domains is the race a
+memory would be, whichever elements each one touches.
 
 ### A genuine loop is reported, not fixed
 
@@ -202,6 +260,7 @@ nothing that would be built. Three things close that gap, and they overlap less 
 | Where | What it compares | Trust |
 |---|---|---|
 | `CircuitHdlTest/{ShiftFifo,AsyncFifo}.lean`, final sections | the same refinement checks re-run on `lowered design` | `native_decide`, bounded by schedule |
+| `CircuitHdlTest/RegFile.lean` | one scenario on both semantics, compared directly | `native_decide`, one scenario |
 | `#guard_msgs` in `CircuitHdlTest/Circt.lean` | what `Veir.Printer` makes of the built IR | kernel |
 | `scripts/arccheck.sh` | the **emitted MLIR** under `arcilator` vs `Veir.Netlist` | external, not a theorem |
 
@@ -227,6 +286,18 @@ the source module's own names, which works because the lowering preserves them -
 memories as `seq.firreg`/`seq.firmem` `name` attributes, ports as `hw.modty` port names. Unnamed
 wires (`wfire`, `widx`) do not survive and nothing needs them.
 
+**`Name.mkSimple` of a name attribute is not the inverse of writing it with `toString`**, and the
+bridge used to assume it was. It got away with it only because every register in the package had
+a simple name. An array element is written `a.3`, and `Name.mkSimple "a.3"` is a *single*
+component containing a dot -- a name no design declares -- so every array register would have
+decoded as zero and every netlist theorem about one would have compared the design against a
+state it never wrote. The bridge now resolves the string against the module's own declarations.
+The same hole was latent for an instance-local register (`u.q`); nothing had read one that way.
+
+An array is also *reassembled* there: it is `count` `seq.firreg`s on one side and a single cell
+on the other, which is what lets `shiftQueueAbstractionOf` be one `σ.memOf? \`r` and serve both
+semantics unchanged.
+
 **The two layers catch disjoint things, and this was measured rather than assumed:**
 
 | Mutation | netlist theorems | `arccheck.sh` |
@@ -241,6 +312,28 @@ Five lowering mutations, all currently caught — swap `adaptWidth`'s `comb.conc
 failures in `CircuitHdlTest/Circt.lean`), force `comb.extract`'s `lowBit` to 0 (5 in `AsyncFifo`),
 set `ruw = new` (7 in `AsyncFifo`), swap the `if`-reconciliation mux arms (12 in `ShiftFifo`), and
 lower `comb.and` as `comb.or` (11 in `ShiftFifo`). If you change the lowering, re-run them.
+
+Two **design**-level mutations cover the array work, and the first is the more informative:
+
+- `r[#(i + 1)]` → `r[i]` in `shiftFifo`'s shift reddens **ten** theorems in
+  `CircuitHdlTest/ShiftFifo.lean` — the five `shiftQueueAbstractionOf` ones and their five netlist
+  counterparts — and leaves the two counting-model theorems green, because `count` is still
+  updated correctly and only the data lands in the wrong slot. That is the `shiftFifoOffByOne`
+  signature, reached this time through the loop, and it is the evidence that parameterising the
+  design by depth did not quietly stop the inherited theorems from checking it.
+- Dropping the hold arm of `Stmt.setDyn`'s decoder is what `rfBroadcast` in
+  `CircuitHdlTest/RegFile.lean` stands in for. **Only the second read port catches it**: a
+  broadcast file answers every read with the last word written, so a scenario that read back only
+  what it had just written would pass.
+
+Skewing `selectChain`'s comparison (`addrEq addr (i + 1)`) reddens three theorems in
+`CircuitHdlTest/RegFile.lean` and the in-range pin in `CircuitHdlTest/Circt.lean`.
+
+**What is *not* independently mutable is the out-of-range element**, and this was worth finding
+out rather than assuming. "Element 0 is the chain's final else" and "element 0 is the chain's
+base" are the same fact, so changing the fallback changes what `a[0]` reads as well: it reddens
+the in-range theorems too, not just the divergence pin. The pin therefore records a consequence of
+the chain's shape, not a behaviour that was chosen and could be chosen differently without cost.
 
 #### What the VeIR simulator refuses
 
@@ -289,6 +382,12 @@ them. **If you touch that dispatch, re-run `#print axioms`** — nothing else wo
   got wrong: it read the memory through the same adapted address it wrote through, so a wrong
   address was computed twice and the design behaved identically. **An address-computation test
   needs a read path that is not adapted the same way**, or it tests nothing.
+- **Nor for an out-of-range array index.** `Expr.select` raises `indexOutOfRange` in the
+  evaluator; the lowering is a chain of `comb.mux` whose final else is element 0, so it reads
+  element 0 instead. A mux tree has nowhere to put an error, and spending a comparison and a
+  constant to be wrong differently would not be an improvement. Pinned in
+  `CircuitHdlTest/Circt.lean` beside the memory one. A *static* element index is not affected:
+  `Module.check` rejects it with `elemRange` before anything runs.
 - **The lowering is not behaviour-preserving for an out-of-range memory address.**
   `CircuitHdl/Semantics.lean` indexes by the address's full value and raises `indexOutOfRange`;
   a `seq.firmem` port is only `addrW` bits, so the netlist truncates and writes in range. At
@@ -339,6 +438,19 @@ Verilog testbench, is the way to run what the backend emits. Things that cost ti
 
 What it does **not** cover: `arc.sim.get_port` reads ports only, so registers and memory contents
 are compared only through their effect on the outputs. The netlist theorems are what cover those.
+
+`ArcDesign` is also shaped around a FIFO -- `srcValid`, `srcData`, `dstReady` -- so `regFile` has
+no entry, and **that is a decision rather than an omission**. A dynamic array index emits
+`comb.icmp` and `comb.mux` and nothing else, both of which `shiftFifo`'s ternaries and `widx == i`
+comparisons already drive through arcilator. What would be new is the *arrangement* of those ops,
+and an arrangement is what `Veir.Netlist` checks against the evaluator in
+`CircuitHdlTest/RegFile.lean`. Generalising the driver to arbitrary inputs would be worth it for a
+design that reaches an operation none of the current entries do.
+
+**Array elements reach arcilator with a dot in the name** -- `seq.firreg` named `"r.0"` -- since
+`shiftFifo` is built from an array now. Real CIRCT accepts it: all three `shiftFifo4-*` cases
+agree over 171 observations. Worth knowing before anyone decides the name attribute needs
+sanitising.
 
 ## The mesh NoC, and what its tests actually catch
 

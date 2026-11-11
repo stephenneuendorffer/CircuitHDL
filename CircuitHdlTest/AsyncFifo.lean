@@ -595,7 +595,7 @@ at every reset. -/
 private def asyncFifoResetEmptyLow : Module :=
   module! asyncFifoResetEmptyLow (wclk : 1, wrst : 1, rclk : 1, rrst : 1, slave s : axis 8)
       -> (master m : axis 8) {
-    reg mem[4] : 8;
+    memory mem[4] : 8;
     reg wbin : 3;
     reg wptr : 3;
     reg wq1 : 3;

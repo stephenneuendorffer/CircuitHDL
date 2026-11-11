@@ -173,7 +173,7 @@ and a reset landing on a FIFO that is holding words.
 
 private def shiftDesign : ArcDesign :=
   { label := "shiftFifo4"
-    m := shiftFifo4 8
+    m := shiftFifo 4 8
     clocks := [`clk], resets := [`rst]
     srcValid := `s.valid, srcData := `s.data, srcWidth := 8, dstReady := `m.ready
     observe := [`s.ready, `m.valid, `m.data] }

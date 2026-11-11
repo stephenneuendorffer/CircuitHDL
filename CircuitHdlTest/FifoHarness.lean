@@ -302,16 +302,49 @@ structure VeirBridge where
   inputs : Array (Name × Nat)
   /-- Output ports in `hw.output` operand order. -/
   outputs : Array (Name × Nat)
-  /-- Register names, parallel to `info.regs`. -/
-  regNames : Array Name
+  /-- What each register holds in the harness's `State`, parallel to `info.regs`: a scalar
+  signal, or one element of an array. -/
+  regKeys : Array Signal
   /-- Memory names, parallel to `info.mems`. -/
   memNames : Array Name
+  /-- The source module's arrays, which `encode` reassembles from their elements. -/
+  arrays : Array (Name × Nat × Nat)
   /-- A zeroed state, so `decode` does not rebuild one every tick. -/
   blank : Veir.Netlist.State
   /-- Register widths, parallel to `info.regs`. -/
   regWidths : Array Nat
 
-private def attrName (s : Veir.StringAttr) : Name := Name.mkSimple (String.fromUTF8! s.value)
+/-- Turn a `seq.firreg` or `seq.firmem` name attribute back into the declaration it came from.
+
+`Name.mkSimple` of the attribute string is **not** the inverse of writing it with `toString`, and
+the difference is not cosmetic. An array element goes out as `"a.3"` and would come back as a
+single component containing a dot -- a name no design declares -- so every array register would
+decode as zero and every netlist theorem about an array would be comparing the design against a
+state it never wrote. Matching the string against the module's own declarations is what makes the
+round trip exact.
+
+The same hole is there today for an instance-local register (`u.q`): nothing has read one through
+the netlist, so nothing noticed. -/
+private def resolveSignal (m : Module) (s : Veir.StringAttr) : Signal :=
+  let str := String.fromUTF8! s.value
+  let candidates : List Signal :=
+    (m.regs.map (Signal.sig ·.1))
+    ++ (m.arrays.flatMap fun (a, count, _) =>
+          (List.range count).map fun i => Signal.elem a i)
+  match candidates.find? (fun k => (keyName k).toString == str) with
+  | some k => k
+  | none => .sig (Name.mkSimple str)
+where
+  /-- The name the lowering wrote for this key, which is what the attribute holds. -/
+  keyName : Signal → Name
+    | .elem a i => arrayRegName a i
+    | k => k.name
+
+private def resolveMemName (m : Module) (s : Veir.StringAttr) : Name :=
+  let str := String.fromUTF8! s.value
+  match (m.mems.map Prod.fst).find? (fun x => x.toString == str) with
+  | some x => x
+  | none => Name.mkSimple str
 
 /-- Descend from the top-level `builtin.module` to the `hw.module` inside it. -/
 def hwModuleOf (ctx : Veir.WfIRContext Veir.OpCode) (top : Veir.OperationPtr) :
@@ -328,21 +361,22 @@ def VeirBridge.ofVeir (m : Module) (ctx : Veir.WfIRContext Veir.OpCode)
     (top : Veir.OperationPtr) : Option VeirBridge := do
   let some hwModule := hwModuleOf ctx top | none
   let some info := Veir.Netlist.Info.of ctx hwModule | none
-  let mut regNames : Array Name := #[]
+  let mut regKeys : Array Signal := #[]
   for (op, _) in info.regs do
-    regNames := regNames.push (attrName (op.getProperties! ctx.raw (Veir.OpCode.seq Veir.Seq.firreg)).name)
+    regKeys := regKeys.push
+      (resolveSignal m (op.getProperties! ctx.raw (Veir.OpCode.seq Veir.Seq.firreg)).name)
   let mut memNames : Array Name := #[]
   for (op, _) in info.mems do
     let props := op.getProperties! ctx.raw (Veir.OpCode.seq Veir.Seq.firmem)
     let some nm := props.name | none
-    memNames := memNames.push (attrName nm)
+    memNames := memNames.push (resolveMemName m nm)
   let some blank := Veir.Netlist.State.init ctx info | none
   let mut regWidths : Array Nat := #[]
   for (op, _) in info.regs do
     let some cur := blank.regs[op.id]? | none
     regWidths := regWidths.push (match cur with | .int w _ => w | _ => 0)
   return { ctx, info, inputs := m.inputs.toArray, outputs := m.outputs.toArray,
-           regNames, memNames, blank, regWidths }
+           regKeys, memNames, arrays := m.arrays.toArray, blank, regWidths }
 
 def VeirBridge.of (m : Module) : Option VeirBridge := do
   let .ok (ctx, top) := m.toVeir | none
@@ -363,9 +397,15 @@ private def decode (b : VeirBridge) (σ : State) : Option (Array Veir.RuntimeVal
   let mut regs := b.blank.regs
   for (rg, i) in b.info.regs.zipIdx do
     let (op, _) := rg
-    let some nm := b.regNames[i]? | none
+    let some key := b.regKeys[i]? | none
     let some w := b.regWidths[i]? | none
-    regs := regs.setIfInBounds op.id (rv w ((σ.valueOf? nm).getD 0))
+    -- An array lives in one cell on this side and in `count` registers on the other, so an
+    -- element is read out of the cell by index.
+    let n := match key with
+      | .sig x => (σ.valueOf? x).getD 0
+      | .elem a j => (((σ.memOf? a).bind (·[j]?))).getD 0
+      | .whole _ => 0
+    regs := regs.setIfInBounds op.id (rv w n)
   let mut st : Veir.Netlist.State := { b.blank with regs }
   for (memEntry, i) in b.info.mems.zipIdx do
     let (op, memType) := memEntry
@@ -381,13 +421,22 @@ private def decode (b : VeirBridge) (σ : State) : Option (Array Veir.RuntimeVal
 private def encode (b : VeirBridge) (st : Veir.Netlist.State)
     (vals : Array Veir.RuntimeValue) (σ : State) : Option State := do
   let mut out := σ
+  -- Each array is rebuilt whole, because `State` holds it as one cell: an element written on its
+  -- own would need the other `count - 1` to be read back out and put in beside it.
+  let mut elems : Std.HashMap Name (Array Nat) :=
+    b.arrays.foldl (fun h (a, count, _) => h.insert a (Array.replicate count 0)) {}
   for (rg, i) in b.info.regs.zipIdx do
     let (op, _) := rg
-    let some nm := b.regNames[i]? | none
+    let some key := b.regKeys[i]? | none
     let some v := st.regs[op.id]? | none
     let some n := toNat? v | none
     let w := match v with | .int w _ => w | _ => 0
-    out := out.set nm (Value.ofNat w n)
+    match key with
+    | .sig x => out := out.set x (Value.ofNat w n)
+    | .elem a j => elems := elems.insert a ((elems.getD a #[]).setIfInBounds j n)
+    | .whole _ => pure ()
+  for (a, _, elemW) in b.arrays do
+    out := out.setCell a (.mem ((elems.getD a #[]).toList.map (Value.ofNat elemW)))
   for (memEntry, i) in b.info.mems.zipIdx do
     let (op, memType) := memEntry
     let some nm := b.memNames[i]? | none
@@ -408,12 +457,19 @@ def VeirBridge.sim (b : VeirBridge) : Sim :=
   { init :=
       (b.inputs.toList.map (fun (x, w) => (x, Cell.sig (Value.ofNat w 0))))
       ++ (b.outputs.toList.map (fun (x, w) => (x, Cell.sig (Value.ofNat w 0))))
-      ++ (b.regNames.toList.zipIdx.map (fun (nm, i) =>
-            (nm, Cell.sig (Value.ofNat (match b.info.regs[i]? with
-              | some (op, _) => match (Veir.Netlist.State.init b.ctx b.info).bind (·.regs[op.id]?) with
-                | some (.int w _) => w
-                | _ => 0
-              | none => 0) 0))))
+      ++ (b.regKeys.toList.zipIdx.filterMap (fun (key, i) =>
+            match key with
+            -- Array elements are covered by the array's own cell, below.
+            | .elem _ _ | .whole _ => none
+            | .sig nm => some
+              (nm, Cell.sig (Value.ofNat (match b.info.regs[i]? with
+                | some (op, _) =>
+                    match (Veir.Netlist.State.init b.ctx b.info).bind (·.regs[op.id]?) with
+                    | some (.int w _) => w
+                    | _ => 0
+                | none => 0) 0))))
+      ++ (b.arrays.toList.map (fun (a, count, elemW) =>
+            (a, Cell.mem (List.replicate count (Value.ofNat elemW 0)))))
       ++ (b.memNames.toList.zipIdx.map (fun (nm, i) =>
             (nm, Cell.mem (match b.info.mems[i]? with
               | some (_, mt) => List.replicate mt.depth (Value.ofNat mt.width 0)

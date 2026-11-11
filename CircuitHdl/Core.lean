@@ -99,6 +99,17 @@ inductive Expr where
   is the width of the result; the depth is not recorded here, because at evaluation the memory
   lives in the state and its length is its depth. -/
   | index : Name → (elemW : Nat) → Expr → Expr
+  /-- One element of an array, at an index fixed before the design runs: `a[3]`.
+
+  Separate from `select` rather than `select` over a literal, because the two are different
+  hardware -- this is a wire, that is a mux chain -- and because it is what lets the settle order
+  tell `a[0]` apart from `a[3]`. Leaving the lowering to notice a constant index would make the
+  difference implicit, and the count of elements it reads would depend on a fold. -/
+  | elem : Name → (elemW : Nat) → (idx : Nat) → Expr
+  /-- A dynamic read from an array, `a[i]`. Shaped exactly like `index`, and the difference is
+  entirely in the declaration it names: a memory is one object with ports, an array is `count`
+  registers and this is the mux tree over them. -/
+  | select : Name → (elemW : Nat) → Expr → Expr
   deriving Repr
 
 /-- Statements in the typed circuit core. -/
@@ -106,8 +117,59 @@ inductive Stmt where
   | assign : Name → Expr → Stmt
   /-- A write to a memory, `mem[addr] = data`. -/
   | store : Name → (elemW : Nat) → Expr → Expr → Stmt
+  /-- A write to one element of an array, `a[3] = data`. -/
+  | setElem : Name → (elemW : Nat) → (idx : Nat) → Expr → Stmt
+  /-- A dynamic write to an array, `a[i] = data`: a decoder, where `store` is a write port. -/
+  | setDyn : Name → (elemW : Nat) → Expr → Expr → Stmt
   | if_ : Expr → List Stmt → List Stmt → Stmt
   deriving Repr
+
+/-! ### What a statement touches
+
+`Stmt.targets` and `Stmt.uses` -- the clock-domain analysis and the settle order -- both ask which
+parts of the state a statement reads or writes. A `Name` is not a fine enough answer once arrays
+exist, so they answer with a `Signal`.
+-/
+
+/-- One thing a statement may read or write.
+
+A scalar signal is `sig`, and so is a whole memory: a memory is addressed, but every access to it
+is ordered against every other, because a `seq.firmem` port is a port.
+
+An array splits in two. `elem` is one element at an index known without running the design;
+`whole` is every element at once, which is what a dynamically indexed access touches.
+
+**The split is what keeps an array out of its own way.** `CircuitHdl.SettleOrder` orders
+statements by the signals they share, so an array that is a single vertex in that graph makes a
+read of `a[0]` wait for a write to `a[3]`. Two combinational statements driving different elements
+would then be a cycle -- which is precisely the failure that forced `SettleOrder` to exist, in the
+mesh, one level up. -/
+inductive Signal where
+  | sig : Name → Signal
+  | elem : Name → Nat → Signal
+  | whole : Name → Signal
+  deriving Repr, DecidableEq, BEq, Hashable
+
+namespace Signal
+
+/-- The declaration an access belongs to. Clock-domain analysis works at this granularity: an
+array belongs to one clock as a whole, which is the rule a memory already has. -/
+def name : Signal → Name
+  | sig x | whole x | elem x _ => x
+
+/-- Whether two accesses can touch the same bits, which is what makes one wait for the other.
+
+`whole` is every element, so it overlaps both kinds of element access; two elements overlap only
+at the same index. A `sig` never overlaps an array access, because a name is either an array or it
+is not. -/
+def overlaps : Signal → Signal → Bool
+  | sig x, sig y => x == y
+  | elem x i, elem y j => x == y && i == j
+  | whole x, whole y => x == y
+  | whole x, elem y _ | elem x _, whole y => x == y
+  | _, _ => false
+
+end Signal
 
 /-- Sensitivity events for sequential logic. -/
 inductive Event where
@@ -146,6 +208,12 @@ structure Module where
   inputs : List (Name × Nat)
   outputs : List (Name × Nat)
   regs : List (Name × Nat)
+  /-- Array declarations, as `(name, element count, element width)`.
+
+  Declared like a memory and held like one, but built as `count` independently driven registers
+  or wires rather than as one `seq.firmem` with ports -- which is also why an element may be
+  addressed statically, where a memory word never can. -/
+  arrays : List (Name × Nat × Nat) := []
   /-- Memory declarations, as `(name, depth, element width)`. -/
   mems : List (Name × Nat × Nat) := []
   /-- Instances, already flattened into `body`, kept only so their bindings can be checked. -/
@@ -166,8 +234,10 @@ its own.
 inductive Item where
   /-- A register declaration, `reg q : 8;`. -/
   | reg : Name → Nat → Item
-  /-- A memory declaration, `reg mem[4] : 8;`. -/
+  /-- A memory declaration, `memory m[4] : 8;`. -/
   | mem : Name → (depth elemW : Nat) → Item
+  /-- An array declaration, `reg a[4] : 8;`. -/
+  | array : Name → (count elemW : Nat) → Item
   /-- A clocked block, `always @posedge(clk) { .. }`. -/
   | always : Event → List Stmt → Item
   /-- A statement sitting directly in the module body, outside any `always`. -/
@@ -199,12 +269,16 @@ def Expr.rename (f : Name → Name) : Expr → Expr
   | .concat a b => .concat (a.rename f) (b.rename f)
   | .slice e hi lo => .slice (e.rename f) hi lo
   | .index m w a => .index (f m) w (a.rename f)
+  | .elem a w i => .elem (f a) w i
+  | .select a w addr => .select (f a) w (addr.rename f)
 
 mutual
 
 def Stmt.rename (f : Name → Name) : Stmt → Stmt
   | .assign x e => .assign (f x) (e.rename f)
   | .store m w a d => .store (f m) w (a.rename f) (d.rename f)
+  | .setElem a w i d => .setElem (f a) w i (d.rename f)
+  | .setDyn a w addr d => .setDyn (f a) w (addr.rename f) (d.rename f)
   | .if_ c t e => .if_ (c.rename f) (Stmt.renameList f t) (Stmt.renameList f e)
 
 def Stmt.renameList (f : Name → Name) : List Stmt → List Stmt
@@ -280,6 +354,11 @@ def instLocals (instName : Name) (bindings : List (Name × Name)) (m : Module) :
 def instMems (instName : Name) (m : Module) : List (Name × Nat × Nat) :=
   m.mems.map fun (x, d, w) => (instName ++ x, d, w)
 
+/-- The arrays an instance adds to the parent. An array is never a port, so unlike `instLocals`
+there is nothing to filter: every one of them becomes a prefixed local. -/
+def instArrays (instName : Name) (m : Module) : List (Name × Nat × Nat) :=
+  m.arrays.map fun (x, c, w) => (instName ++ x, c, w)
+
 /-! The pieces of assembly are top-level rather than `let rec` inside `ofItems`, so that `simp` has
 equation lemmas for them -- which is what makes a parameterized module's well-formedness provable. -/
 
@@ -321,6 +400,13 @@ def memories : List Item → List (Name × Nat × Nat)
   | .inst iname sub _ :: rest => instMems iname sub ++ memories rest
   | _ :: rest => memories rest
 
+/-- Every array, including those an instance contributes. -/
+def arrays : List Item → List (Name × Nat × Nat)
+  | [] => []
+  | .array n c w :: rest => (n, c, w) :: arrays rest
+  | .inst iname sub _ :: rest => instArrays iname sub ++ arrays rest
+  | _ :: rest => arrays rest
+
 /-- What survives of each instance, for checking its bindings once the logic has been inlined. -/
 def infos : List Item → List InstInfo
   | [] => []
@@ -336,6 +422,7 @@ def Module.ofItems (name : Name) (ins outs : List (Name × Nat)) (items : List I
     inputs := ins
     outputs := outs
     regs := Item.locals items
+    arrays := Item.arrays items
     mems := Item.memories items
     insts := Item.infos items
     body := Item.processes [] items }

@@ -4,8 +4,8 @@ import CircuitHdlTest.FifoHarness
 /-!
 Tests for the shift-register FIFO, and its refinement of the abstract models.
 
-`shiftFifo4` has the same interface and shares no structure with `asyncFifo`: one clock, no
-memory, no pointers, no gray coding. The oldest word sits in `r0` and the data moves instead.
+`shiftFifo` has the same interface and shares no structure with `asyncFifo`: one clock, no
+memory, no pointers, no gray coding. The oldest word sits in `r[0]` and the data moves instead.
 
 Both models are reused *unchanged*. Only the abstraction functions differ, which is the point --
 a model that had quietly become a description of pointers and wrap-around could not be reused
@@ -20,7 +20,7 @@ namespace CircuitHdl
 
 open Lean
 
-private def sfifo : Module := shiftFifo4 8
+private def sfifo : Module := shiftFifo 4 8
 private def src : AxisPort := { base := `s, clock := `clk, width := 8 }
 private def dst : AxisPort := { base := `m, clock := `clk, width := 8 }
 
@@ -50,14 +50,16 @@ def shiftAbstractionOf (depth : Nat) (σ : State) : Option AbstractFifoModel := 
   let count ← σ.valueOf? `count
   return { depth, count }
 
-/-- The contents of a shift-register FIFO: the first `count` registers, oldest first. -/
+/-- The contents of a shift-register FIFO: the first `count` registers, oldest first.
+
+One lookup, because the registers are an array and `State` holds an array as one cell. Spelling
+out `[`r0, `r1, `r2, `r3]` was the only thing in this file that knew the depth was four. -/
 def shiftQueueAbstractionOf (depth : Nat) (σ : State) : Option AbstractQueueModel := do
   let count ← σ.valueOf? `count
-  let regs ← [`r0, `r1, `r2, `r3].mapM σ.valueOf?
+  let regs ← σ.memOf? `r
   return { depth, queue := regs.take count }
 
 
-private def shiftFifo : Module := shiftFifo4 8
 private def shiftSource : AxisPort := { base := `s, clock := `clk, width := 8 }
 private def shiftDest : AxisPort := { base := `m, clock := `clk, width := 8 }
 
@@ -71,21 +73,21 @@ private def shiftShortSchedules : List Schedule := allSingleClockSchedules 5
 
 /-- **The shift-register FIFO refines the counting model**, over every schedule of length 5. -/
 theorem shift_refines_short :
-    refinesAlongAll shiftFifo 4 shiftSource shiftDest shiftShortSchedules shiftAbstractionOf
+    refinesAlongAll sfifo 4 shiftSource shiftDest shiftShortSchedules shiftAbstractionOf
       = true := by native_decide
 
 /-- **And over the schedules that fill it.** -/
 theorem shift_refines_burst :
-    refinesAlongAll shiftFifo 4 shiftSource shiftDest burstSchedules shiftAbstractionOf
+    refinesAlongAll sfifo 4 shiftSource shiftDest burstSchedules shiftAbstractionOf
       = true := by native_decide
 
 /-- **And it refines the contents model**, so the words come out oldest first. -/
 theorem shift_refines_queue_short :
-    refinesQueueAll shiftFifo 4 shiftSource shiftDest shiftShortSchedules
+    refinesQueueAll sfifo 4 shiftSource shiftDest shiftShortSchedules
       shiftQueueAbstractionOf = true := by native_decide
 
 theorem shift_refines_queue_burst :
-    refinesQueueAll shiftFifo 4 shiftSource shiftDest burstSchedules
+    refinesQueueAll sfifo 4 shiftSource shiftDest burstSchedules
       shiftQueueAbstractionOf = true := by native_decide
 
 /-- **This one needs no warm-up**, where `asyncFifo` does -- see `warmup_matters` below, which is
@@ -96,7 +98,7 @@ are exact from the first cycle; `asyncFifo`'s flags depend on a pointer that has
 boundary, and until it has, `rempty` reads low on an empty FIFO. The harness is the same in both
 cases, which is what lets it tell them apart. -/
 theorem shift_needs_no_warmup :
-    refinesQueueAll shiftFifo 4 shiftSource shiftDest burstSchedules
+    refinesQueueAll sfifo 4 shiftSource shiftDest burstSchedules
       shiftQueueAbstractionOf (warm := false) = true := by native_decide
 
 
@@ -110,32 +112,32 @@ afterwards.
 
 /-- **Occupancy tracks across reset**, with reset injected at three points into every burst. -/
 theorem shift_refines_reset :
-    refinesAlongAll shiftFifo 4 shiftSource shiftDest burstResetSchedules shiftAbstractionOf
+    refinesAlongAll sfifo 4 shiftSource shiftDest burstResetSchedules shiftAbstractionOf
       (rst := some shiftRst) = true := by native_decide
 
 /-- **And so do the contents** -- after a reset the FIFO hands out nothing until something new is
 written, rather than the words it was holding when reset arrived. This is the executable form of
 `AbstractQueueModel.popAll_pushAll_reset`. -/
 theorem shift_refines_queue_reset :
-    refinesQueueAll shiftFifo 4 shiftSource shiftDest burstResetSchedules
+    refinesQueueAll sfifo 4 shiftSource shiftDest burstResetSchedules
       shiftQueueAbstractionOf (rst := some shiftRst) = true := by native_decide
 
 /-- **And exhaustively over short schedules with the reset bit free**: every combination of
 reset, offer and accept over four ticks, 4096 schedules. The burst family reaches a full FIFO but
 fixes when reset arrives; this one fixes nothing and reaches less far. -/
 theorem shift_refines_reset_exhaustive :
-    refinesAlongAll shiftFifo 4 shiftSource shiftDest (allSingleClockResetSchedules 4)
+    refinesAlongAll sfifo 4 shiftSource shiftDest (allSingleClockResetSchedules 4)
       shiftAbstractionOf (rst := some shiftRst) = true := by native_decide
 
 /-- **A reset tick replaces the warm-up.** Trivial for this design, which never needed one -- kept
 because the same theorem on `asyncFifo` is not trivial, and stating both is what shows the harness
 is not quietly doing the warm-up anyway. -/
 theorem shift_reset_first_no_warmup :
-    refinesQueueAll shiftFifo 4 shiftSource shiftDest resetFirstSchedules
+    refinesQueueAll sfifo 4 shiftSource shiftDest resetFirstSchedules
       shiftQueueAbstractionOf (warm := false) (rst := some shiftRst) = true := by native_decide
 
 
-/-- `shiftFifo4` with one subexpression changed: the write index forgets that a read shifts
+/-- `shiftFifo` with one subexpression changed: the write index forgets that a read shifts
 everything down this cycle. The design is otherwise identical.
 
 This is the bug the `- rfire` exists to prevent, and it only bites when a word is accepted and
@@ -144,33 +146,22 @@ miss it entirely. -/
 private def shiftFifoOffByOne : Module :=
   module! shiftFifoOffByOne (clk : 1, rst : 1, slave s : axis 8) -> (master m : axis 8) {
     reg count : 3;
-    reg r0 : 8;
-    reg r1 : 8;
-    reg r2 : 8;
-    reg r3 : 8;
+    reg r[4] : 8;
     wire wfire : 1;
     wire rfire : 1;
     wire widx : 3;
     assign s.ready = ~rst & (count != 4);
     assign m.valid = ~rst & (count != 0);
-    assign m.data = r0;
+    assign m.data = r[0];
     assign wfire = s.valid & s.ready;
     assign rfire = m.valid & m.ready;
     assign widx = count;
     always @(posedge clk) {
-      if rst {
-        assign count = 0;
-        assign r0 = 0;
-        assign r1 = 0;
-        assign r2 = 0;
-        assign r3 = 0;
-      } else {
-        assign count = count + (wfire ? 1 : 0) + (rfire ? 7 : 0);
-        assign r0 = (wfire & (widx == 0)) ? s.data : (rfire ? r1 : r0);
-        assign r1 = (wfire & (widx == 1)) ? s.data : (rfire ? r2 : r1);
-        assign r2 = (wfire & (widx == 2)) ? s.data : (rfire ? r3 : r2);
-        assign r3 = (wfire & (widx == 3)) ? s.data : r3;
+      assign count = rst ? 0 : count + (wfire ? 1 : 0) + (rfire ? 7 : 0);
+      for i < 3 {
+        assign r[i] = rst ? 0 : ((wfire & (widx == i)) ? s.data : (rfire ? r[#(i + 1)] : r[i]));
       }
+      assign r[3] = rst ? 0 : ((wfire & (widx == 3)) ? s.data : r[3]);
     }
   }
 
@@ -194,10 +185,10 @@ theorem shift_offByOne_passes_counting :
 /-! ### Data while valid, and reset
 
 Two more controls, one per capability added alongside the reset. Both are whole designs that
-differ from `shiftFifo4` in one expression.
+differ from `shiftFifo` in one expression.
 -/
 
-/-- `shiftFifo4` driving `m.data` correctly only while the consumer is already accepting. Every
+/-- `shiftFifo` driving `m.data` correctly only while the consumer is already accepting. Every
 word that ever *transfers* is the right word; what is wrong is what the design shows while
 `m.valid` is high and `m.ready` is low.
 
@@ -207,34 +198,23 @@ a cycle early -- or an assertion written on the data bus rather than on the hand
 private def shiftFifoLateData : Module :=
   module! shiftFifoLateData (clk : 1, rst : 1, slave s : axis 8) -> (master m : axis 8) {
     reg count : 3;
-    reg r0 : 8;
-    reg r1 : 8;
-    reg r2 : 8;
-    reg r3 : 8;
+    reg r[4] : 8;
     wire wfire : 1;
     wire rfire : 1;
     wire widx : 3;
     assign s.ready = ~rst & (count != 4);
     assign m.valid = ~rst & (count != 0);
     -- The one changed line: garbage unless the consumer is taking it this cycle.
-    assign m.data = m.ready ? r0 : 0;
+    assign m.data = m.ready ? r[0] : 0;
     assign wfire = s.valid & s.ready;
     assign rfire = m.valid & m.ready;
     assign widx = count + (rfire ? 7 : 0);
     always @(posedge clk) {
-      if rst {
-        assign count = 0;
-        assign r0 = 0;
-        assign r1 = 0;
-        assign r2 = 0;
-        assign r3 = 0;
-      } else {
-        assign count = count + (wfire ? 1 : 0) + (rfire ? 7 : 0);
-        assign r0 = (wfire & (widx == 0)) ? s.data : (rfire ? r1 : r0);
-        assign r1 = (wfire & (widx == 1)) ? s.data : (rfire ? r2 : r1);
-        assign r2 = (wfire & (widx == 2)) ? s.data : (rfire ? r3 : r2);
-        assign r3 = (wfire & (widx == 3)) ? s.data : r3;
+      assign count = rst ? 0 : count + (wfire ? 1 : 0) + (rfire ? 7 : 0);
+      for i < 3 {
+        assign r[i] = rst ? 0 : ((wfire & (widx == i)) ? s.data : (rfire ? r[#(i + 1)] : r[i]));
       }
+      assign r[3] = rst ? 0 : ((wfire & (widx == 3)) ? s.data : r[3]);
     }
   }
 
@@ -253,42 +233,32 @@ theorem lateData_passes_counting :
 /-- **But the contents check rejects it**, which is what the harness checking `m.data` against the
 model on every tick where `m.valid` is high -- rather than only on ticks where a transfer
 completes -- exists to catch. Had `stepQueue` kept its old transfer-time guard, this design would
-be indistinguishable from `shiftFifo4` by everything in this file. -/
+be indistinguishable from `shiftFifo` by everything in this file. -/
 theorem lateData_rejected_by_queue :
     refinesQueueAll shiftFifoLateData 4 shiftSource shiftDest shiftShortSchedules
       shiftQueueAbstractionOf = false := by native_decide
 
-/-- `shiftFifo4` whose reset clears the data registers but forgets `count`. -/
+/-- `shiftFifo` whose reset clears the data registers but forgets `count`. -/
 private def shiftFifoResetKeepsCount : Module :=
   module! shiftFifoResetKeepsCount (clk : 1, rst : 1, slave s : axis 8) -> (master m : axis 8) {
     reg count : 3;
-    reg r0 : 8;
-    reg r1 : 8;
-    reg r2 : 8;
-    reg r3 : 8;
+    reg r[4] : 8;
     wire wfire : 1;
     wire rfire : 1;
     wire widx : 3;
     assign s.ready = ~rst & (count != 4);
     assign m.valid = ~rst & (count != 0);
-    assign m.data = r0;
+    assign m.data = r[0];
     assign wfire = s.valid & s.ready;
     assign rfire = m.valid & m.ready;
     assign widx = count + (rfire ? 7 : 0);
     always @(posedge clk) {
-      if rst {
-        -- `count` is missing from this branch, so it holds through reset.
-        assign r0 = 0;
-        assign r1 = 0;
-        assign r2 = 0;
-        assign r3 = 0;
-      } else {
-        assign count = count + (wfire ? 1 : 0) + (rfire ? 7 : 0);
-        assign r0 = (wfire & (widx == 0)) ? s.data : (rfire ? r1 : r0);
-        assign r1 = (wfire & (widx == 1)) ? s.data : (rfire ? r2 : r1);
-        assign r2 = (wfire & (widx == 2)) ? s.data : (rfire ? r3 : r2);
-        assign r3 = (wfire & (widx == 3)) ? s.data : r3;
+      -- The reset is missing from `count`, so it holds through reset.
+      assign count = count + (wfire ? 1 : 0) + (rfire ? 7 : 0);
+      for i < 3 {
+        assign r[i] = rst ? 0 : ((wfire & (widx == i)) ? s.data : (rfire ? r[#(i + 1)] : r[i]));
       }
+      assign r[3] = rst ? 0 : ((wfire & (widx == 3)) ? s.data : r[3]);
     }
   }
 
@@ -307,7 +277,7 @@ with blocking and non-blocking assignment. What would actually be built is what
 `CircuitHdl.Circt` emits: a netlist of `comb` operations feeding `seq.firreg`s, with no processes
 and no assignment order left in it. The two are related by a translation nothing had checked.
 
-So each result above is restated here against `lowered shiftFifo` -- the same design after
+So each result above is restated here against `lowered sfifo` -- the same design after
 `Module.toNetlist`, run under `CircuitHdl.NetlistSemantics`. The harness, the schedules, the
 depth, and the abstraction functions are **the same expressions**; only the semantics underneath
 differs. That is possible because the lowering keeps the source's names, so `shiftAbstractionOf`
@@ -319,7 +289,7 @@ is what rules out a lowering that accidentally repairs -- or uniformly flattens 
 translates.
 -/
 
-private def shiftNet : Sim := lowered shiftFifo
+private def shiftNet : Sim := lowered sfifo
 
 theorem net_shift_refines_short :
     refinesAlongAll shiftNet 4 shiftSource shiftDest shiftShortSchedules shiftAbstractionOf
@@ -436,7 +406,7 @@ private def swapResetMux (m : Module) : Sim :=
     | some sim => sim
     | none => lowered m
 
-private def shiftNetBent : Sim := swapResetMux shiftFifo
+private def shiftNetBent : Sim := swapResetMux sfifo
 
 theorem netlist_semantics_reads_the_operations :
     refinesAlongAll shiftNetBent 4 shiftSource shiftDest shiftShortSchedules shiftAbstractionOf

@@ -167,8 +167,8 @@ both arms of `adaptWidth` are emitted. Depth 4 gives a 2-bit port address; `narr
 private def memAdapt : Module :=
   module! memAdapt (clk : 1, we : 1, narrow : 1, wide : 3, raddr : 2, din : 8)
       -> (dn : 8, dw : 8) {
-    reg lo[4] : 8;
-    reg hi[4] : 8;
+    memory lo[4] : 8;
+    memory hi[4] : 8;
     assign dn = lo[raddr];
     assign dw = hi[raddr];
     always @(posedge clk) {
@@ -268,5 +268,52 @@ private def oobTick : Name × State := adaptTick 1 0 5 1 22
 -- Which is to say: this is one of the schedules on which `agreesOn` comes out `false`, and that
 -- is the expected answer rather than a failure to be fixed.
 #guard agreesOn memAdapt [`dn, `dw] [oobTick] = false
+
+/-! #### An array index out of range parts the same way, for a different reason
+
+A memory's address is truncated because a `seq.firmem` port is only `addrW` bits wide. An array
+has no port to be narrow: `Expr.select` lowers to a chain of `comb.mux`, and a mux chain has
+**nowhere to put an error**. Its final else is element 0, so that is what an out-of-range index
+reads, where `Expr.eval` raises `indexOutOfRange`.
+
+The alternative would be an extra comparison and a constant zero -- hardware whose only purpose is
+to be wrong in a different way. So the divergence is deliberate, and pinned here so that it cannot
+become accidental.
+
+A *static* element index is not affected at all. It is fixed before the design runs, so
+`Module.check` rejects it with `elemRange` and neither semantics ever sees it.
+-/
+
+/-- Three elements, a four-bit address: addresses 3 to 15 are out of range. -/
+private def oobArray : Module :=
+  Module.ofItems `oobArray [(`clk, 1), (`i, 4)] [(`o, 8)]
+    [ Item.array `a 3 8,
+      Item.stmt (.assign `o (.select `a 8 (.var `i))),
+      Item.always (.posedge `clk)
+        [.setElem `a 8 0 (.lit 8 11), .setElem `a 8 1 (.lit 8 22),
+         .setElem `a 8 2 (.lit 8 33)] ]
+
+private def oobArrayAt (i : Nat) : State := [(`i, Cell.sig (Value.ofNat 4 i))]
+
+/-- Fill it, then read at `i`, under whichever semantics. -/
+private def oobRead (s : Sim) (i : Nat) : Option Nat :=
+  match s.stepClock `clk s.init [] with
+  | .error _ => none
+  | .ok σ => ((s.settle (σ.apply (oobArrayAt i))).toOption.bind (·.valueOf? `o))
+
+-- In range, the two agree, which is what makes the disagreement below about the range and not
+-- about the array.
+#guard oobRead oobArray.sim 2 = some 33
+#guard oobRead (lowered oobArray) 2 = some 33
+
+-- Out of range, the evaluator refuses outright.
+#guard oobRead oobArray.sim 5 = none
+/-- info: Except.error (CircuitHdl.EvalError.indexOutOfRange `a 5 3) -/
+#guard_msgs in
+#eval (oobArray.stepClock `clk oobArray.initState []).bind
+  (fun σ => oobArray.settle (σ.apply (oobArrayAt 5)))
+
+-- The lowered design reads element 0 and carries on.
+#guard oobRead (lowered oobArray) 5 = some 11
 
 end CircuitHdl

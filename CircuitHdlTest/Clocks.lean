@@ -29,7 +29,7 @@ module! raced #[] (ca : 1, cb : 1) -> (q : 1) {
 
 -- A memory written from two domains is the same race, so memories are checked alongside registers.
 module! racedMem #[] (ca : 1, cb : 1, d : 8) -> (y : 1) {
-  reg m[4] : 8;
+  memory m[4] : 8;
   assign y = ca;
   always @(posedge ca) { assign m[(0 : 2)] = d; }
   always @(posedge cb) { assign m[(1 : 2)] = d; }

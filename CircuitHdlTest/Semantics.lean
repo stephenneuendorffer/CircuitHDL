@@ -196,6 +196,71 @@ private def shifterOut (x : Nat) : Option (Nat × Nat × Nat) :=
 -- 0xAC = 0b10101100: high nibble 0xA, low nibble 0xC, swapped 0xCA.
 #guard shifterOut 0xAC = some (0xA, 0xC, 0xCA)
 
+/-! ### Arrays
+
+Built by hand, because the surface syntax for arrays does not exist yet and the design that uses
+them -- `CircuitHdl.Examples.RegFile` -- is checked in its own file. What is checked here is the
+evaluator's half of the contract: that an element is addressable two ways, that a clocked block
+writing two elements lands both, and that an index past the end is an error rather than a wrap.
+-/
+
+/-- Four 8-bit registers: a dynamic write port on a clock, one dynamic read and one static. -/
+private def rfile : Module :=
+  Module.ofItems `rfile
+    [(`clk, 1), (`we, 1), (`wa, 2), (`wd, 8), (`ra, 2)] [(`rd, 8), (`first, 8)]
+    [ Item.array `r 4 8,
+      Item.stmt (.assign `rd (.select `r 8 (.var `ra))),
+      Item.stmt (.assign `first (.elem `r 8 0)),
+      Item.always (.posedge `clk)
+        [.if_ (.var `we) [.setDyn `r 8 (.var `wa) (.var `wd)] []] ]
+
+#guard (Module.check rfile).isOk
+#guard rfile.arrays = [(`r, 4, 8)]
+-- An array is one cell holding four values, not four signals.
+#guard (rfile.initState.memOf? `r) = some [0, 0, 0, 0]
+
+private def c (w n : Nat) : Cell := .sig (Value.ofNat w n)
+
+private def rfileRun : Option (List (Option (List Nat) × Option Nat)) :=
+  (rfile.run rfile.initState
+    [ [(`clk, c 1 1), (`we, c 1 1), (`wa, c 2 2), (`wd, c 8 0xAA), (`ra, c 2 2)],
+      [(`we, c 1 1), (`wa, c 2 0), (`wd, c 8 0x55), (`ra, c 2 2)],
+      [(`we, c 1 0), (`ra, c 2 0)] ]).toOption.map
+    (·.map fun σ => (σ.memOf? `r, σ.valueOf? `rd))
+
+-- The write lands at the addressed element and nowhere else, and the read port follows the
+-- address rather than the last thing written.
+#guard rfileRun = some
+  [(some [0, 0, 0xAA, 0], some 0xAA),
+   (some [0x55, 0, 0xAA, 0], some 0xAA),
+   (some [0x55, 0, 0xAA, 0], some 0x55)]
+
+/-- Two elements written in one clocked block. Both must land: a non-blocking write to an array
+builds on the block's earlier pending write, the way a second store to one memory does. -/
+private def twoWrites : Module :=
+  Module.ofItems `twoWrites [(`clk, 1)] [(`o, 8)]
+    [ Item.array `a 4 8,
+      Item.stmt (.assign `o (.elem `a 8 1)),
+      Item.always (.posedge `clk) [.setElem `a 8 0 (.lit 8 7), .setElem `a 8 1 (.lit 8 9)] ]
+
+#guard (twoWrites.step twoWrites.initState [(`clk, c 1 1)]).toOption.bind
+  (State.memOf? · `a) = some [7, 9, 0, 0]
+
+/-- An index past the end is an error, not a wrap -- the same choice a memory address gets, and
+for the same reason: a pointer bug should surface rather than silently alias. The lowered form
+*cannot* do this, and the divergence is pinned in `CircuitHdlTest/Circt.lean`. -/
+private def oob : Module :=
+  Module.ofItems `oob [(`i, 4)] [(`o, 8)]
+    [ Item.array `a 3 8, Item.stmt (.assign `o (.select `a 8 (.var `i))) ]
+
+/-- info: Except.error (CircuitHdl.EvalError.indexOutOfRange `a 5 3) -/
+#guard_msgs in #eval oob.settle (oob.initState.apply [(`i, c 4 5)])
+
+-- In range, it reads what is there.
+#guard (oob.settle ((oob.initState.apply [(`i, c 4 2)]).setCell `a
+          (.mem [Value.ofNat 8 1, Value.ofNat 8 2, Value.ofNat 8 3]))).toOption.bind
+  (State.valueOf? · `o) = some 3
+
 /-! ### Width errors surface at run time too
 
 A module that fails `Module.check` can also fail to evaluate, with the same error type.

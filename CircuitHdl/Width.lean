@@ -27,6 +27,10 @@ separately from signals because they are indexed rather than read whole. -/
 structure Ctx where
   env : Env
   inputs : List Name := []
+  /-- Arrays, as `(name, element count, element width)`. Shaped like `MemEnv` and kept apart from
+  it for the same reason memories are kept apart from signals: what a name means when it is
+  indexed is decided by which list declares it. -/
+  arrays : MemEnv := []
   mems : MemEnv := []
   deriving Repr
 
@@ -47,6 +51,13 @@ inductive CheckError where
   | unboundMem : Name → CheckError
   /-- A scalar signal indexed as though it were a memory, or the reverse. -/
   | notAMemory : Name → CheckError
+  /-- A name used as an array that is not a declared array. -/
+  | unboundArray : Name → CheckError
+  /-- Something that is not an array -- a scalar, or a memory -- indexed as though it were one. -/
+  | notAnArray : Name → CheckError
+  /-- An element index past the end of its array. Unlike a memory address, which is a value and so
+  can only be checked when it is evaluated, this one is fixed before the design runs. -/
+  | elemRange : Name → (idx count : Nat) → CheckError
   /-- A name declared twice with disagreeing widths. -/
   | conflictingDecl : Name → (w₁ w₂ : Nat) → CheckError
   /-- An instance binding naming a port the submodule does not have. -/
@@ -76,6 +87,10 @@ def render : CheckError → String
   | unbound x => s!"unknown signal '{x}'; it is not a declared input, output, reg or wire"
   | unboundMem x => s!"unknown memory '{x}'; it is not a declared memory"
   | notAMemory x => s!"'{x}' is a scalar signal, not a memory"
+  | unboundArray x => s!"unknown array '{x}'; it is not a declared array"
+  | notAnArray x => s!"'{x}' is not an array"
+  | elemRange a i c =>
+      s!"element {i} is out of range for array '{a}', which has {c} elements"
   | conflictingDecl x w₁ w₂ => s!"'{x}' is declared both {w₁} bits and {w₂} bits wide"
   | noSuchPort inst port =>
       s!"instance '{inst}' binds '{port}', which is not a port of the module it instantiates"
@@ -98,7 +113,7 @@ need not have been checked first -- hence the `check` case. `indexOutOfRange` is
 that is genuinely dynamic: whether an address is in range depends on the value it evaluates to. -/
 inductive EvalError where
   | check : CheckError → EvalError
-  /-- A memory indexed outside its depth. -/
+  /-- A memory or an array indexed past the last value it holds. -/
   | indexOutOfRange : Name → (index depth : Nat) → EvalError
   deriving Repr, DecidableEq
 
@@ -106,7 +121,9 @@ namespace EvalError
 
 def render : EvalError → String
   | check e => e.render
-  | indexOutOfRange m i d => s!"index {i} is out of range for memory '{m}' of depth {d}"
+  -- Neutral about which kind of declaration it was: an array raises this too, and the one message
+  -- has to read correctly for both.
+  | indexOutOfRange m i d => s!"index {i} is out of range for '{m}', which holds {d} values"
 
 instance : ToString EvalError := ⟨render⟩
 
@@ -139,6 +156,26 @@ def Ctx.memOf (ctx : Ctx) (x : Name) : Except CheckError (Nat × Nat) :=
   match ctx.mems.lookup x with
   | some dw => .ok dw
   | none => if (ctx.env.lookup x).isSome then .error (.notAMemory x) else .error (.unboundMem x)
+
+/-- Resolve an array to its element count and element width, the counterpart of `memOf`. A name
+that is declared as something else -- a signal, or a memory -- is `notAnArray` rather than
+unbound, so an array access to a memory says what is actually wrong. -/
+def Ctx.arrayOf (ctx : Ctx) (x : Name) : Except CheckError (Nat × Nat) :=
+  match ctx.arrays.lookup x with
+  | some cw => .ok cw
+  | none =>
+      if (ctx.env.lookup x).isSome || (ctx.mems.lookup x).isSome then .error (.notAnArray x)
+      else .error (.unboundArray x)
+
+/-- The element width an array access must have, and a check that a static index is in range.
+Shared by the expression and statement rules so the two cannot drift. -/
+def Ctx.elemWidth (ctx : Ctx) (a : Name) (elemW : Nat) (idx : Option Nat) :
+    Except CheckError Nat := do
+  let (count, declaredW) ← ctx.arrayOf a
+  expectWidth s!"element of array '{a}'" declaredW elemW
+  match idx with
+  | some i => if i < count then .ok elemW else .error (.elemRange a i count)
+  | none => .ok elemW
 
 /-- The width of an expression, checking that the widths recorded on each node are consistent.
 
@@ -181,6 +218,11 @@ def Expr.width? (ctx : Ctx) : Expr → Except CheckError Nat
       -- evaluator against the memory's actual depth.
       let _ ← Expr.width? ctx addr
       .ok elemW
+  | .elem a elemW i => ctx.elemWidth a elemW (some i)
+  | .select a elemW addr => do
+      let w ← ctx.elemWidth a elemW none
+      let _ ← Expr.width? ctx addr
+      .ok w
 
 mutual
 
@@ -196,6 +238,13 @@ def Stmt.check (ctx : Ctx) : Stmt → Except CheckError Unit
       expectWidth s!"element of memory '{m}'" declaredW elemW
       let _ ← Expr.width? ctx addr
       expectWidth s!"write to memory '{m}'" elemW (← Expr.width? ctx data)
+  | .setElem a elemW i data => do
+      let _ ← ctx.elemWidth a elemW (some i)
+      expectWidth s!"write to array '{a}'" elemW (← Expr.width? ctx data)
+  | .setDyn a elemW addr data => do
+      let _ ← ctx.elemWidth a elemW none
+      let _ ← Expr.width? ctx addr
+      expectWidth s!"write to array '{a}'" elemW (← Expr.width? ctx data)
   | .if_ c t f => do
       expectWidth "if condition" 1 (← Expr.width? ctx c)
       Stmt.checkList ctx t
@@ -250,7 +299,8 @@ def InstInfo.check (env : Env) (i : InstInfo) : Except CheckError Unit :=
 /-- Check every process in a module against its declarations, and every instance's bindings. -/
 def Module.check (m : Module) : Except CheckError Unit := do
   let env ← m.declEnv
-  let ctx : Ctx := { env := env, inputs := m.inputs.map Prod.fst, mems := m.mems }
+  let ctx : Ctx :=
+    { env := env, inputs := m.inputs.map Prod.fst, arrays := m.arrays, mems := m.mems }
   m.insts.forM (InstInfo.check env)
   m.body.forM (Process.check ctx)
 
