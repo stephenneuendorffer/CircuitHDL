@@ -289,19 +289,28 @@ to must be the port's width.
 Flattening has already inlined the logic, so without this a mistyped port name would simply leave
 the real port unbound -- silently disconnecting a signal -- and a width mismatch would be reported
 against an inlined operand rather than against the port. -/
-def InstInfo.check (env : Env) (i : InstInfo) : Except CheckError Unit :=
-  i.bindings.forM fun (port, parent) =>
+def InstInfo.check (ctx : Ctx) (i : InstInfo) : Except CheckError Unit :=
+  i.bindings.forM fun (port, target) =>
     match i.ports.lookup port with
     | none => .error (.noSuchPort i.name port)
     | some pw => do
-        expectWidth s!"port '{port}' of instance '{i.name}'" pw (← env.widthOf parent)
+        -- A port tied to an array element is checked against that array's declaration, including
+        -- that the element exists: the index is fixed before the design runs, as every element
+        -- index is.
+        match target with
+        | BindTarget.sig parent => do
+            let w ← ctx.env.widthOf parent
+            expectWidth s!"port '{port}' of instance '{i.name}'" pw w
+        | BindTarget.elem a elemW idx => do
+            let _ ← ctx.elemWidth a elemW (some idx)
+            expectWidth s!"port '{port}' of instance '{i.name}'" pw elemW
 
 /-- Check every process in a module against its declarations, and every instance's bindings. -/
 def Module.check (m : Module) : Except CheckError Unit := do
   let env ← m.declEnv
   let ctx : Ctx :=
     { env := env, inputs := m.inputs.map Prod.fst, arrays := m.arrays, mems := m.mems }
-  m.insts.forM (InstInfo.check env)
+  m.insts.forM (InstInfo.check ctx)
   m.body.forM (Process.check ctx)
 
 end CircuitHdl

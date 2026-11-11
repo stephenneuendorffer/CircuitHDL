@@ -138,14 +138,17 @@ def mesh4x4 (fw : Nat) : Module :=
           [(swPort s!"o{j}" "valid", lnk x y j "valid"),
            (swPort s!"o{j}" "ready", lnk x y j "ready"),
            (swPort s!"o{j}" "data", lnk x y j "data")]
+      -- Every binding here ties a port to a whole signal; `BindTarget` exists for the other case,
+      -- a port tied to one element of an array, which this module has no arrays to use.
       Item.inst (Name.mkSimple s!"sw{x}{y}") (meshSwitch fw)
-        ([(`clk, `clk), (`rst, `rst),
+        (List.map (fun (p, s) => (p, BindTarget.sig s))
+         ([(`clk, `clk), (`rst, `rst),
           (`myX, coord x y "mx"), (`myY, coord x y "my"),
           -- Local injection and ejection.
           (`i4.valid, inj x y "valid"), (`i4.ready, inj x y "ready"),
           (`i4.data, inj x y "data"),
           (`o4.valid, ej x y "valid"), (`o4.ready, ej x y "ready"),
-          (`o4.data, ej x y "data")] ++ inBind ++ outBind)
+          (`o4.data, ej x y "data")] ++ inBind ++ outBind))
 
   Module.ofItems `mesh4x4 inputs outputs
     (linkWires ++ coordWires ++ edgeWires ++ coordDrives ++ edgeDrives ++ switches)

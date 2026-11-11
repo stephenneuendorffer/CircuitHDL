@@ -89,6 +89,7 @@ declare_syntax_cat circuit_expr
 declare_syntax_cat circuit_stmt
 declare_syntax_cat circuit_item
 declare_syntax_cat circuit_binding
+declare_syntax_cat circuit_ref
 declare_syntax_cat circuit_field
 declare_syntax_cat circuit_fields
 declare_syntax_cat circuit_iface
@@ -136,6 +137,19 @@ syntax ident ":" term : circuit_port
 syntax "slave" ident ":" circuit_iface : circuit_port
 syntax "master" ident ":" circuit_iface : circuit_port
 
+/-- An **array port**, `d[4] : 8` or `slave i[5] : axis fw`.
+
+`n` ports, not an array: `Module.inputs` is a list of scalars and a port is one wire per element
+in any hardware, so this declares the separate ports `i.valid.0 … i.valid.4` and selects one with
+`i.valid[k]`. That spelling needs no new expression syntax -- `qualify` already names a field with
+a dot, and Lean lexes `i.valid` as a single identifier.
+
+Being scalars, they are indexed only at elaboration time. There is no cell to select from, so
+`i.valid[addr]` is an error rather than a mux. -/
+syntax ident "[" term "]" ":" term : circuit_port
+syntax "slave" ident "[" term "]" ":" circuit_iface : circuit_port
+syntax "master" ident "[" term "]" ":" circuit_iface : circuit_port
+
 syntax:max ident : circuit_expr
 syntax:max num : circuit_expr
 /-- A Lean term used as a value: `#(depth - 1)`.
@@ -172,7 +186,15 @@ syntax:20 circuit_expr:21 " ? " circuit_expr " : " circuit_expr:20 : circuit_exp
 syntax "assign" ident "=" circuit_expr ";" : circuit_stmt
 syntax "assign" ident "[" circuit_expr "]" "=" circuit_expr ";" : circuit_stmt
 syntax "assign" ident ":" term:51 "=" circuit_expr ";" : circuit_stmt
-syntax "if" circuit_expr "{" circuit_stmt* "}" "else" "{" circuit_stmt* "}" : circuit_stmt
+/-- A conditional. `if c { .. } else { .. }` on a signal is hardware -- a mux per assigned signal.
+`if #(cond) { .. } else { .. }` on a Lean `Bool` is **elaboration time**: one arm is built and the
+other does not exist, which is what lets a generated design treat its edges differently from its
+middle.
+
+The arms are `circuit_item*` for the same reason the `for` body is: a static conditional at module
+level has to be able to choose between instances. A hardware `if` rejects anything that is not a
+statement, since there is nowhere to put it. -/
+syntax "if" circuit_expr "{" circuit_item* "}" "else" "{" circuit_item* "}" : circuit_stmt
 /-- A generate loop, `for i < depth { .. }`, meaning `0 ≤ i < depth`.
 
 The bound is `term:max` rather than `term` because a `term` here is greedy and would swallow the
@@ -181,9 +203,15 @@ The bound is `term:max` rather than `term` because a `term` here is greedy and w
 
 `i` is a Lean `Nat`, not a signal: it indexes arrays, appears in widths, and in value position
 becomes a literal. The loop itself is the one construct here that expands at elaboration, into
-ordinary statements -- a `Stmt` constructor holding a function could be neither `Repr`'d nor
-compared, and `Stmt.uses` would have to enumerate the body anyway. -/
-syntax "for" ident "<" term:max "{" circuit_stmt* "}" : circuit_stmt
+ordinary items -- a `Stmt` constructor holding a function could be neither `Repr`'d nor compared,
+and `Stmt.uses` would have to enumerate the body anyway.
+
+The body is `circuit_item*` so that a loop at module level can generate **instances**, which is
+what the mesh needs and what statements alone could not give. Inside an `always` the same rule is
+reached through `syntax circuit_stmt : circuit_item`, and a body item that is not a statement is
+rejected there rather than silently accepted. There is deliberately only one `for` rule: two that
+parse the same text leave an ambiguity node that neither pattern matches. -/
+syntax "for" ident "<" term:max "{" circuit_item* "}" : circuit_stmt
 
 syntax "reg" ident ":" term ";" : circuit_item
 /-- A memory declaration, `memory m[4] : 8;`. `reg m[4] : 8;` is an *array* of four registers,
@@ -204,15 +232,28 @@ As with the scalar forms, `reg` and `wire` build the same declaration and which 
 turns out to be is read off how it is driven. -/
 syntax "reg" ident "[" term "]" ":" term ";" : circuit_item
 syntax "wire" ident "[" term "]" ":" term ";" : circuit_item
-/-- A port binding, `.b(x)`. The bound signal is a name, not an expression. -/
-syntax "." ident "(" ident ")" : circuit_binding
+/-- One side of a port binding: a name, or an indexed one.
+
+Both sides take the same form. On the port side an index names a port of an *array port*, which
+is a family of scalars, so it is still just a name. On the signal side it may also be an element
+of an array in the parent, which is not a name at all -- see `BindTarget`. -/
+syntax ident : circuit_ref
+syntax ident "[" circuit_expr "]" : circuit_ref
+
+/-- A port binding, `.b(x)` or `.i.valid[k](l[#(j)])`. The bound signal is a name or an element,
+not an arbitrary expression: feed an expression by assigning it to a wire first. -/
+syntax "." circuit_ref "(" circuit_ref ")" : circuit_binding
 /-- An instance, `grayOf wg (.b(x), .g(y));`. -/
 syntax ident ident "(" sepBy(circuit_binding, ",") ")" ";" : circuit_item
+/-- An instance whose name is indexed, `meshRouteUnit r[k] (..)`, which is what a loop generating
+instances needs: two iterations sharing a name would collide on every local the submodule has. -/
+syntax ident ident "[" circuit_expr "]" "(" sepBy(circuit_binding, ",") ")" ";" : circuit_item
 /-- An instance of a *parameterized* module, `(grayOfW (k+3)) wg (.b(x), .g(y));`.
 
 The parentheses are required: an unparenthesized `grayOfW (k+3) wg` would parse as one function
 application, leaving no way to tell the parameters from the instance name. -/
 syntax "(" term ")" ident "(" sepBy(circuit_binding, ",") ")" ";" : circuit_item
+syntax "(" term ")" ident "[" circuit_expr "]" "(" sepBy(circuit_binding, ",") ")" ";" : circuit_item
 /-- A derived value, `let n := Nat.log2 depth;`.
 
 It scopes over the items that follow it, like a `let` anywhere else. This is how a module names a
@@ -262,6 +303,10 @@ structure SymCtx where
   mems : List (Name × SymWidth × SymWidth) := []
   /-- Arrays, as `(name, element count, element width)`. -/
   arrays : List (Name × SymWidth × SymWidth) := []
+  /-- Array *ports*, as `(name, count, width)`. Separate from `arrays` because these are `n`
+  scalar ports rather than one cell: indexing one yields a signal, not an element, and there is
+  nothing to select from at run time. -/
+  families : List (Name × SymWidth × SymWidth) := []
   /-- Identifiers standing for Lean `Nat`s rather than for signals: the binder of an enclosing
   `for`, and the module's own parameters.
 
@@ -300,9 +345,15 @@ private def sameWidth (a b : SymWidth) : Bool :=
 `here` are the fields that go in the list the port was written in, `there` the ones that go in the
 other -- which is how `ready` ends up facing the opposite way from `valid` without being declared
 specially. A plain wire has one field and nothing on the far side. -/
+structure PortDecl where
+  name : Ident
+  width : SymWidth
+  /-- `some n` for an array port: `n` separate scalar ports, `name.0 … name.{n-1}`. -/
+  count : Option SymWidth := none
+
 structure PortFields where
-  here : Array (Ident × SymWidth) := #[]
-  there : Array (Ident × SymWidth) := #[]
+  here : Array PortDecl := #[]
+  there : Array PortDecl := #[]
 
 /-- Expand one interface reference into its fields.
 
@@ -333,18 +384,27 @@ private def qualify (port : Ident) (field : Ident) : Ident :=
 /-- Parse a `circuit_port` into the signals it denotes, keeping identifiers for error positions. -/
 private def parsePort (p : TSyntax `circuit_port) : MacroM PortFields := do
   match p with
-  | `(circuit_port| $x:ident : $w:term) => return { here := #[(x, w)] }
-  | `(circuit_port| slave $x:ident : $i:circuit_iface) => do
-      let fs ← expandIface i
-      -- A slave port is incoming: what flows forward arrives, what flows back departs.
-      return { here := fs.filterMap fun (isFwd, f, w) => if isFwd then some (qualify x f, w) else none
-               there := fs.filterMap fun (isFwd, f, w) => if isFwd then none else some (qualify x f, w) }
+  | `(circuit_port| $x:ident : $w:term) => return { here := #[{ name := x, width := w }] }
+  | `(circuit_port| $x:ident [ $n:term ] : $w:term) =>
+      return { here := #[{ name := x, width := w, count := some n }] }
+  | `(circuit_port| slave $x:ident : $i:circuit_iface)
   | `(circuit_port| master $x:ident : $i:circuit_iface) => do
       let fs ← expandIface i
-      -- A master port is outgoing, so it is the mirror image.
-      return { here := fs.filterMap fun (isFwd, f, w) => if isFwd then some (qualify x f, w) else none
-               there := fs.filterMap fun (isFwd, f, w) => if isFwd then none else some (qualify x f, w) }
-  | _ => Macro.throwErrorAt p "expected `name : width`, `slave x : iface` or `master x : iface`"
+      -- A slave port is incoming and a master outgoing, but each puts its forward fields in the
+      -- list it was written in and its reverse fields in the other, so the two are one case.
+      return (iface fs none x)
+  | `(circuit_port| slave $x:ident [ $n:term ] : $i:circuit_iface)
+  | `(circuit_port| master $x:ident [ $n:term ] : $i:circuit_iface) => do
+      let fs ← expandIface i
+      return (iface fs (some n) x)
+  | _ => Macro.throwErrorAt p
+           "expected `name : width`, `slave x : iface`, or either with a size, as in `i[5]`"
+where
+  iface (fs : Array (Bool × Ident × SymWidth)) (count : Option SymWidth) (x : Ident) : PortFields :=
+    { here := fs.filterMap fun (isFwd, f, w) =>
+        if isFwd then some { name := qualify x f, width := w, count } else none
+      there := fs.filterMap fun (isFwd, f, w) =>
+        if isFwd then none else some { name := qualify x f, width := w, count } }
 
 /-- Add a declaration to an environment, rejecting a disagreeing redeclaration. -/
 private def addDeclStx (env : List (Name × SymWidth)) (x : Ident) (w : SymWidth) :
@@ -382,6 +442,11 @@ private def memoryName? (ctx : SymCtx) : TSyntax `circuit_expr → Option (Ident
 only here, exactly as `mem[addr]` and the bit select `x[3]` already are. -/
 private def arrayName? (ctx : SymCtx) : TSyntax `circuit_expr → Option (Ident × SymWidth)
   | `(circuit_expr| $x:ident) => (ctx.arrays.lookup x.getId).map fun (_, w) => (x, w)
+  | _ => none
+
+/-- And for an array port, whose elements are separate signals. -/
+private def familyName? (ctx : SymCtx) : TSyntax `circuit_expr → Option (Ident × SymWidth)
+  | `(circuit_expr| $x:ident) => (ctx.families.lookup x.getId).map fun (_, w) => (x, w)
   | _ => none
 
 /-- Is this identifier a Lean `Nat` rather than a signal? -/
@@ -455,9 +520,9 @@ private partial def widthOf? (ctx : SymCtx) (stx : TSyntax `circuit_expr) :
   | `(circuit_expr| !$_:circuit_expr) => return some (← ofNat 1)
   | `(circuit_expr| $_:circuit_expr [ $hi:term : $lo:term ]) => return some (← `($hi - $lo + 1))
   | `(circuit_expr| $e:circuit_expr [ $_:circuit_expr ]) =>
-      match arrayName? ctx e, memoryName? ctx e with
-      | some (_, elemW), _ | _, some (_, elemW) => return some elemW
-      | none, none => return some (← ofNat 1)
+      match arrayName? ctx e, familyName? ctx e, memoryName? ctx e with
+      | some (_, w), _, _ | _, some (_, w), _ | _, _, some (_, w) => return some w
+      | none, none, none => return some (← ofNat 1)
   | `(circuit_expr| { $es,* }) => do
       let mut total : Option SymWidth := none
       for e in es.getElems do
@@ -586,6 +651,15 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
                 | throwWidth i (.indeterminate "the index of this array read")
               `(Expr.select $(quote a.getId) $elemW $(← checkExpr ctx aw i))
       | none =>
+      match familyName? ctx e with
+      | some (f, w) => do
+          expectSym stx s!"port '{f.getId}'" expected w
+          let some idx := staticIdx? ctx i
+            | do rejectComputedIndex ctx i
+                 throwWidth i (.indeterminate "an index into an array port, which is a family of \
+                   separate ports rather than storage, so it cannot be selected at run time")
+          `(Expr.var (indexedName $(quote f.getId) $idx))
+      | none =>
       match memoryName? ctx e with
       | some (m, elemW) =>
           expectSym stx s!"element of memory '{m.getId}'" expected elemW
@@ -594,15 +668,19 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
             | throwWidth i (.indeterminate "the address of this memory read")
           `(Expr.index $(quote m.getId) $elemW $(← checkExpr ctx aw i))
       | none =>
-          let `(circuit_expr| $iS:num) := i
-            | throwWidth i (.indeterminate "a bit select index, which must be a literal")
-          let bit := iS.getNat
+          -- A bit select. The index is the same elaboration-time kind an array element takes, so
+          -- `x[k]` works for a loop binder as well as for a numeral -- a vector sliced bit by
+          -- bit inside a loop is exactly what the mesh's flit headers want.
+          let some bit := staticIdx? ctx i
+            | do rejectComputedIndex ctx i
+                 throwWidth i (.indeterminate
+                   "a bit select index, which must be fixed before the design runs")
           let some we ← widthOf? ctx e
             | throwWidth e (.indeterminate "the operand of this bit select")
-          if let some w := asNat? we then
-            if bit ≥ w then throwWidth stx (.sliceRange bit bit w)
+          if let (some b, some w) := (bit.raw.isNatLit?, asNat? we) then
+            if b ≥ w then throwWidth stx (.sliceRange b b w)
           expectSym stx "bit select" expected (← ofNat 1)
-          `(Expr.slice $(← checkExpr ctx we e) $(quote bit) $(quote bit))
+          `(Expr.slice $(← checkExpr ctx we e) $bit $bit)
   | `(circuit_expr| { $es,* }) => do
       let elems := es.getElems
       let mut widths : Array SymWidth := #[]
@@ -623,6 +701,24 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
   | _ => Macro.throwErrorAt stx "unsupported circuit expression"
 
 end
+
+/-- Read a block that parsed as items back as statements.
+
+Both `for` and `if` take item bodies so that either can generate an instance at module level.
+Inside an `always`, or in either arm of a hardware `if`, there is nowhere to put one. -/
+private def asStmts (body : Array (TSyntax `circuit_item)) :
+    MacroM (Array (TSyntax `circuit_stmt)) :=
+  body.mapM fun i =>
+    match i with
+    | `(circuit_item| $st:circuit_stmt) => pure st
+    | _ => Macro.throwErrorAt i
+             "only statements may appear here; a declaration or an instance belongs at module \
+              level, outside any `always` block"
+
+/-- Is this the elaboration-time conditional rather than the hardware one? -/
+private def staticCond? : TSyntax `circuit_expr → Option (TSyntax `term)
+  | `(circuit_expr| #($t:term)) => some t
+  | _ => none
 
 /-- The declared width of an assignment target, rejecting assignment to an input port. -/
 private def assignTargetWidth (ctx : SymCtx) (x : Ident) : MacroM SymWidth := do
@@ -654,6 +750,14 @@ private partial def elabStmt (ctx : SymCtx) : TSyntax `circuit_stmt → MacroM (
                 | throwWidth addr (.indeterminate "the index of this array write")
               `(Stmt.setDyn $(quote m.getId) $elemW
                   $(← checkExpr ctx aw addr) $(← checkExpr ctx elemW e))
+      | none =>
+      match ctx.families.lookup m.getId with
+      | some (_, w) => do
+          if ctx.inputs.contains m.getId then throwWidth m (.assignToInput m.getId)
+          let some idx := staticIdx? ctx addr
+            | do rejectComputedIndex ctx addr
+                 throwWidth addr (.indeterminate "an index into an array port")
+          `(Stmt.assign (indexedName $(quote m.getId) $idx) $(← checkExpr ctx w e))
       | none => do
           let some (_, elemW) := ctx.mems.lookup m.getId
             | throwWidth m (if (ctx.env.lookup m.getId).isSome then .notAMemory m.getId
@@ -662,9 +766,9 @@ private partial def elabStmt (ctx : SymCtx) : TSyntax `circuit_stmt → MacroM (
             | throwWidth addr (.indeterminate "the address of this memory write")
           `(Stmt.store $(quote m.getId) $elemW
               $(← checkExpr ctx aw addr) $(← checkExpr ctx elemW e))
-  | `(circuit_stmt| if $c:circuit_expr { $[$t:circuit_stmt]* } else { $[$f:circuit_stmt]* }) => do
+  | `(circuit_stmt| if $c:circuit_expr { $[$t:circuit_item]* } else { $[$f:circuit_item]* }) => do
       let cond ← checkExpr ctx (← ofNat 1) c
-      `(Stmt.if_ $cond $(← mkStmtList ctx t) $(← mkStmtList ctx f))
+      `(Stmt.if_ $cond $(← mkStmtList ctx (← asStmts t)) $(← mkStmtList ctx (← asStmts f)))
   | stx => Macro.throwErrorAt stx "unsupported circuit statement"
 
 /-- Build a `List Stmt` literal from a block of statements.
@@ -678,9 +782,24 @@ private partial def mkStmtList (ctx : SymCtx) (ss : Array (TSyntax `circuit_stmt
   let nil ← `(([] : List Stmt))
   ss.foldrM (init := nil) fun (s : TSyntax `circuit_stmt) acc => do
     match s with
-    | `(circuit_stmt| for $v:ident < $n:term { $[$body:circuit_stmt]* }) => do
+    | `(circuit_stmt| if $c:circuit_expr { $[$t:circuit_item]* } else { $[$f:circuit_item]* })
+        => match staticCond? c with
+      | none => do `($(← elabStmt ctx s) :: $acc)
+      | some cond => do
+          let ts ← mkStmtList ctx (← asStmts t)
+          let fs ← mkStmtList ctx (← asStmts f)
+          `((if $cond then $ts else $fs) ++ $acc)
+    | `(circuit_stmt| for $v:ident < $n:term { $[$body:circuit_item]* }) => do
         let inner := { ctx with genvars := v.getId :: ctx.genvars }
-        `((List.range $n).flatMap (fun $v => $(← mkStmtList inner body)) ++ $acc)
+        -- The body parses as items so that a loop at module level can generate instances. Here
+        -- there is nowhere to put one: an `always` block is a list of statements.
+        let stmts ← body.mapM fun i =>
+          match i with
+          | `(circuit_item| $st:circuit_stmt) => pure st
+          | _ => Macro.throwErrorAt i
+              "only statements may appear in a `for` inside an `always` block; a declaration or \
+               an instance belongs at module level"
+        `((List.range $n).flatMap (fun $v => $(← mkStmtList inner stmts)) ++ $acc)
     | _ => `($(← elabStmt ctx s) :: $acc)
 
 end
@@ -689,6 +808,44 @@ end
 private def checkClock (ctx : SymCtx) (c : Ident) : MacroM Unit := do
   let w ← widthOfStx ctx.env c
   expectSym c s!"clock '{c.getId}'" (← ofNat 1) w
+
+/-- Build the binding list of an instance. A binding ties one of the submodule's ports to a signal
+in the parent, by name in both directions -- the macro cannot tell an input from an output, since
+the port list is only available later, in `Module.ofItems`. -/
+private def mkBindings (ctx : SymCtx) (bs : Array (TSyntax `circuit_binding)) :
+    MacroM (TSyntax `term) := do
+  let nil ← `(([] : List (Name × BindTarget)))
+  bs.foldrM (init := nil) fun b acc => do
+    let `(circuit_binding| . $port:circuit_ref ( $sig:circuit_ref )) := b
+      | Macro.throwErrorAt b "expected a port binding of the form `.port(signal)`"
+    `(($(← portName ctx port), $(← bindTarget ctx sig)) :: $acc)
+where
+  /-- The port side is always a name: a port is a scalar, and an array port is a family of them. -/
+  portName (ctx : SymCtx) (r : TSyntax `circuit_ref) : MacroM (TSyntax `term) := do
+    match r with
+    | `(circuit_ref| $x:ident) => `($(quote x.getId))
+    | `(circuit_ref| $x:ident [ $i:circuit_expr ]) => do
+        let some idx := staticIdx? ctx i
+          | do rejectComputedIndex ctx i
+               throwWidth i (.indeterminate "a port index, which names a port rather than \
+                 selecting one at run time")
+        `(indexedName $(quote x.getId) $idx)
+    | _ => Macro.throwErrorAt r "expected a port name"
+  /-- The signal side may be an element of an array declared in this module, which is the only
+  thing here that is not a name. -/
+  bindTarget (ctx : SymCtx) (r : TSyntax `circuit_ref) : MacroM (TSyntax `term) := do
+    match r with
+    | `(circuit_ref| $x:ident) => `(BindTarget.sig $(quote x.getId))
+    | `(circuit_ref| $x:ident [ $i:circuit_expr ]) => do
+        let some idx := staticIdx? ctx i
+          | do rejectComputedIndex ctx i
+               throwWidth i (.indeterminate "a binding index, which is fixed before the design \
+                 runs -- a port cannot be tied to a different element each cycle")
+        match ctx.arrays.lookup x.getId with
+        | some (_, elemW) => `(BindTarget.elem $(quote x.getId) $elemW $idx)
+        -- Not an array: an indexed *family*, which is a plain name again.
+        | none => `(BindTarget.sig (indexedName $(quote x.getId) $idx))
+    | _ => Macro.throwErrorAt r "expected a signal name"
 
 /-- Lower a module body item. -/
 private def elabItem (ctx : SymCtx) : TSyntax `circuit_item → MacroM (TSyntax `term)
@@ -701,14 +858,16 @@ private def elabItem (ctx : SymCtx) : TSyntax `circuit_item → MacroM (TSyntax 
       `(Item.array $(quote x.getId) $n $w)
   | `(circuit_item| ( $sub:term ) $iname:ident ( $[$bs:circuit_binding],* ) ;)
   | `(circuit_item| $sub:ident $iname:ident ( $[$bs:circuit_binding],* ) ;) => do
-      let nil ← `(([] : List (Name × Name)))
-      let bindings ← bs.foldrM (init := nil) fun b acc => do
-        let `(circuit_binding| . $port:ident ( $sig:ident )) := b
-          | Macro.throwErrorAt b "expected a port binding of the form `.port(signal)`"
-        `(($(quote port.getId), $(quote sig.getId)) :: $acc)
       -- `$sub` is spliced as the user wrote it, so it resolves at the use site. The macro has no
       -- way to inspect it: the port list is only available later, in `Module.ofItems`.
-      `(Item.inst $(quote iname.getId) $sub $bindings)
+      `(Item.inst $(quote iname.getId) $sub $(← mkBindings ctx bs))
+  | `(circuit_item| ( $sub:term ) $iname:ident [ $idx:circuit_expr ] ( $[$bs:circuit_binding],* ) ;)
+  | `(circuit_item| $sub:ident $iname:ident [ $idx:circuit_expr ] ( $[$bs:circuit_binding],* ) ;) => do
+      let some i := staticIdx? ctx idx
+        | do rejectComputedIndex ctx idx
+             throwWidth idx (.indeterminate "an instance index, which names the instance rather \
+               than selecting anything at run time")
+      `(Item.inst (indexedName $(quote iname.getId) $i) $sub $(← mkBindings ctx bs))
   | `(circuit_item| always @(posedge $c:ident ) { $[$ss:circuit_stmt]* }) => do
       checkClock ctx c
       `(Item.always (Event.posedge $(quote c.getId)) $(← mkStmtList ctx ss))
@@ -719,10 +878,17 @@ private def elabItem (ctx : SymCtx) : TSyntax `circuit_item → MacroM (TSyntax 
       `(Item.stmt $(← elabStmt ctx s))
   | stx => Macro.throwErrorAt stx "unsupported circuit item"
 
-/-- Build a `List (Name × Nat)` literal from a parsed port list. -/
-private def mkPortList (ps : Array (Ident × SymWidth)) : MacroM (TSyntax `term) := do
+/-- Build a `List (Name × Nat)` literal from a parsed port list.
+
+An array port contributes `(List.range n).map ..` rather than `n` entries, which is what lets its
+size be a parameter: the macro never has to know how many there are. -/
+private def mkPortList (ps : Array PortDecl) : MacroM (TSyntax `term) := do
   let nil ← `(([] : List (Name × Nat)))
-  ps.foldrM (init := nil) fun (x, w) acc => `(($(quote x.getId), $w) :: $acc)
+  ps.foldrM (init := nil) fun p acc =>
+    match p.count with
+    | none => `(($(quote p.name.getId), $(p.width)) :: $acc)
+    | some n =>
+        `((List.range $n).map (fun k => (indexedName $(quote p.name.getId) k, $(p.width))) ++ $acc)
 
 /-- Build a `List Item` literal from a parsed module body.
 
@@ -740,10 +906,31 @@ private partial def mkItemList (ctx : SymCtx) : List (TSyntax `circuit_item) →
       -- `syntax circuit_stmt : circuit_item`. There is deliberately no second rule for items: two
       -- rules that parse the same text leave an ambiguity node that neither pattern then matches,
       -- which is what the first attempt here did.
-      | `(circuit_item| for $v:ident < $n:term { $[$body:circuit_stmt]* }) => do
+      | `(circuit_item| if $c:circuit_expr { $[$t:circuit_item]* } else { $[$f:circuit_item]* })
+          => match staticCond? c with
+        | none => do `($(← elabItem ctx i) :: $(← mkItemList ctx rest))
+        | some cond => do
+            let ts ← mkItemList ctx t.toList
+            let fs ← mkItemList ctx f.toList
+            let more ← mkItemList ctx rest
+            `((if $cond then $ts else $fs) ++ $more)
+      | `(circuit_item| for $v:ident < $n:term { $[$body:circuit_item]* }) => do
           let inner := { ctx with genvars := v.getId :: ctx.genvars }
-          `((List.range $n).flatMap
-              (fun $v => ($(← mkStmtList inner body)).map Item.stmt) ++ $(← mkItemList ctx rest))
+          -- A signal declared inside a loop would be declared once per iteration under one name,
+          -- and the macro builds its environment before it knows how many iterations there are.
+          -- Declare an array outside and index it; `let` is fine, since it binds a Lean value.
+          for i in body do
+            match i with
+            | `(circuit_item| reg $x:ident : $_ ;) | `(circuit_item| wire $x:ident : $_ ;)
+            | `(circuit_item| reg $x:ident [ $_ ] : $_ ;)
+            | `(circuit_item| wire $x:ident [ $_ ] : $_ ;)
+            | `(circuit_item| memory $x:ident [ $_ ] : $_ ;) =>
+                Macro.throwErrorAt i
+                  s!"'{x.getId}' is declared inside a `for`, which would declare it once per \
+                     iteration under one name; declare an array outside the loop and index it"
+            | _ => pure ()
+          `((List.range $n).flatMap (fun $v => $(← mkItemList inner body.toList))
+              ++ $(← mkItemList ctx rest))
       | _ => `($(← elabItem ctx i) :: $(← mkItemList ctx rest))
 
 /-- The `reg` and `wire` declarations in a module body, which join the ports in the environment. -/
@@ -791,7 +978,11 @@ private def binderNames (bs : Array (TSyntax ``Lean.Parser.Term.bracketedBinder)
 
 macro_rules
   | `([circuit_expr ( $[$ps:circuit_port],* ) | $e:circuit_expr : $expected:term ]) => do
-      let env ← envOfDecls ((← ps.mapM parsePort).flatMap (·.here))
+      -- Only scalar ports: this entry point exists to unit-test expressions, and an array port
+      -- means nothing without a module to declare it in.
+      let decls := (← ps.mapM parsePort).flatMap (·.here)
+      let env ← envOfDecls (decls.filterMap fun p =>
+        if p.count.isNone then some (p.name, p.width) else none)
       checkExpr { env := env } expected e
 
 /-- Lower a whole module to the `Module.ofItems` term that builds it.
@@ -808,14 +999,20 @@ private def buildModule (name : Ident) (ins outs : Array (TSyntax `circuit_port)
   let insP := insF.flatMap (·.here) ++ outsF.flatMap (·.there)
   let outsP := outsF.flatMap (·.here) ++ insF.flatMap (·.there)
   let regsP ← regDecls items
-  let env ← envOfDecls (insP ++ outsP ++ regsP)
+  let ports := insP ++ outsP
+  -- An array port is one entry in the environment -- its base name, with its count -- rather than
+  -- `n` of them, which is what lets its size be a parameter the macro never evaluates.
+  let scalarPorts := ports.filterMap fun p => if p.count.isNone then some (p.name, p.width) else none
+  let env ← envOfDecls (scalarPorts ++ regsP)
   let memsP ← memDecls items
   let arraysP ← arrayDecls items
   let ctx : SymCtx :=
     { env := env
-      inputs := (insP.map (·.1.getId)).toList
+      inputs := (insP.map (·.name.getId)).toList
       mems := (memsP.map (fun (x, d, w) => (x.getId, d, w))).toList
       arrays := (arraysP.map (fun (x, n, w) => (x.getId, n, w))).toList
+      families := (ports.filterMap fun p =>
+        p.count.map fun n => (p.name.getId, n, p.width)).toList
       genvars := params.toList }
   `(Module.ofItems $(quote name.getId)
       $(← mkPortList insP) $(← mkPortList outsP) $(← mkItemList ctx items.toList))

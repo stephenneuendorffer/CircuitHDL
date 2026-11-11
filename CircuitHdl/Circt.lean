@@ -156,11 +156,9 @@ def Scope.set (σ : Scope) (x : Signal) (v : Val) : Scope :=
   else σ ++ [(x, v)]
 
 /-- The name a lowered array element carries, as a `seq.firreg` `name` attribute and therefore as
-the key the test harness reads it back by.
-
-`Name.num`, so `a[3]` prints as `a.3` and `portIdent` makes it `a_3`. It cannot collide with a
-signal the surface syntax can declare, which spells every name it builds with `Name.str`. -/
-def arrayRegName (a : Name) (i : Nat) : Name := Name.num a i
+the key the test harness reads it back by. `CircuitHdl.indexedName` is the one spelling, shared
+with the loop so that the two cannot drift. -/
+abbrev arrayRegName : Name → Nat → Name := indexedName
 
 /-! ### The emitter
 

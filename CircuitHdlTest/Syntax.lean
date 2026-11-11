@@ -465,6 +465,87 @@ module! writtenOut #[] (clk : 1, d : 8) -> (o : 8) {
 statement, as writing the four assignments out. -/
 example : { loopForm with name := `same } = { writtenOut with name := `same } := rfl
 
+/-! A loop carries whole *items*, which is what lets it generate instances. Two iterations sharing
+an instance name would collide on every local the submodule has, so the name is indexed too. -/
+
+/-- A one-port submodule, so the loop tests below are about the loop rather than about bindings. -/
+module! notGate #[] (a : 1) -> (y : 1) {
+  assign y = ~a;
+}
+
+module! loopInsts #[] (p : 1, q : 1) -> (z : 1) {
+  for k < 3 { and2 u[k] (.a(p), .b(q), .y(z)); }
+}
+
+module! writtenInsts #[] (p : 1, q : 1) -> (z : 1) {
+  and2 u[0] (.a(p), .b(q), .y(z));
+  and2 u[1] (.a(p), .b(q), .y(z));
+  and2 u[2] (.a(p), .b(q), .y(z));
+}
+
+/-- **Generating instances is the same as writing them out**, down to the instance names. -/
+example : { loopInsts with name := `same } = { writtenInsts with name := `same } := rfl
+
+-- An indexed name is a `Name.num`, which is also why it cannot collide with anything written
+-- here: `` `u.0 `` is not name-literal syntax at all.
+#guard loopInsts.insts.map (·.name) = (List.range 3).map (indexedName `u)
+#guard (Module.check loopInsts).isOk
+
+/-! A binding may name an **element** of an array, which is not a name at all -- a cell and an
+index -- so flattening maps it through `BindTarget` rather than by renaming. Without it a loop of
+instances could only ever tie every iteration to the same signal. -/
+
+module! invBank #[] (x : 4) -> (o : 4) {
+  wire src[4] : 1;
+  wire dst[4] : 1;
+  for k < 4 {
+    assign src[k] = x[k];
+    notGate u[k] (.a(src[k]), .y(dst[k]));
+  }
+  assign o = {dst[3], dst[2], dst[1], dst[0]};
+}
+
+#guard (Module.check invBank).isOk
+#guard invBank.arrays = [(`src, 4, 1), (`dst, 4, 1)]
+-- Each instance inverts its own bit, which is only true if each got its own pair of elements.
+#guard (invBank.settle (invBank.initState.apply
+  [(`x, Cell.sig (Value.ofNat 4 0b1010))])).toOption.bind (State.valueOf? · `o) = some 0b0101
+#guard (invBank.settle (invBank.initState.apply
+  [(`x, Cell.sig (Value.ofNat 4 0))])).toOption.bind (State.valueOf? · `o) = some 0b1111
+
+/-- An element binding is checked against the array's declaration, exactly as a whole signal is
+checked against its own. -/
+module! bindWrongWidth #[] (o : 1) -> (p : 1) {
+  wire src[4] : 2;
+  notGate u (.a(src[0]), .y(p));
+}
+
+/-- info: Except.error (CircuitHdl.CheckError.widthMismatch "port 'a' of instance 'u'" 1 2) -/
+#guard_msgs in #eval Module.check bindWrongWidth
+
+/-- And the element has to exist. The index is fixed before the design runs, so this is the
+checker's business rather than the evaluator's. -/
+module! bindOutOfRange #[] (o : 1) -> (p : 1) {
+  wire src[2] : 1;
+  notGate u (.a(src[#(5)]), .y(p));
+}
+
+/-- info: Except.error (CircuitHdl.CheckError.elemRange `src 5 2) -/
+#guard_msgs in #eval Module.check bindOutOfRange
+
+/-- A bit select takes the same elaboration-time index an element does, so a vector can be picked
+apart in a loop rather than one line per bit. -/
+module! bitLoop #[] (x : 4) -> (o : 1) {
+  wire b[4] : 1;
+  for k < 4 { assign b[k] = x[k]; }
+  assign o = b[0] | b[1] | b[2] | b[3];
+}
+
+#guard (bitLoop.settle (bitLoop.initState.apply
+  [(`x, Cell.sig (Value.ofNat 4 4))])).toOption.bind (State.valueOf? · `o) = some 1
+#guard (bitLoop.settle (bitLoop.initState.apply
+  [(`x, Cell.sig (Value.ofNat 4 0))])).toOption.bind (State.valueOf? · `o) = some 0
+
 /-- A loop binder in *value* position is a literal at whatever width the context wants, which
 is what lets a design compare a signal against the element it is looking at. -/
 module! onehot #[(n : Nat)] (sel : 3) -> (hit : 1) {
@@ -504,6 +585,70 @@ module! bundled #[(dw : Nat)] (slave s : handshake dw) -> (master m : handshake 
 
 -- The widths follow the interface's argument.
 #guard (bundled 32).inputs = [(`s.valid, 1), (`s.data, 32), (`m.ready, 1)]
+
+/-! ### Array ports
+
+`slave i[n] : handshake dw` is `n` ports, not an array: `Module.inputs` is a list of scalars, and
+a port is one wire per element in any hardware. So it declares `i.valid.0 …` and selects one with
+`i.valid[k]` — which needs no new expression syntax, because a field is already named with a dot
+and Lean lexes `i.valid` as one identifier.
+-/
+
+module! xbar #[(n dw : Nat)] (slave i[n] : handshake dw) -> (master o[n] : handshake dw) {
+  for k < n {
+    assign o.valid[k] = i.valid[k];
+    assign o.data[k] = i.data[k];
+    assign i.ready[k] = o.ready[k];
+  }
+}
+
+#guard (Module.check (xbar 3 8)).isOk
+-- The `rev` field still faces the other way, one element at a time. Spelled with `indexedName`
+-- because `` `i.valid.0 `` is not name-literal syntax: an indexed name is a `Name.num`, which is
+-- also why it cannot collide with anything a design declares.
+#guard (xbar 2 8).inputs
+  = (List.range 2).map (fun k => (indexedName `i.valid k, 1))
+    ++ (List.range 2).map (fun k => (indexedName `i.data k, 8))
+    ++ (List.range 2).map (fun k => (indexedName `o.ready k, 1))
+#guard (xbar 2 8).outputs
+  = (List.range 2).map (fun k => (indexedName `o.valid k, 1))
+    ++ (List.range 2).map (fun k => (indexedName `o.data k, 8))
+    ++ (List.range 2).map (fun k => (indexedName `i.ready k, 1))
+
+/-- A plain array port, and the count may be a parameter: the macro never evaluates it. -/
+module! bus #[(n : Nat)] (d[n] : 8) -> (sum : 8) {
+  assign sum = d[0] + d[1];
+}
+
+#guard (bus 3).inputs = (List.range 3).map (fun k => (indexedName `d k, 8))
+#guard ((bus 3).settle ((bus 3).initState.apply
+  [(indexedName `d 0, Cell.sig (Value.ofNat 8 5)),
+   (indexedName `d 1, Cell.sig (Value.ofNat 8 7))])).toOption.bind
+  (State.valueOf? · `sum) = some 12
+
+/-! ### The static conditional
+
+`if c { .. }` on a signal is a mux. `if #(cond) { .. }` on a `Bool` is elaboration time: one arm
+is built and **the other does not exist**, which is what lets a generated design treat its edges
+differently from its middle.
+-/
+
+module! staticChain #[(n : Nat)] (x : 1) -> (o : 1) {
+  wire s[n] : 1;
+  for k < n {
+    if #(k == 0) { assign s[k] = x; } else { notGate u[k] (.a(s[#(k - 1)]), .y(s[k])); }
+  }
+  assign o = s[#(n - 1)];
+}
+
+#guard (Module.check (staticChain 4)).isOk
+-- Three instances, not four: the `k == 0` arm built an assignment and no instance at all.
+#guard (staticChain 4).insts.map (·.name) = [indexedName `u 1, indexedName `u 2, indexedName `u 3]
+-- Three inversions of 1.
+#guard ((staticChain 4).settle ((staticChain 4).initState.apply
+  [(`x, Cell.sig (Value.ofNat 1 1))])).toOption.bind (State.valueOf? · `o) = some 0
+#guard ((staticChain 3).settle ((staticChain 3).initState.apply
+  [(`x, Cell.sig (Value.ofNat 1 1))])).toOption.bind (State.valueOf? · `o) = some 1
 
 module! flattened #[(dw : Nat)] (s.valid : 1, s.data : dw, m.ready : 1)
                 -> (m.valid : 1, m.data : dw, s.ready : 1) {
