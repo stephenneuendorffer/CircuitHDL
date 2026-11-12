@@ -60,12 +60,12 @@ private def meshNodes : List (Nat × Nat) :=
 
 -- Injection and ejection are *array ports*, one element per node, so a port of node `(x, y)` is
 -- the `nodeIdx x y`-th element of the field's family rather than a name built from the digits.
-private def injValid (x y : Nat) : Name := indexedName `inj.valid (nodeIdx x y)
-private def injData (x y : Nat) : Name := indexedName `inj.data (nodeIdx x y)
-private def injReady (x y : Nat) : Name := indexedName `inj.ready (nodeIdx x y)
-private def ejValid (x y : Nat) : Name := indexedName `ej.valid (nodeIdx x y)
-private def ejData (x y : Nat) : Name := indexedName `ej.data (nodeIdx x y)
-private def ejReady (x y : Nat) : Name := indexedName `ej.ready (nodeIdx x y)
+private def injValid (x y : Nat) : Name := indexedName `inj (nodeIdx x y) ++ `valid
+private def injData (x y : Nat) : Name := indexedName `inj (nodeIdx x y) ++ `data
+private def injReady (x y : Nat) : Name := indexedName `inj (nodeIdx x y) ++ `ready
+private def ejValid (x y : Nat) : Name := indexedName `ej (nodeIdx x y) ++ `valid
+private def ejData (x y : Nat) : Name := indexedName `ej (nodeIdx x y) ++ `data
+private def ejReady (x y : Nat) : Name := indexedName `ej (nodeIdx x y) ++ `ready
 
 /-! ### The driver
 

@@ -375,7 +375,7 @@ and index it, which is what the loop is for.
 A loop carries whole **items**, so it generates instances as well as statements:
 
 ```
-slave i[5] : axis fw                      -- an array port: i.valid[k] is one of five ports
+slave i[5] : axis fw                      -- an array port: i[k].valid is one of five ports
 for k < 5 {
   meshRouteUnit r[k] (.dstX(dx[k]), .dir(rq[k]));
 }
@@ -459,7 +459,7 @@ other, so binding it renames the sensitivity list too.
 A port may be bound to a **name**, an **array element**, or an **expression**:
 
 ```
-meshRouteUnit r[k] (.myX(myX), .dstX(i.data[k][1:0]), .dir(rq[k]));
+meshRouteUnit r[k] (.myX(myX), .dstX(i[k].data[1:0]), .dir(rq[k]));
 ```
 
 A name or an element binds *to that place*, which is what an output needs. An expression is not a

@@ -141,12 +141,17 @@ syntax "master" ident ":" circuit_iface : circuit_port
 /-- An **array port**, `d[4] : 8` or `slave i[5] : axis fw`.
 
 `n` ports, not an array: `Module.inputs` is a list of scalars and a port is one wire per element
-in any hardware, so this declares the separate ports `i.valid.0 … i.valid.4` and selects one with
-`i.valid[k]`. That spelling needs no new expression syntax -- `qualify` already names a field with
-a dot, and Lean lexes `i.valid` as a single identifier.
+in any hardware, so this declares the separate ports `i.0.valid … i.4.valid` and selects one with
+`i[k].valid`.
+
+**The index sits between the port and the field**, because an array of interface ports is an array
+of *bundles*: `i[k]` is one slave and `.valid` is its field. The alternative spelling `i.valid[k]`
+reads as indexing a field, and it is not available on the binding side at all -- `.i[k].valid(..)`
+has to name a port of the submodule, where `.i.valid[k](..)` would have to mean the same thing
+while looking like an index into one. A plain array port has no field and is just `d[k]`.
 
 Being scalars, they are indexed only at elaboration time. There is no cell to select from, so
-`i.valid[addr]` is an error rather than a mux. -/
+`i[addr].valid` is an error rather than a mux. -/
 syntax ident "[" term "]" ":" term : circuit_port
 syntax "slave" ident "[" term "]" ":" circuit_iface : circuit_port
 syntax "master" ident "[" term "]" ":" circuit_iface : circuit_port
@@ -178,6 +183,12 @@ syntax:max "(" circuit_expr ":" term ")" : circuit_expr
 syntax:max "{" circuit_expr,+ "}" : circuit_expr
 syntax:max circuit_expr:max "[" term ":" term "]" : circuit_expr
 syntax:max circuit_expr:max "[" circuit_expr "]" : circuit_expr
+/-- A field of one element of an array port: `i[k].valid`.
+
+An array of interface ports is an array of **bundles**, so the index sits between the port and the
+field, and element `k` carries `i.k.valid`. A plain interface port stays a single identifier --
+Lean lexes `s.valid` as one token -- so the two spellings cannot be confused. -/
+syntax:max circuit_expr:max "." ident : circuit_expr
 syntax:75 "~" circuit_expr:75 : circuit_expr
 syntax:75 "!" circuit_expr:75 : circuit_expr
 syntax:65 circuit_expr:65 " + " circuit_expr:66 : circuit_expr
@@ -202,6 +213,8 @@ syntax:20 circuit_expr:21 " ? " circuit_expr " : " circuit_expr:20 : circuit_exp
 
 syntax "assign" ident "=" circuit_expr ";" : circuit_stmt
 syntax "assign" ident "[" circuit_expr "]" "=" circuit_expr ";" : circuit_stmt
+/-- Assigning a field of one element of an array port, `assign o[k].valid = ..;`. -/
+syntax "assign" ident "[" circuit_expr "]" "." ident "=" circuit_expr ";" : circuit_stmt
 syntax "assign" ident ":" term:51 "=" circuit_expr ";" : circuit_stmt
 /-- A conditional. `if c { .. } else { .. }` on a signal is hardware -- a mux per assigned signal.
 `if #(cond) { .. } else { .. }` on a Lean `Bool` is **elaboration time**: one arm is built and the
@@ -249,15 +262,17 @@ As with the scalar forms, `reg` and `wire` build the same declaration and which 
 turns out to be is read off how it is driven. -/
 syntax "reg" ident "[" term "]" ":" term ";" : circuit_item
 syntax "wire" ident "[" term "]" ":" term ";" : circuit_item
-/-- One side of a port binding: a name, or an indexed one.
+/-- The *port* side of a binding: a name, an element of an array port, or one field of one element
+of an array of bundles -- `.b`, `.o[4]`, `.i[k].valid`.
 
-Both sides take the same form. On the port side an index names a port of an *array port*, which
-is a family of scalars, so it is still just a name. On the signal side it may also be an element
-of an array in the parent, which is not a name at all -- see `BindTarget`. -/
+A category of its own rather than `circuit_expr`, which would otherwise cover all three: there
+`.b(x)` parses as the **call** `b(x)` and swallows the parentheses the binding needs. A port name
+is not an expression anyway -- it names a place in the submodule, which nothing else does. -/
 syntax ident : circuit_ref
 syntax ident "[" circuit_expr "]" : circuit_ref
+syntax ident "[" circuit_expr "]" "." ident : circuit_ref
 
-/-- A port binding: `.b(x)`, `.i.valid[k](lvalid[srcIdx(x, y, k)])`, or `.dstX(i.data[k][1:0])`.
+/-- A port binding: `.b(x)`, `.i[k].valid(lvalid[srcIdx(x, y, k)])`, or `.dstX(idata[k][1:0])`.
 
 The signal side is a whole expression. A name or an array element binds *to that place*, which is
 what an output port needs; anything else drives a wire of the port's own, which only an input can
@@ -369,8 +384,13 @@ specially. A plain wire has one field and nothing on the far side. -/
 structure PortDecl where
   name : Ident
   width : SymWidth
-  /-- `some n` for an array port: `n` separate scalar ports, `name.0 … name.{n-1}`. -/
+  /-- `some n` for an array port. The ports are then an **array of bundles**: element `k` of
+  `slave i[5] : axis fw` carries `i.3.valid`, not `i.valid.3`, which is what `i[k].valid` says
+  and what an array of interface ports is. `name` is the whole field name (`i.valid`); `field`
+  splits it so the index can go between the two. -/
   count : Option SymWidth := none
+  /-- The field, for a bundle: `i.valid` is `base := i`, `field := some valid`. -/
+  field : Option Ident := none
 
 structure PortFields where
   here : Array PortDecl := #[]
@@ -423,9 +443,9 @@ private def parsePort (p : TSyntax `circuit_port) : MacroM PortFields := do
 where
   iface (fs : Array (Bool × Ident × SymWidth)) (count : Option SymWidth) (x : Ident) : PortFields :=
     { here := fs.filterMap fun (isFwd, f, w) =>
-        if isFwd then some { name := qualify x f, width := w, count } else none
+        if isFwd then some { name := qualify x f, width := w, count, field := some f } else none
       there := fs.filterMap fun (isFwd, f, w) =>
-        if isFwd then none else some { name := qualify x f, width := w, count } }
+        if isFwd then none else some { name := qualify x f, width := w, count, field := some f } }
 
 /-- Add a declaration to an environment, rejecting a disagreeing redeclaration. -/
 private def addDeclStx (env : List (Name × SymWidth)) (x : Ident) (w : SymWidth) :
@@ -572,6 +592,8 @@ private partial def widthOf? (ctx : SymCtx) (stx : TSyntax `circuit_expr) :
   | `(circuit_expr| $_:circuit_expr || $_:circuit_expr)
   | `(circuit_expr| !$_:circuit_expr) => return some (← ofNat 1)
   | `(circuit_expr| $_:circuit_expr [ $hi:term : $lo:term ]) => return some (← `($hi - $lo + 1))
+  | `(circuit_expr| $x:ident [ $_:circuit_expr ] . $f:ident) =>
+      return (ctx.families.lookup (x.getId ++ f.getId)).map fun (_, w) => w
   | `(circuit_expr| $e:circuit_expr [ $_:circuit_expr ]) =>
       match arrayName? ctx e, familyName? ctx e, memoryName? ctx e with
       | some (_, w), _, _ | _, some (_, w), _ | _, _, some (_, w) => return some w
@@ -711,6 +733,16 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
       `(Expr.slice $(← checkExpr ctx we e) $hi $lo)
   -- `e[i]` is a memory read when `e` names a declared memory and a bit select otherwise, which is
   -- how Verilog disambiguates the same spelling.
+  -- `i[k].valid` is one of the scalar ports an array port declares: an array of bundles, so the
+  -- index sits between the port and the field.
+  | `(circuit_expr| $x:ident [ $i:circuit_expr ] . $f:ident) => do
+      let some (_, w) := ctx.families.lookup (x.getId ++ f.getId)
+        | throwWidth stx (.unbound (x.getId ++ f.getId))
+      expectSym stx s!"port '{x.getId}[..].{f.getId}'" expected w
+      let some idx ← asStaticTerm? ctx i
+        | throwWidth i (.indeterminate "an index into an array port, which names one of several \
+             separate ports rather than selecting one at run time")
+      `(Expr.var (indexedName $(quote x.getId) $idx ++ $(quote f.getId)))
   | `(circuit_expr| $e:circuit_expr [ $i:circuit_expr ]) => do
       match arrayName? ctx e with
       | some (a, elemW) => do
@@ -815,6 +847,16 @@ private partial def elabStmt (ctx : SymCtx) : TSyntax `circuit_stmt → MacroM (
       let declared ← assignTargetWidth ctx x
       expectSym w s!"ascription on '{x.getId}'" declared w
       `(Stmt.assign $(quote x.getId) $(← checkExpr ctx declared e))
+  -- One of the scalar ports an array port declares, so this is an ordinary assignment under the
+  -- name that port carries.
+  | `(circuit_stmt| assign $x:ident [ $i:circuit_expr ] . $f:ident = $e:circuit_expr ;) => do
+      let key := x.getId ++ f.getId
+      let some (_, w) := ctx.families.lookup key | throwWidth x (.unbound key)
+      if ctx.inputs.contains key then throwWidth x (.assignToInput key)
+      let some idx ← asStaticTerm? ctx i
+        | throwWidth i (.indeterminate "an index into an array port")
+      `(Stmt.assign (indexedName $(quote x.getId) $idx ++ $(quote f.getId))
+          $(← checkExpr ctx w e))
   -- `a[i] = e` is an array write or a memory write, and only the declarations say which -- the
   -- same dispatch `a[i]` gets when it is read.
   | `(circuit_stmt| assign $m:ident [ $addr:circuit_expr ] = $e:circuit_expr ;) => do
@@ -896,16 +938,24 @@ private def mkBindings (ctx : SymCtx) (bs : Array (TSyntax `circuit_binding)) :
       | Macro.throwErrorAt b "expected a port binding of the form `.port(signal)`"
     `(($(← portName ctx port), $(← bindTarget ctx sig)) :: $acc)
 where
-  /-- The port side is always a name: a port is a scalar, and an array port is a family of them. -/
+  /-- The port side is always a name: a port is a scalar, and an array port is a family of them.
+
+  It is parsed as a `circuit_expr` rather than a category of its own because `e[i]` and `e.f`
+  already compose there without ambiguity. Two dedicated rules, one a prefix of the other, left a
+  choice node that neither pattern matched -- and `mkBindings` folds from the right, so the error
+  landed on the *last* binding of the instance and looked like a problem with that one. -/
   portName (ctx : SymCtx) (r : TSyntax `circuit_ref) : MacroM (TSyntax `term) := do
     match r with
     | `(circuit_ref| $x:ident) => `($(quote x.getId))
-    | `(circuit_ref| $x:ident [ $i:circuit_expr ]) => do
-        let some idx ← asStaticTerm? ctx i
-            | throwWidth i (.indeterminate "a port index, which names a port rather than \
-                 selecting one at run time")
-        `(indexedName $(quote x.getId) $idx)
+    | `(circuit_ref| $x:ident [ $i:circuit_expr ] . $f:ident) => do
+        `($(← portIndex ctx x i) ++ $(quote f.getId))
+    | `(circuit_ref| $x:ident [ $i:circuit_expr ]) => portIndex ctx x i
     | _ => Macro.throwErrorAt r "expected a port name"
+  portIndex (ctx : SymCtx) (x : Ident) (i : TSyntax `circuit_expr) : MacroM (TSyntax `term) := do
+    let some idx ← asStaticTerm? ctx i
+      | throwWidth i (.indeterminate "a port index, which names a port rather than selecting \
+             one at run time")
+    `(indexedName $(quote x.getId) $idx)
   /-- Where the port is tied. A bare name or an array element is a *place*, and is bound as one;
   anything else is an expression, which `Module.ofItems` turns into a wire of the port's own. -/
   bindTarget (ctx : SymCtx) (r : TSyntax `circuit_expr) : MacroM (TSyntax `term) := do
@@ -926,6 +976,12 @@ where
             | none => throwWidth i (.indeterminate "an index into an array port, which names one \
                    of several ports rather than selecting one at run time")
         | none, none => exprTarget ctx r
+    -- A field of an array-port element is a scalar port, so it binds to that place.
+    | `(circuit_expr| $x:ident [ $i:circuit_expr ] . $f:ident) =>
+        match ctx.families.lookup (x.getId ++ f.getId), ← asStaticTerm? ctx i with
+        | some _, some idx =>
+            `(BindTarget.sig (indexedName $(quote x.getId) $idx ++ $(quote f.getId)))
+        | _, _ => exprTarget ctx r
     | _ => exprTarget ctx r
   /-- An expression binding. Its width comes from the expression, because the macro cannot see the
   port's; `InstInfo.check` compares the two once the port list is in hand. -/
@@ -972,9 +1028,15 @@ size be a parameter: the macro never has to know how many there are. -/
 private def mkPortList (ps : Array PortDecl) : MacroM (TSyntax `term) := do
   let nil ← `(([] : List (Name × Nat)))
   ps.foldrM (init := nil) fun p acc =>
-    match p.count with
-    | none => `(($(quote p.name.getId), $(p.width)) :: $acc)
-    | some n =>
+    match p.count, p.field with
+    | none, _ => `(($(quote p.name.getId), $(p.width)) :: $acc)
+    -- An array of *bundles*: the index sits between the port and its field, so element `k`'s
+    -- `valid` is `i.k.valid`.
+    | some n, some f =>
+        `((List.range $n).map
+            (fun k => (indexedName $(quote (p.name.getId.getPrefix)) k ++ $(quote f.getId),
+                       $(p.width))) ++ $acc)
+    | some n, none =>
         `((List.range $n).map (fun k => (indexedName $(quote p.name.getId) k, $(p.width))) ++ $acc)
 
 /-- Build a `List Item` literal from a parsed module body.

@@ -118,27 +118,27 @@ module! mesh4x4 #[(fw : Nat)]
         .myX(mx[nodeIdx(x, y)]), .myY(my[nodeIdx(x, y)]),
         -- The four sides: each input reads the neighbour's opposite output, each output drives
         -- this node's own link.
-        .i.valid[0](lvalid[srcIdx(x, y, 0)]), .i.ready[0](lready[srcIdx(x, y, 0)]),
-        .i.data[0](ldata[srcIdx(x, y, 0)]),
-        .i.valid[1](lvalid[srcIdx(x, y, 1)]), .i.ready[1](lready[srcIdx(x, y, 1)]),
-        .i.data[1](ldata[srcIdx(x, y, 1)]),
-        .i.valid[2](lvalid[srcIdx(x, y, 2)]), .i.ready[2](lready[srcIdx(x, y, 2)]),
-        .i.data[2](ldata[srcIdx(x, y, 2)]),
-        .i.valid[3](lvalid[srcIdx(x, y, 3)]), .i.ready[3](lready[srcIdx(x, y, 3)]),
-        .i.data[3](ldata[srcIdx(x, y, 3)]),
-        .o.valid[0](lvalid[lnkIdx(x, y, 0)]), .o.ready[0](lready[lnkIdx(x, y, 0)]),
-        .o.data[0](ldata[lnkIdx(x, y, 0)]),
-        .o.valid[1](lvalid[lnkIdx(x, y, 1)]), .o.ready[1](lready[lnkIdx(x, y, 1)]),
-        .o.data[1](ldata[lnkIdx(x, y, 1)]),
-        .o.valid[2](lvalid[lnkIdx(x, y, 2)]), .o.ready[2](lready[lnkIdx(x, y, 2)]),
-        .o.data[2](ldata[lnkIdx(x, y, 2)]),
-        .o.valid[3](lvalid[lnkIdx(x, y, 3)]), .o.ready[3](lready[lnkIdx(x, y, 3)]),
-        .o.data[3](ldata[lnkIdx(x, y, 3)]),
+        .i[0].valid(lvalid[srcIdx(x, y, 0)]), .i[0].ready(lready[srcIdx(x, y, 0)]),
+        .i[0].data(ldata[srcIdx(x, y, 0)]),
+        .i[1].valid(lvalid[srcIdx(x, y, 1)]), .i[1].ready(lready[srcIdx(x, y, 1)]),
+        .i[1].data(ldata[srcIdx(x, y, 1)]),
+        .i[2].valid(lvalid[srcIdx(x, y, 2)]), .i[2].ready(lready[srcIdx(x, y, 2)]),
+        .i[2].data(ldata[srcIdx(x, y, 2)]),
+        .i[3].valid(lvalid[srcIdx(x, y, 3)]), .i[3].ready(lready[srcIdx(x, y, 3)]),
+        .i[3].data(ldata[srcIdx(x, y, 3)]),
+        .o[0].valid(lvalid[lnkIdx(x, y, 0)]), .o[0].ready(lready[lnkIdx(x, y, 0)]),
+        .o[0].data(ldata[lnkIdx(x, y, 0)]),
+        .o[1].valid(lvalid[lnkIdx(x, y, 1)]), .o[1].ready(lready[lnkIdx(x, y, 1)]),
+        .o[1].data(ldata[lnkIdx(x, y, 1)]),
+        .o[2].valid(lvalid[lnkIdx(x, y, 2)]), .o[2].ready(lready[lnkIdx(x, y, 2)]),
+        .o[2].data(ldata[lnkIdx(x, y, 2)]),
+        .o[3].valid(lvalid[lnkIdx(x, y, 3)]), .o[3].ready(lready[lnkIdx(x, y, 3)]),
+        .o[3].data(ldata[lnkIdx(x, y, 3)]),
         -- Local injection and ejection.
-        .i.valid[4](inj.valid[nodeIdx(x, y)]), .i.ready[4](inj.ready[nodeIdx(x, y)]),
-        .i.data[4](inj.data[nodeIdx(x, y)]),
-        .o.valid[4](ej.valid[nodeIdx(x, y)]), .o.ready[4](ej.ready[nodeIdx(x, y)]),
-        .o.data[4](ej.data[nodeIdx(x, y)]));
+        .i[4].valid(inj[nodeIdx(x, y)].valid), .i[4].ready(inj[nodeIdx(x, y)].ready),
+        .i[4].data(inj[nodeIdx(x, y)].data),
+        .o[4].valid(ej[nodeIdx(x, y)].valid), .o[4].ready(ej[nodeIdx(x, y)].ready),
+        .o[4].data(ej[nodeIdx(x, y)].data));
     }
   }
 }

@@ -228,7 +228,7 @@ inductive BindTarget where
   | sig : Name → BindTarget
   | elem : Name → (elemW idx : Nat) → BindTarget
   /-- An expression, which is not a place at all. The port keeps the local wire it would have had
-  if nothing were bound to it, and the expression drives that wire -- so `.dstX(i.data[k][1:0])`
+  if nothing were bound to it, and the expression drives that wire -- so `.dstX(i[k].data[1:0])`
   needs no wire declared by hand for every slice.
 
   Resolved in `Module.ofItems` rather than in the macro because that is where the information is:

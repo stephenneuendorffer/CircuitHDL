@@ -167,9 +167,23 @@ Things the surface syntax does *not* have, each of which has bitten:
   the port keeps its wire, the submodule drives it, and the expression drives it too — two
   drivers, which nothing else here would report, because multiple combinational drivers are legal
   (`swapComb` relies on last-write-wins). `InstInfo` carries the input list for this one question.
-- **An array port is `n` ports, not an array.** `slave i[5] : axis fw` declares `i.valid.0 …`, and
-  `i.valid[k]` needed no new expression grammar: `qualify` already names a field with a dot and
-  Lean lexes `i.valid` as one identifier. They are scalars, so the index is elaboration-time only.
+- **An array port is `n` ports, not an array**, and it is an array of **bundles**: `slave i[5] :
+  axis fw` declares `i.0.valid …`, selected as `i[k].valid`, with the index between the port and
+  the field. They are scalars, so the index is elaboration-time only.
+
+  It was `i.valid[k]` first, which needed no new expression grammar at all -- `qualify` already
+  names a field with a dot and Lean lexes `i.valid` as one identifier, so `i.valid[k]` was the
+  *existing* index rule applied to it. The binding side is what moved it: a binding names a port of
+  the submodule, so `.i.valid[k](..)` would have had to mean "the `k`th of the ports `i.valid`"
+  while reading as an index into a signal, and nothing on that side is a signal. Making the port
+  side `i[k].valid` costs three things -- a postfix `.` on `circuit_expr`, an `assign a[i].f =`
+  statement rule, and `PortDecl.field` so `mkPortList` knows where to put the index.
+
+  **The port side of a binding is its own syntax category (`circuit_ref`), not `circuit_expr`**,
+  and it has to be: `circuit_expr` now contains the call rule, so `.b(wbnext)` parses there as the
+  *call* `b(wbnext)` and swallows the parentheses the binding needs. Its three rules (`x`, `x[i]`,
+  `x[i].f`) are unambiguous -- Lean's longest-match takes the third where it applies -- so the
+  category is a restriction rather than a workaround.
 - **`if isEdge(x, y, d)` is the elaboration-time conditional**, where `if c` on a signal is a mux.
   One arm is built and the other does not exist. A **call** marks it, as well as the explicit
   `#(..)`: a Lean function in condition position can only be a `Bool`, where a hardware condition

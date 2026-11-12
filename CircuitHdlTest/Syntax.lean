@@ -643,31 +643,35 @@ module! bundled #[(dw : Nat)] (slave s : handshake dw) -> (master m : handshake 
 /-! ### Array ports
 
 `slave i[n] : handshake dw` is `n` ports, not an array: `Module.inputs` is a list of scalars, and
-a port is one wire per element in any hardware. So it declares `i.valid.0 …` and selects one with
-`i.valid[k]` — which needs no new expression syntax, because a field is already named with a dot
-and Lean lexes `i.valid` as one identifier.
+a port is one wire per element in any hardware.
+
+**The index sits between the port and its field**, so element `k` of a bundle is `i[k].valid` and
+the name it declares is `i.k.valid`. That is the spelling an array of bundles wants -- `i[k]` is
+one slave, and `.valid` is its field -- and it is the order the *binding* side has to use anyway,
+since `.i[k].valid(..)` names a port of the submodule and `.i.valid[k](..)` would read as indexing
+a field. A plain array port has no field and is simply `d[k]`, declaring `d.k`.
 -/
 
 module! xbar #[(n dw : Nat)] (slave i[n] : handshake dw) -> (master o[n] : handshake dw) {
   for k < n {
-    assign o.valid[k] = i.valid[k];
-    assign o.data[k] = i.data[k];
-    assign i.ready[k] = o.ready[k];
+    assign o[k].valid = i[k].valid;
+    assign o[k].data = i[k].data;
+    assign i[k].ready = o[k].ready;
   }
 }
 
 #guard (Module.check (xbar 3 8)).isOk
 -- The `rev` field still faces the other way, one element at a time. Spelled with `indexedName`
--- because `` `i.valid.0 `` is not name-literal syntax: an indexed name is a `Name.num`, which is
+-- because `` `i.0.valid `` is not name-literal syntax: an indexed name is a `Name.num`, which is
 -- also why it cannot collide with anything a design declares.
 #guard (xbar 2 8).inputs
-  = (List.range 2).map (fun k => (indexedName `i.valid k, 1))
-    ++ (List.range 2).map (fun k => (indexedName `i.data k, 8))
-    ++ (List.range 2).map (fun k => (indexedName `o.ready k, 1))
+  = (List.range 2).map (fun k => (indexedName `i k ++ `valid, 1))
+    ++ (List.range 2).map (fun k => (indexedName `i k ++ `data, 8))
+    ++ (List.range 2).map (fun k => (indexedName `o k ++ `ready, 1))
 #guard (xbar 2 8).outputs
-  = (List.range 2).map (fun k => (indexedName `o.valid k, 1))
-    ++ (List.range 2).map (fun k => (indexedName `o.data k, 8))
-    ++ (List.range 2).map (fun k => (indexedName `i.ready k, 1))
+  = (List.range 2).map (fun k => (indexedName `o k ++ `valid, 1))
+    ++ (List.range 2).map (fun k => (indexedName `o k ++ `data, 8))
+    ++ (List.range 2).map (fun k => (indexedName `i k ++ `ready, 1))
 
 /-- A plain array port, and the count may be a parameter: the macro never evaluates it. -/
 module! bus #[(n : Nat)] (d[n] : 8) -> (sum : 8) {

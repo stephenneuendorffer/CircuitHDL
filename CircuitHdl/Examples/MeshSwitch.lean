@@ -127,18 +127,19 @@ constant for its duration and is why no second output can be granted mid-packet.
 /-- A wormhole switch for one mesh node. `fw` is the whole flit width, which must leave room for
 the five header bits: `dstX`, `dstY` and `tail` occupy bits 0 to 4.
 
-Five of everything, written once. The ports are an array -- `i.valid[k]` is one of five separate
+Five of everything, written once. The ports are an array -- `i[k].valid` is one of five separate
 ports, not an element of storage -- and every per-port signal is an array of registers or wires,
 so the five-way repetition this design is made of is a `for` rather than five lines.
 
 Two places keep their five terms written out, and both are reductions rather than repetitions:
-`any[j]` ors the five requests for output `j`, and `i.ready[k]` ors the five outputs that might
+`any[j]` ors the five requests for output `j`, and `i[k].ready` ors the five outputs that might
 own input `k`. A loop generates statements, not a fold over an expression, so there is nothing to
 gain by hiding them.
 
 `ivalid` and `idata` are copies of the input ports into arrays. That is not bookkeeping: an array
-can be indexed by a *value*, so the crossbar is `idata[own[j]]` -- the mux chain it always was,
-now generated from the array rather than written as four nested ternaries. -/
+can be indexed by a *value* where an array port cannot -- `i[k].valid` is one of five separate
+ports, not storage -- so the crossbar is `idata[own[j]]`, the mux chain it always was, now
+generated from the array rather than written as four nested ternaries. -/
 module! meshSwitch #[(fw : Nat)]
     (clk : 1, rst : 1, myX : 2, myY : 2, slave i[5] : axis fw) -> (master o[5] : axis fw) {
   -- Which output each input wants. One routing unit per input, so the policy is stated once and
@@ -149,12 +150,12 @@ module! meshSwitch #[(fw : Nat)]
   wire idata[5] : fw;
 
   for k < 5 {
-    assign ivalid[k] = i.valid[k];
-    assign idata[k] = i.data[k];
+    assign ivalid[k] = i[k].valid;
+    assign idata[k] = i[k].data;
     -- The destination slices go straight into the ports: an input bound to an expression keeps a
     -- wire of its own and the expression drives it, so the slices need no array apiece.
     meshRouteUnit r[k]
-      (.myX(myX), .myY(myY), .dstX(i.data[k][1:0]), .dstY(i.data[k][3:2]), .dir(rq[k]));
+      (.myX(myX), .myY(myY), .dstX(i[k].data[1:0]), .dstY(i[k].data[3:2]), .dir(rq[k]));
   }
 
   -- Output ownership, and the one-flit output register that makes the port boundary a register.
@@ -167,7 +168,7 @@ module! meshSwitch #[(fw : Nat)]
   wire req[25] : 1;
   for k < 5 {
     for j < 5 {
-      assign req[k * 5 + j] = i.valid[k] & (rq[k] == j);
+      assign req[k * 5 + j] = i[k].valid & (rq[k] == j);
     }
   }
 
@@ -181,8 +182,8 @@ module! meshSwitch #[(fw : Nat)]
   for j < 5 {
     -- The output side: registers and nothing else, so a neighbour's combinational logic can never
     -- reach back through this switch.
-    assign o.valid[j] = ~rst & full[j];
-    assign o.data[j] = obuf[j];
+    assign o[j].valid = ~rst & full[j];
+    assign o[j].data = obuf[j];
 
     -- Fixed-priority pick among the five, per output. Only consulted while the output is free.
     assign anyReq[j] = req[j] | req[5 + j] | req[10 + j] | req[15 + j]
@@ -199,7 +200,7 @@ module! meshSwitch #[(fw : Nat)]
     assign od[j] = idata[own[j]];
 
     -- A flit moves into output `j` when the output is allocated, its register is empty, and the
-    -- owning input is offering. No `o.ready[j]` term: that is the loop this design exists to
+    -- owning input is offering. No `o[j].ready` term: that is the loop this design exists to
     -- avoid.
     assign take[j] = alloc[j] & ~full[j] & ov[j];
 
@@ -210,7 +211,7 @@ module! meshSwitch #[(fw : Nat)]
 
   -- An input is ready exactly when the output that owns it has room. Registers only.
   for k < 5 {
-    assign i.ready[k] = ~rst & ((alloc[0] & (own[0] == k) & ~full[0])
+    assign i[k].ready = ~rst & ((alloc[0] & (own[0] == k) & ~full[0])
                     | (alloc[1] & (own[1] == k) & ~full[1])
                     | (alloc[2] & (own[2] == k) & ~full[2])
                     | (alloc[3] & (own[3] == k) & ~full[3])
@@ -224,7 +225,7 @@ module! meshSwitch #[(fw : Nat)]
       assign own[j] = rst ? (0 : 3) : (alloc[j] ? own[j] : sel[j]);
       -- The output register fills on `take` and empties when the neighbour takes it. The two can
       -- never happen in the same cycle -- `take` requires `~full` -- so the arms do not overlap.
-      assign full[j] = rst ? (0 : 1) : (full[j] ? ~o.ready[j] : take[j]);
+      assign full[j] = rst ? (0 : 1) : (full[j] ? ~o[j].ready : take[j]);
       assign obuf[j] = take[j] ? od[j] : obuf[j];
     }
   }
