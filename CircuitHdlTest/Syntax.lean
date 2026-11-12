@@ -642,14 +642,19 @@ module! bundled #[(dw : Nat)] (slave s : handshake dw) -> (master m : handshake 
 
 /-! ### Array ports
 
-`slave i[n] : handshake dw` is `n` ports, not an array: `Module.inputs` is a list of scalars, and
-a port is one wire per element in any hardware.
+`slave i[n] : handshake dw` is `n` wires per field at the boundary and **one array** inside, which
+is the whole of what makes it useful: a port array and a `wire a[n]` are the same five wires
+selected the same way, differing only in who drives them, so `i[sel].valid` is an `Expr.select`
+like any other array read.
+
+`Module.inputs` is the declaration, `Module.flatInputs` is the boundary. The pins below are stated
+against `flatInputs`, because what a port is *called* is a fact about the boundary.
 
 **The index sits between the port and its field**, so element `k` of a bundle is `i[k].valid` and
-the name it declares is `i.k.valid`. That is the spelling an array of bundles wants -- `i[k]` is
-one slave, and `.valid` is its field -- and it is the order the *binding* side has to use anyway,
+the wire it emits is `i.k.valid`. That is the spelling an array of bundles wants -- `i[k]` is one
+slave, and `.valid` is its field -- and it is the order the *binding* side has to use anyway,
 since `.i[k].valid(..)` names a port of the submodule and `.i.valid[k](..)` would read as indexing
-a field. A plain array port has no field and is simply `d[k]`, declaring `d.k`.
+a field. A plain array port has no field and is simply `d[k]`, emitting `d.k`.
 -/
 
 module! xbar #[(n dw : Nat)] (slave i[n] : handshake dw) -> (master o[n] : handshake dw) {
@@ -673,35 +678,34 @@ module! xbar #[(n dw : Nat)] (slave i[n] : handshake dw) -> (master o[n] : hands
     ++ (List.range 2).map (fun k => (indexedName `o k ++ `data, 8))
     ++ (List.range 2).map (fun k => (indexedName `i k ++ `ready, 1))
 
-/-! Being separate ports rather than storage, they are indexed only at elaboration time: there is
-no cell to select from, so a dynamic index is an error rather than a mux.
+/-! Being one array rather than `n` names, an array port is indexed by a **value**. `i[sel].valid`
+is an `Expr.select` and lowers to the mux chain `wire a[4]` already lowered to.
 
-This is the one claim about array ports that a positive test cannot make, and it was *wrong* in
-the message it gave until the error was split: a dynamic index used to report `indeterminate`,
-whose advice is "give it one with an ascription", which fixes a width that could not be inferred
-and fixes nothing at all about an index naming one of five ports. `notStatic` is the same failure
-with the sentence that matches it.
+This is what the design could not say while the macro flattened a port into scalars, and it is why
+`meshSwitch` used to copy its five input ports into two arrays before it could pick one by value.
+Both spellings below were pinned as *errors* one commit ago; that they are now tests of a value is
+the visible evidence the representation changed.
 -/
 
-/--
-error: this has to be fixed before the design runs, and it is not: an index into an array port
-  names one of several separate ports, so there is nothing to select from at run time
--/
-#guard_msgs(error, whitespace := lax) in
-module! dynBundlePort #[] (slave i[4] : handshake 8, sel : 2) -> (v : 1) {
+module! portMux #[] (slave i[4] : handshake 8, sel : 2) -> (v : 1, d : 8) {
   assign v = i[sel].valid;
+  assign d = i[sel].data;
+  for k < 4 { assign i[k].ready = 0; }
 }
 
--- The plain form reaches it by a different path in `checkExpr` -- no field to look up -- so it
--- needs its own pin.
-/--
-error: this has to be fixed before the design runs, and it is not: an index into an array port
-  names one of several separate ports, so there is nothing to select from at run time
--/
-#guard_msgs(error, whitespace := lax) in
-module! dynPlainPort #[] (d[4] : 8, sel : 2) -> (v : 8) {
-  assign v = d[sel];
-}
+#guard (Module.check portMux).isOk
+
+private def portMuxRead (sel : Nat) : Option (Nat × Nat) :=
+  (portMux.settle (portMux.initState.apply
+    [ (`i.valid, Cell.mem ([0, 0, 1, 0].map (Value.ofNat 1))),
+      (`i.data, Cell.mem ([11, 22, 165, 44].map (Value.ofNat 8))),
+      (`sel, Cell.sig (Value.ofNat 2 sel)) ])).toOption.bind fun σ => do
+    return (← σ.valueOf? `v, ← σ.valueOf? `d)
+
+-- Each selection reads both fields of the element it names, and only that element: a chain built
+-- one arm out of step would read a neighbour here, which is `selectChain`'s own mutation.
+#guard (List.range 4).map portMuxRead
+  = [some (0, 11), some (0, 22), some (1, 165), some (0, 44)]
 
 /-- A plain array port, and the count may be a parameter: the macro never evaluates it. -/
 module! bus #[(n : Nat)] (d[n] : 8) -> (sum : 8) {
@@ -709,9 +713,9 @@ module! bus #[(n : Nat)] (d[n] : 8) -> (sum : 8) {
 }
 
 #guard (bus 3).flatInputs = (List.range 3).map (fun k => (indexedName `d k, 8))
+-- Driven as the one cell it is, rather than as three names.
 #guard ((bus 3).settle ((bus 3).initState.apply
-  [(indexedName `d 0, Cell.sig (Value.ofNat 8 5)),
-   (indexedName `d 1, Cell.sig (Value.ofNat 8 7))])).toOption.bind
+  [(`d, Cell.mem ([5, 7, 0].map (Value.ofNat 8)))])).toOption.bind
   (State.valueOf? · `sum) = some 12
 
 /-! ### The static conditional

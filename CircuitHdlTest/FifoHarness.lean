@@ -298,10 +298,13 @@ Unnamed wires (`wfire`, `widx`) do not survive, and nothing here needs them.
 structure VeirBridge where
   ctx : Veir.WfIRContext Veir.OpCode
   info : Veir.Netlist.Info
-  /-- Module input ports in block-argument order, with their widths. -/
-  inputs : Array (Name × Nat)
-  /-- Output ports in `hw.output` operand order. -/
-  outputs : Array (Name × Nat)
+  /-- Module input ports in block-argument order, with their widths -- as the `Signal` each one
+  lives in on the evaluator's side. A scalar port is itself; one wire of an array port is one
+  element of that port's cell, since the netlist has `n` separate wires where the evaluator keeps
+  one cell. Same join as `regKeys` makes for an array register, in the other direction. -/
+  inputs : Array (Signal × Nat)
+  /-- Output ports in `hw.output` operand order, likewise. -/
+  outputs : Array (Signal × Nat)
   /-- What each register holds in the harness's `State`, parallel to `info.regs`: a scalar
   signal, or one element of an array. -/
   regKeys : Array Signal
@@ -375,8 +378,8 @@ def VeirBridge.ofVeir (m : Module) (ctx : Veir.WfIRContext Veir.OpCode)
   for (op, _) in info.regs do
     let some cur := blank.regs[op.id]? | none
     regWidths := regWidths.push (match cur with | .int w _ => w | _ => 0)
-  return { ctx, info, inputs := m.flatInputs.toArray, outputs := m.flatOutputs.toArray,
-           regKeys, memNames, arrays := m.arrays.toArray, blank, regWidths }
+  return { ctx, info, inputs := m.inputSignals.toArray, outputs := m.outputSignals.toArray,
+           regKeys, memNames, arrays := m.allArrays.toArray, blank, regWidths }
 
 def VeirBridge.of (m : Module) : Option VeirBridge := do
   let .ok (ctx, top) := m.toVeir | none
@@ -393,7 +396,7 @@ private def toNat? (v : Veir.RuntimeValue) : Option Nat :=
 private def decode (b : VeirBridge) (σ : State) : Option (Array Veir.RuntimeValue × Veir.Netlist.State) := do
   let mut args : Array Veir.RuntimeValue := #[]
   for (x, w) in b.inputs do
-    args := args.push (rv w ((σ.valueOf? x).getD 0))
+    args := args.push (rv w ((σ.valueAt? x).getD 0))
   let mut regs := b.blank.regs
   for (rg, i) in b.info.regs.zipIdx do
     let (op, _) := rg
@@ -448,15 +451,18 @@ private def encode (b : VeirBridge) (st : Veir.Netlist.State)
     let (x, w) := port
     let some v := outs[i]? | none
     let some n := toNat? v | none
-    out := out.set x (Value.ofNat w n)
+    let .ok o := out.setAt x (Value.ofNat w n) | none
+    out := o
   return out
 
 private def fail : EvalError := .check (.unbound `veir_bridge)
 
 def VeirBridge.sim (b : VeirBridge) : Sim :=
   { init :=
-      (b.inputs.toList.map (fun (x, w) => (x, Cell.sig (Value.ofNat w 0))))
-      ++ (b.outputs.toList.map (fun (x, w) => (x, Cell.sig (Value.ofNat w 0))))
+      -- Only the scalar ports need a cell of their own here; an array port's elements are
+      -- covered by the array's cell, which `b.arrays` builds below.
+      (b.inputs.toList.filterMap (fun (x, w) => x.asName?.map (·, Cell.sig (Value.ofNat w 0))))
+      ++ (b.outputs.toList.filterMap (fun (x, w) => x.asName?.map (·, Cell.sig (Value.ofNat w 0))))
       ++ (b.regKeys.toList.zipIdx.filterMap (fun (key, i) =>
             match key with
             -- Array elements are covered by the array's own cell, below.
@@ -482,7 +488,7 @@ def VeirBridge.sim (b : VeirBridge) : Sim :=
     stepClock := fun clk σ inputs => do
       let σ := σ.apply inputs
       let some (args, st) := decode b σ | .error fail
-      let some clkIdx := b.inputs.findIdx? (·.1 == clk) | .error fail
+      let some clkIdx := b.inputs.findIdx? (·.1 == Signal.sig clk) | .error fail
       let some st' := Veir.Netlist.stepClock b.ctx b.info clkIdx args st | .error fail
       let some (vals, _) := Veir.Netlist.settle b.ctx b.info args st' | .error fail
       let some σ' := encode b st' vals σ | .error fail

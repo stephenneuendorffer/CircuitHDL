@@ -58,14 +58,18 @@ private def meshW : Nat := 13
 private def meshNodes : List (Nat × Nat) :=
   (List.range 4).flatMap fun x => (List.range 4).map fun y => (x, y)
 
--- Injection and ejection are *array ports*, one element per node, so a port of node `(x, y)` is
--- the `nodeIdx x y`-th element of the field's family rather than a name built from the digits.
-private def injValid (x y : Nat) : Name := indexedName `inj (nodeIdx x y) ++ `valid
-private def injData (x y : Nat) : Name := indexedName `inj (nodeIdx x y) ++ `data
-private def injReady (x y : Nat) : Name := indexedName `inj (nodeIdx x y) ++ `ready
-private def ejValid (x y : Nat) : Name := indexedName `ej (nodeIdx x y) ++ `valid
-private def ejData (x y : Nat) : Name := indexedName `ej (nodeIdx x y) ++ `data
-private def ejReady (x y : Nat) : Name := indexedName `ej (nodeIdx x y) ++ `ready
+-- Injection and ejection are *array ports*: one array per field, one element per node, indexed by
+-- `nodeIdx`. A port of node `(x, y)` is therefore a place inside a cell and not a name of its own,
+-- which is why the driver below writes whole cells -- `State.apply` merges a cell at a time -- and
+-- reads results with `valueAt?` rather than `valueOf?`.
+private def ejValidAt (x y : Nat) : Signal := .elem `ej.valid (nodeIdx x y)
+private def ejDataAt (x y : Nat) : Signal := .elem `ej.data (nodeIdx x y)
+private def injReadyAt (x y : Nat) : Signal := .elem `inj.ready (nodeIdx x y)
+
+/-- One array port's worth of values, in `nodeIdx` order. `meshNodes` is x-major and `nodeIdx` is
+`x * 4 + y`, so the list is already in element order. -/
+private def perNode (w : Nat) (f : Nat → Nat → Nat) : Cell :=
+  .mem (meshNodes.map fun (x, y) => Value.ofNat w (f x y))
 
 /-! ### The driver
 
@@ -92,20 +96,18 @@ def runMesh (s : Sim) (qs : List SourceQueue) (ticks : Nat) :
   let mut out : List (Nat × Nat × Nat) := []
   for _ in List.range ticks do
     let ins : State :=
-      (`rst, Cell.sig (Value.ofNat 1 0)) ::
-      meshNodes.flatMap fun (x, y) =>
-        let p := pendingAt queues x y
-        [ (injValid x y, Cell.sig (Value.ofNat 1 (if p.isSome then 1 else 0))),
-          (injData x y, Cell.sig (Value.ofNat meshW (p.getD 0))),
-          (ejReady x y, Cell.sig (Value.ofNat 1 1)) ]
+      [ (`rst, Cell.sig (Value.ofNat 1 0)),
+        (`inj.valid, perNode 1 fun x y => if (pendingAt queues x y).isSome then 1 else 0),
+        (`inj.data, perNode meshW fun x y => (pendingAt queues x y).getD 0),
+        (`ej.ready, perNode 1 fun _ _ => 1) ]
     let σs ← s.settle (σ.apply ins)
     -- Ejections this cycle. `ready` is held high, so a raised `valid` *is* a transfer.
     for (x, y) in meshNodes do
-      if σs.valueOf? (ejValid x y) == some 1 then
-        out := out ++ [(x, y, (σs.valueOf? (ejData x y)).getD 0)]
+      if σs.valueAt? (ejValidAt x y) == some 1 then
+        out := out ++ [(x, y, (σs.valueAt? (ejDataAt x y)).getD 0)]
     -- Retire an injected flit the switch accepted.
     queues := queues.map fun (node, fs) =>
-      if σs.valueOf? (injReady node.1 node.2) == some 1 then (node, fs.drop 1) else (node, fs)
+      if σs.valueAt? (injReadyAt node.1 node.2) == some 1 then (node, fs.drop 1) else (node, fs)
     σ ← s.stepClock `clk σ ins
   return out
 

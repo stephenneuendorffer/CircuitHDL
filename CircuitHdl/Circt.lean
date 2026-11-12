@@ -582,7 +582,7 @@ inductive Drive where
 
 /-- Classify one signal. -/
 def Module.driveOf (m : Module) (x : Name) : Except CirctError Drive := do
-  if m.flatInputs.any (·.1 == x) then return .input
+  if m.inputs.any (·.name == x) then return .input
   let combinational := m.body.any fun p => !p.isSequential && p.writes x
   match (m.driversOf x).eraseDups with
   | [] => return (if combinational then .wire else .undriven)
@@ -635,7 +635,7 @@ def Module.toVeir (m : Module) :
     | .ok env => pure env
     | .error e => throw (.check e)
   let lctx : Ctx :=
-    { env := env, inputs := m.flatInputs.map Prod.fst, arrays := m.arrays, mems := m.mems }
+    { env := env, inputs := m.inputs.map Port.name, arrays := m.allArrays, mems := m.mems }
 
   -- Ports. Inputs become block arguments, in order; outputs become `hw.output` operands.
   let portNames := m.flatInputs.map Prod.fst ++ m.flatOutputs.map Prod.fst
@@ -668,8 +668,11 @@ def Module.toVeir (m : Module) :
         modProps (some (.atEnd topBlock))
     | throw (.verifier "could not create the hw.module")
 
-  let args : Scope := m.flatInputs.zipIdx.map fun ((x, w), i) =>
-    (.sig x, { ptr := .blockArgument ⟨bodyBlock, i⟩, width := w })
+  -- Positional: `Port.signals` pairs with `Port.wires`, so block argument `i` is tied to the
+  -- signal the evaluator keeps that wire in -- `.sig x` for a scalar port and `.elem a k` for one
+  -- element of an array port, which is why `Scope` is keyed by `Signal` and not by `Name`.
+  let args : Scope := m.inputSignals.zipIdx.map fun ((s, w), i) =>
+    (s, { ptr := .blockArgument ⟨bodyBlock, i⟩, width := w })
 
   let init : Emit := { ctx := vctx, block := bodyBlock, insertAt := .atEnd bodyBlock }
 
@@ -773,7 +776,7 @@ def Module.toVeir (m : Module) :
       set { s with ctx := Veir.WfRewriter.eraseOp! s.ctx placeholder }
 
     -- `hw.output` closes the block, below the registers.
-    let outputs ← m.flatOutputs.mapM fun (x, _) => lookupVal σ (.sig x)
+    let outputs ← m.outputSignals.mapM fun (s, _) => lookupVal σ s
     modify fun s => { s with insertAt := .atEnd s.block }
     let _ ← build (.hw .output) () #[] (outputs.map Val.ptr).toArray
     return ()) lctx) init

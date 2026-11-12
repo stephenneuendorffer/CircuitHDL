@@ -200,6 +200,25 @@ of this reads a width, so nothing gets stuck on a symbolic `Nat`.
    (`rbnext, []), (`rgnext, []), (`remptynext, []), (`waddr, []), (`raddr, []),
    (`mem, [`wclk])]
 
+/-! Both proofs below are `rfl` at a *symbolic* width, so every reduction `Module.ofItems` needs
+is paid in heartbeats, and they have always sat near the default limit -- wrapping `asyncFifo`'s
+two clocked blocks in an `if` once put them over it, which is why the design resets per assignment.
+
+Giving a port an arity pushed them over again: a port is now a structure with a `count` to match
+on rather than a pair, so `instLocals` does an extra `Option.rec` per port and `instConnections`
+a `PortRef.rec` per binding. Measured: 300,307 `List.rec` unfoldings before and 353,992 after,
+about 18% more, and 250,000 heartbeats is what it now needs against the default 200,000.
+
+The *first* attempt cost far more than that -- 528,288 unfoldings of `grayOfW` alone, against
+12,192 now -- because `instConnections` recovered `(array, index)` from the flat boundary name by
+building the submodule's element table, which `whnf` recomputed for every binding. `PortRef` is
+what removed it: the macro knows the base, the index and the field, so it says so. A 43x
+difference, and worth knowing before anyone has the same idea again.
+
+The limit is set to 400,000 rather than 250,000 so that an ordinary change elsewhere does not
+land as a mysterious timeout here. -/
+
+set_option maxHeartbeats 400000 in
 /-- **No register in the FIFO is driven by more than one clock -- at any size.**
 
 The `generalize` abstracts the derived width away before `rfl` runs. It was worth minutes when
@@ -212,6 +231,7 @@ theorem asyncFifo_singleClocked (depth dw : Nat) (h : validDepth depth = true) :
   generalize Nat.log2 depth = n
   rfl
 
+set_option maxHeartbeats 400000 in
 /-- The same fact stated so a counterexample would be visible rather than just `false`. -/
 theorem asyncFifo_noRaces (depth dw : Nat) (h : validDepth depth = true) :
     (asyncFifo depth dw h).multiplyClocked = [] := by

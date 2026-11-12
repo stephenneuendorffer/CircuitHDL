@@ -178,6 +178,13 @@ a loop.
 surface syntax can declare, which spells every name it builds with `Name.str`. -/
 def indexedName (x : Name) (i : Nat) : Name := Name.num x i
 
+/-- The name of a signal that *is* a whole declaration, which an element is not. Distinct from
+`Signal.name`, which answers "which declaration does this touch" and so flattens an element onto
+its array. -/
+def Signal.asName? : Signal → Option Name
+  | .sig x => some x
+  | _ => none
+
 namespace Signal
 
 /-- The declaration an access belongs to. Clock-domain analysis works at this granularity: an
@@ -238,6 +245,22 @@ inductive BindTarget where
   | expr : Expr → BindTarget
   deriving Repr
 
+/-- The value a target denotes, for driving an *input* from whatever it was tied to. -/
+def BindTarget.asExpr : BindTarget → Expr
+  | .sig x => .var x
+  | .elem a w i => .elem a w i
+  | .expr e => e
+
+/-- The statement that drives a target with `e`, for an **output**, which runs the other way: the
+submodule computes the value and the binding says where it lands. `none` for an expression, which
+is not a place -- `InstInfo.check` reports that as `exprBoundOutput` rather than silently dropping
+the connection. -/
+def BindTarget.drive (t : BindTarget) (e : Expr) : Option Stmt :=
+  match t with
+  | .sig x => some (.assign x e)
+  | .elem a w i => some (.setElem a w i e)
+  | .expr _ => none
+
 /-- The declaration a target names. Used where an element cannot arise -- a memory, an array, or a
 clock -- because only *ports* are bound and a port is always a scalar. -/
 def BindTarget.nameOf : BindTarget → Name
@@ -246,21 +269,6 @@ def BindTarget.nameOf : BindTarget → Name
   -- Unreachable: `instRenaming` maps an expression-bound port to its own local name, so the
   -- renaming never sees this constructor.
   | .expr _ => .anonymous
-
-/-- What survives of an instance after it has been flattened, so its bindings can still be checked.
-
-This records the submodule's *ports* rather than the submodule itself -- `Module` would otherwise
-have to be recursive. It is enough to catch a binding naming a port that does not exist, which is
-the failure flattening would otherwise swallow: an unbound port silently becomes a local, so a typo
-quietly disconnects a signal. -/
-structure InstInfo where
-  name : Name
-  ports : List (Name × Nat)
-  /-- Which of them are inputs. Kept apart from `ports` because an expression may only drive an
-  input, and that is the only question direction is needed for. -/
-  inputs : List Name
-  bindings : List (Name × BindTarget)
-  deriving Repr
 
 /-- One port of a module.
 
@@ -322,6 +330,49 @@ def asArray? (p : Port) : Option (Name × Nat × Nat) :=
 
 end Port
 
+/-- Which port of a submodule a binding names.
+
+`.b` is a scalar port; `.i[2].valid` is element 2 of the array port `i.valid`, and `.d[3]` is
+element 3 of `d`. The macro knows all three parts of the second -- the base, the index and the
+field -- so it says so, rather than flattening them into the boundary name `i.2.valid` for the
+flattener to take apart again.
+
+That it used to flatten them is what made `rfl` at a symbolic width unaffordable: recovering
+`(array, index)` meant building the submodule's whole element table *per binding*, which unfolded
+the submodule once per binding. Saying it directly costs nothing, and it is the same reason array
+ports stopped being flattened in the first place. -/
+inductive PortRef where
+  | sig : Name → PortRef
+  | elem : Name → Nat → PortRef
+  deriving Repr, DecidableEq, Inhabited
+
+/-- The declaration a reference names, which is the array's name for an element. -/
+def PortRef.name : PortRef → Name
+  | .sig x => x
+  | .elem a _ => a
+
+/-- How it reads in an error message. -/
+def PortRef.render : PortRef → String
+  | .sig x => toString x
+  | .elem a i => s!"{a}[{i}]"
+
+/-- What survives of an instance after it has been flattened, so its bindings can still be checked.
+
+This records the submodule's *ports* rather than the submodule itself -- `Module` would otherwise
+have to be recursive. It is enough to catch a binding naming a port that does not exist, which is
+the failure flattening would otherwise swallow: an unbound port silently becomes a local, so a typo
+quietly disconnects a signal. -/
+structure InstInfo where
+  name : Name
+  /-- The submodule's port declarations, so a binding can be checked against the real thing --
+  including that an array port's element exists, which only the declaration knows. -/
+  ports : List Port
+  /-- Which of them are inputs, by declaration name. Kept apart from `ports` because an expression
+  may only drive an input, and that is the only question direction is needed for. -/
+  inputs : List Name
+  bindings : List (PortRef × BindTarget)
+  deriving Repr
+
 /-- A very small module shape. -/
 structure Module where
   name : Name
@@ -364,6 +415,14 @@ def portArrays (m : Module) : List (Name × Nat × Nat) :=
 /-- Every array a module has, declared or ported. -/
 def allArrays (m : Module) : List (Name × Nat × Nat) := m.arrays ++ m.portArrays
 
+/-- The input wires as the *signals* they denote inside the module, paired positionally with
+`flatInputs`. An array port's element `k` is element `k` of its one cell, which is what lets a
+block argument be tied to the place the evaluator keeps it. -/
+def inputSignals (m : Module) : List (Signal × Nat) := m.inputs.flatMap Port.signals
+
+/-- The output wires as signals, likewise positional with `flatOutputs`. -/
+def outputSignals (m : Module) : List (Signal × Nat) := m.outputs.flatMap Port.signals
+
 /-- The ports that are single wires, as `(name, width)`. These are the ones that belong in the
 environment as scalars; an array port belongs in `allArrays` instead. -/
 def scalarPorts (ps : List Port) : List (Name × Nat) :=
@@ -398,7 +457,7 @@ inductive Item where
   names rather than expressions: the surface syntax cannot tell an input port from an output one
   -- the macro has no access to the submodule's port list -- so binding by name keeps the two
   directions uniform. Feed an expression by assigning it to a `wire` first. -/
-  | inst : (instName : Name) → Module → List (Name × BindTarget) → Item
+  | inst : (instName : Name) → Module → List (PortRef × BindTarget) → Item
   deriving Repr
 
 /-! ### Renaming
@@ -510,9 +569,9 @@ semantics know nothing about instances -- by the time they see a module, there a
 /-- How an instance renames the submodule's signals: a bound port becomes the parent signal it is
 tied to, and everything else becomes an instance-prefixed local, so two instances of the same
 module cannot collide. -/
-def instRenaming (instName : Name) (bindings : List (Name × BindTarget)) :
+def instRenaming (instName : Name) (bindings : List (PortRef × BindTarget)) :
     Name → BindTarget := fun x =>
-  match bindings.lookup x with
+  match bindings.lookup (.sig x) with
   -- An expression-bound port is renamed like an unbound one: it keeps a wire of its own, which
   -- `instConnections` then drives. The substitution therefore never yields `.expr`.
   | some (.expr _) => .sig (instName ++ x)
@@ -521,32 +580,70 @@ def instRenaming (instName : Name) (bindings : List (Name × BindTarget)) :
 
 /-- The signals an instance adds to the parent: every submodule signal that was *not* bound to one,
 under its prefixed name. -/
-def instLocals (instName : Name) (bindings : List (Name × BindTarget)) (m : Module) :
+def instLocals (instName : Name) (bindings : List (PortRef × BindTarget)) (m : Module) :
     List (Name × Nat) :=
-  (Module.scalarPorts m.inputs ++ Module.scalarPorts m.outputs ++ m.regs).filterMap fun (x, w) =>
-    match bindings.lookup x with
+  (m.inputs ++ m.outputs).filterMap (fun p =>
+    match p.count with
+    -- An array port becomes a prefixed *array* -- see `instArrays` -- and never a local wire.
+    | some _ => none
+    | none => keep p.name p.width)
+  ++ m.regs.filterMap (fun (x, w) => keep x w)
+where
+  /-- One pass rather than filtering the ports to scalars and then filtering again: these
+  equations are reduced by `rfl` at a symbolic width in `asyncFifo_singleClocked`, where every
+  extra traversal of the port list is paid for in heartbeats. -/
+  keep (x : Name) (w : Nat) : Option (Name × Nat) :=
+    match bindings.lookup (.sig x) with
     -- An expression-bound port needs the wire, at the port's own width, which is why this is
     -- decided here and not in the macro.
     | some (.expr _) => some (instName ++ x, w)
     | some _ => none
     | none => some (instName ++ x, w)
 
-/-- The assignments an expression binding needs: one per port tied to an expression, driving the
-wire `instLocals` kept for it. They are statements of the *parent*, so they are not renamed. -/
-def instConnections (instName : Name) (bindings : List (Name × BindTarget)) : List Stmt :=
+/-- The statements a binding needs in the *parent*. They are the parent's own, so they are not
+renamed. Two kinds:
+
+- an **array port element**, which has to be connected rather than renamed (see `instArrays`), and
+  is the first binding whose direction matters: an input element is driven *from* what it was tied
+  to, an output element drives *into* it. `InstInfo.inputs` is the direction list, kept for
+  `exprBoundOutput` and now earning its keep twice;
+- a port tied to an **expression**, driving the wire `instLocals` kept for it.
+
+Order does not matter: `SettleOrder` sorts at statement granularity, so a connection finds its
+place whether it is written before or after the logic it feeds. -/
+def instConnections (instName : Name) (bindings : List (PortRef × BindTarget)) (m : Module) :
+    List Stmt :=
   bindings.filterMap fun (port, t) =>
-    match t with
-    | .expr e => some (.assign (instName ++ port) e)
-    | _ => none
+    match port with
+    -- A scalar port is renamed, not connected -- except an expression, which needs the wire
+    -- `instLocals` kept for it driven. The submodule is never consulted here, which is what keeps
+    -- `asyncFifo_singleClocked` reducible: `grayOfW`'s bindings are all of this shape.
+    | .sig x =>
+        match t with
+        | .expr e => some (.assign (instName ++ x) e)
+        | _ => none
+    | .elem a i =>
+        let w := ((m.inputs ++ m.outputs).find? (·.name == a)).map Port.width |>.getD 0
+        if (m.inputs.any (·.name == a)) then some (.setElem (instName ++ a) w i t.asExpr)
+        else t.drive (.elem (instName ++ a) w i)
 
 /-- The memories an instance adds to the parent, likewise prefixed. -/
 def instMems (instName : Name) (m : Module) : List (Name × Nat × Nat) :=
   m.mems.map fun (x, d, w) => (instName ++ x, d, w)
 
-/-- The arrays an instance adds to the parent. An array is never a port, so unlike `instLocals`
-there is nothing to filter: every one of them becomes a prefixed local. -/
+/-- The arrays an instance adds to the parent: the ones it declares, **and its array ports**.
+
+An array port of a submodule cannot be renamed through to the parent the way a scalar port is.
+`Expr.rename` maps an array by name, so a dynamically-selected port array would have to land on
+one array in the parent -- and the five inputs of a mesh switch come from five scattered slots of
+two different arrays. So the array is materialised here instead, as a prefixed local, and
+`instConnections` ties each element to whatever that element was bound to.
+
+This is the copy a design used to write by hand (`meshSwitch`'s `idata`), moved to the one place
+that can always do it. It costs nothing in the lowering: a combinational `setElem` is a scope
+rebinding, not an operation. -/
 def instArrays (instName : Name) (m : Module) : List (Name × Nat × Nat) :=
-  m.arrays.map fun (x, c, w) => (instName ++ x, c, w)
+  m.allArrays.map fun (x, c, w) => (instName ++ x, c, w)
 
 /-! The pieces of assembly are top-level rather than `let rec` inside `ofItems`, so that `simp` has
 equation lemmas for them -- which is what makes a parameterized module's well-formedness provable. -/
@@ -566,7 +663,7 @@ def processes (pending : List Stmt) : List Item → List Process
       flushPending pending ++
         { kind := ProcKind.sequential, sensitivity := [ev], body := body } :: processes [] rest
   | .inst iname sub bindings :: rest =>
-      let conns := instConnections iname bindings
+      let conns := instConnections iname bindings sub
       flushPending pending
         ++ (if conns.isEmpty then []
             else [{ kind := ProcKind.combinational, sensitivity := [], body := conns }])
@@ -603,8 +700,8 @@ def arrays : List Item → List (Name × Nat × Nat)
 def infos : List Item → List InstInfo
   | [] => []
   | .inst iname sub bindings :: rest =>
-      { name := iname, ports := sub.flatInputs ++ sub.flatOutputs,
-        inputs := sub.flatInputs.map Prod.fst, bindings := bindings } :: infos rest
+      { name := iname, ports := sub.inputs ++ sub.outputs,
+        inputs := sub.inputs.map Port.name, bindings := bindings } :: infos rest
   | _ :: rest => infos rest
 
 end Item

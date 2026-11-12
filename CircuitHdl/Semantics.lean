@@ -416,4 +416,19 @@ def State.memOf? (σ : State) (x : Name) : Option (List Nat) :=
   | some (.mem ws) => some (ws.map Value.toNat)
   | _ => none
 
+/-- The value of one `Signal` -- a scalar, or one element of a cell. `State.valueOf?` for a world
+in which an array element is a place a port can live. -/
+def State.valueAt? (σ : State) : Signal → Option Nat
+  | .sig x => σ.valueOf? x
+  | .elem a i => (σ.memOf? a).bind (·[i]?)
+  | .whole _ => none
+
+/-- Write one `Signal`. Fails rather than ignoring an out-of-range element or a whole array, so a
+bridge that computed the wrong place says so instead of writing nowhere. -/
+def State.setAt (σ : State) (s : Signal) (v : Value) : Except EvalError State :=
+  match s with
+  | .sig x => .ok (σ.set x v)
+  | .elem a i => σ.setMem a i v
+  | .whole a => .error (.check (.notAnArray a))
+
 end CircuitHdl

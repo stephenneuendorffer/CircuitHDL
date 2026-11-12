@@ -308,30 +308,46 @@ Flattening has already inlined the logic, so without this a mistyped port name w
 the real port unbound -- silently disconnecting a signal -- and a width mismatch would be reported
 against an inlined operand rather than against the port. -/
 def InstInfo.check (ctx : Ctx) (i : InstInfo) : Except CheckError Unit :=
-  i.bindings.forM fun (port, target) =>
-    match i.ports.lookup port with
-    | none => .error (.noSuchPort i.name port)
-    | some pw => do
-        -- A port tied to an array element is checked against that array's declaration, including
-        -- that the element exists: the index is fixed before the design runs, as every element
-        -- index is.
-        match target with
-        | BindTarget.sig parent => do
-            let w ← ctx.env.widthOf parent
-            expectWidth s!"port '{port}' of instance '{i.name}'" pw w
-        | BindTarget.elem a elemW idx => do
-            let _ ← ctx.elemWidth a elemW (some idx)
-            expectWidth s!"port '{port}' of instance '{i.name}'" pw elemW
-        | BindTarget.expr e => do
-            if !(i.inputs.contains port) then .error (.exprBoundOutput i.name port)
-            let w ← Expr.width? ctx e
-            expectWidth s!"port '{port}' of instance '{i.name}'" pw w
+  i.bindings.forM fun (port, target) => do
+    let pw ← portWidth port
+    let where_ := s!"port '{port.render}' of instance '{i.name}'"
+    -- A port tied to an array element is checked against that array's declaration, including
+    -- that the element exists: the index is fixed before the design runs, as every element
+    -- index is.
+    match target with
+    | BindTarget.sig parent => do
+        let w ← ctx.env.widthOf parent
+        expectWidth where_ pw w
+    | BindTarget.elem a elemW idx => do
+        let _ ← ctx.elemWidth a elemW (some idx)
+        expectWidth where_ pw elemW
+    | BindTarget.expr e => do
+        if !(i.inputs.contains port.name) then .error (.exprBoundOutput i.name port.name)
+        let w ← Expr.width? ctx e
+        expectWidth where_ pw w
+where
+  /-- The width of the port a binding names, against the submodule's own declarations.
+
+  An element binding is range-checked here, which the flat port list could not do: `.i[9].valid`
+  on a five-element port used to be the name `i.9.valid`, which is simply not a port, so it came
+  out as `noSuchPort` -- true, but naming a wire the design never wrote rather than the index that
+  is out of range. -/
+  portWidth : PortRef → Except CheckError Nat
+    | .sig x =>
+        match i.ports.find? (fun p => p.name == x && p.count.isNone) with
+        | some p => .ok p.width
+        | none => .error (.noSuchPort i.name x)
+    | .elem a k =>
+        match i.ports.find? (fun p => p.name == a) with
+        | some { count := some n, width := w, .. } =>
+            if k < n then .ok w else .error (.elemRange a k n)
+        | _ => .error (.noSuchPort i.name a)
 
 /-- Check every process in a module against its declarations, and every instance's bindings. -/
 def Module.check (m : Module) : Except CheckError Unit := do
   let env ← m.declEnv
   let ctx : Ctx :=
-    { env := env, inputs := m.flatInputs.map Prod.fst, arrays := m.arrays, mems := m.mems }
+    { env := env, inputs := (m.inputs.map Port.name), arrays := m.allArrays, mems := m.mems }
   m.insts.forM (InstInfo.check ctx)
   m.body.forM (Process.check ctx)
 
