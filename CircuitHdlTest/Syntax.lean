@@ -633,12 +633,12 @@ module! bundled #[(dw : Nat)] (slave s : handshake dw) -> (master m : handshake 
 }
 
 -- A slave port is incoming: `valid` and `data` arrive, `ready` departs. A master port mirrors it.
-#guard (bundled 8).inputs = [(`s.valid, 1), (`s.data, 8), (`m.ready, 1)]
-#guard (bundled 8).outputs = [(`m.valid, 1), (`m.data, 8), (`s.ready, 1)]
+#guard (bundled 8).flatInputs = [(`s.valid, 1), (`s.data, 8), (`m.ready, 1)]
+#guard (bundled 8).flatOutputs = [(`m.valid, 1), (`m.data, 8), (`s.ready, 1)]
 #guard (Module.check (bundled 8)).isOk
 
 -- The widths follow the interface's argument.
-#guard (bundled 32).inputs = [(`s.valid, 1), (`s.data, 32), (`m.ready, 1)]
+#guard (bundled 32).flatInputs = [(`s.valid, 1), (`s.data, 32), (`m.ready, 1)]
 
 /-! ### Array ports
 
@@ -664,11 +664,11 @@ module! xbar #[(n dw : Nat)] (slave i[n] : handshake dw) -> (master o[n] : hands
 -- The `rev` field still faces the other way, one element at a time. Spelled with `indexedName`
 -- because `` `i.0.valid `` is not name-literal syntax: an indexed name is a `Name.num`, which is
 -- also why it cannot collide with anything a design declares.
-#guard (xbar 2 8).inputs
+#guard (xbar 2 8).flatInputs
   = (List.range 2).map (fun k => (indexedName `i k ++ `valid, 1))
     ++ (List.range 2).map (fun k => (indexedName `i k ++ `data, 8))
     ++ (List.range 2).map (fun k => (indexedName `o k ++ `ready, 1))
-#guard (xbar 2 8).outputs
+#guard (xbar 2 8).flatOutputs
   = (List.range 2).map (fun k => (indexedName `o k ++ `valid, 1))
     ++ (List.range 2).map (fun k => (indexedName `o k ++ `data, 8))
     ++ (List.range 2).map (fun k => (indexedName `i k ++ `ready, 1))
@@ -708,7 +708,7 @@ module! bus #[(n : Nat)] (d[n] : 8) -> (sum : 8) {
   assign sum = d[0] + d[1];
 }
 
-#guard (bus 3).inputs = (List.range 3).map (fun k => (indexedName `d k, 8))
+#guard (bus 3).flatInputs = (List.range 3).map (fun k => (indexedName `d k, 8))
 #guard ((bus 3).settle ((bus 3).initState.apply
   [(indexedName `d 0, Cell.sig (Value.ofNat 8 5)),
    (indexedName `d 1, Cell.sig (Value.ofNat 8 7))])).toOption.bind

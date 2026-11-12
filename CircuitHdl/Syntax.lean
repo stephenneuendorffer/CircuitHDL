@@ -1027,18 +1027,21 @@ private def elabItem (ctx : SymCtx) : TSyntax `circuit_item → MacroM (TSyntax 
 An array port contributes `(List.range n).map ..` rather than `n` entries, which is what lets its
 size be a parameter: the macro never has to know how many there are. -/
 private def mkPortList (ps : Array PortDecl) : MacroM (TSyntax `term) := do
-  let nil ← `(([] : List (Name × Nat)))
+  let nil ← `(([] : List Port))
   ps.foldrM (init := nil) fun p acc =>
     match p.count, p.field with
-    | none, _ => `(($(quote p.name.getId), $(p.width)) :: $acc)
+    | none, _ => `(Port.scalar $(quote p.name.getId) $(p.width) :: $acc)
     -- An array of *bundles*: the index sits between the port and its field, so element `k`'s
-    -- `valid` is `i.k.valid`.
+    -- `valid` is `i.k.valid`. `Port.elemName` is the one spelling of that, shared with the
+    -- boundary so that the declaration and what `hw.module` is given cannot drift.
     | some n, some f =>
         `((List.range $n).map
-            (fun k => (indexedName $(quote (p.name.getId.getPrefix)) k ++ $(quote f.getId),
-                       $(p.width))) ++ $acc)
+            (fun k => Port.scalar
+              (indexedName $(quote (p.name.getId.getPrefix)) k ++ $(quote f.getId))
+              $(p.width)) ++ $acc)
     | some n, none =>
-        `((List.range $n).map (fun k => (indexedName $(quote p.name.getId) k, $(p.width))) ++ $acc)
+        `((List.range $n).map
+            (fun k => Port.scalar (indexedName $(quote p.name.getId) k) $(p.width)) ++ $acc)
 
 /-- Build a `List Item` literal from a parsed module body.
 

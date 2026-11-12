@@ -582,7 +582,7 @@ inductive Drive where
 
 /-- Classify one signal. -/
 def Module.driveOf (m : Module) (x : Name) : Except CirctError Drive := do
-  if m.inputs.any (·.1 == x) then return .input
+  if m.flatInputs.any (·.1 == x) then return .input
   let combinational := m.body.any fun p => !p.isSequential && p.writes x
   match (m.driversOf x).eraseDups with
   | [] => return (if combinational then .wire else .undriven)
@@ -635,10 +635,10 @@ def Module.toVeir (m : Module) :
     | .ok env => pure env
     | .error e => throw (.check e)
   let lctx : Ctx :=
-    { env := env, inputs := m.inputs.map Prod.fst, arrays := m.arrays, mems := m.mems }
+    { env := env, inputs := m.flatInputs.map Prod.fst, arrays := m.arrays, mems := m.mems }
 
   -- Ports. Inputs become block arguments, in order; outputs become `hw.output` operands.
-  let portNames := m.inputs.map Prod.fst ++ m.outputs.map Prod.fst
+  let portNames := m.flatInputs.map Prod.fst ++ m.flatOutputs.map Prod.fst
   for x in portNames do
     for y in portNames do
       if x ≠ y && portIdent x == portIdent y then throw (.portNameCollision x y)
@@ -651,13 +651,13 @@ def Module.toVeir (m : Module) :
     | throw (.verifier "the created module has no block")
   let (vctx, bodyRegion) := Veir.WfRewriter.createRegion! vctx
   let (vctx, bodyBlock) := Veir.WfRewriter.createBlock! vctx
-    (m.inputs.map (fun (_, w) => (Veir.IntegerType.signless w : Veir.TypeAttr))).toArray
+    (m.flatInputs.map (fun (_, w) => (Veir.IntegerType.signless w : Veir.TypeAttr))).toArray
     (some (.atEnd bodyRegion))
   let modTy : Veir.HW.ModuleType :=
-    { ports := (m.inputs.map (fun (x, w) =>
+    { ports := (m.flatInputs.map (fun (x, w) =>
           ({ name := portIdent x, type := Veir.IntegerType.signless w, dir := .input } :
             Veir.HW.ModulePort))
-        ++ m.outputs.map (fun (x, w) =>
+        ++ m.flatOutputs.map (fun (x, w) =>
           ({ name := portIdent x, type := Veir.IntegerType.signless w, dir := .output } :
             Veir.HW.ModulePort))).toArray }
   let modProps : Veir.HWModuleProperties :=
@@ -668,7 +668,7 @@ def Module.toVeir (m : Module) :
         modProps (some (.atEnd topBlock))
     | throw (.verifier "could not create the hw.module")
 
-  let args : Scope := m.inputs.zipIdx.map fun ((x, w), i) =>
+  let args : Scope := m.flatInputs.zipIdx.map fun ((x, w), i) =>
     (.sig x, { ptr := .blockArgument ⟨bodyBlock, i⟩, width := w })
 
   let init : Emit := { ctx := vctx, block := bodyBlock, insertAt := .atEnd bodyBlock }
@@ -773,7 +773,7 @@ def Module.toVeir (m : Module) :
       set { s with ctx := Veir.WfRewriter.eraseOp! s.ctx placeholder }
 
     -- `hw.output` closes the block, below the registers.
-    let outputs ← m.outputs.mapM fun (x, _) => lookupVal σ (.sig x)
+    let outputs ← m.flatOutputs.mapM fun (x, _) => lookupVal σ (.sig x)
     modify fun s => { s with insertAt := .atEnd s.block }
     let _ ← build (.hw .output) () #[] (outputs.map Val.ptr).toArray
     return ()) lctx) init

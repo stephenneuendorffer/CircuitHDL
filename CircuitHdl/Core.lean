@@ -262,11 +262,71 @@ structure InstInfo where
   bindings : List (Name × BindTarget)
   deriving Repr
 
+/-- One port of a module.
+
+A scalar port is a name and a width, as it always was. An **array port** -- `slave i[5] : axis fw`
+-- is `n` wires at the boundary and *one cell* inside, which is the whole point of the structure:
+a port array and a `wire a[5]` are the same object, five wires selected by a mux, differing only
+in who drives them. Holding it as a cell is what lets `i[sel].valid` be an `Expr.select` like any
+other array read, instead of something the macro had to flatten away before anything could check
+it.
+
+The two views are `Port.wires` -- what the boundary has -- and `Port.signals`, what the state has.
+-/
+structure Port where
+  /-- What the language knows it by, and the array's name when `count` is set: `i.valid`. -/
+  name : Name
+  /-- The width of one wire. -/
+  width : Nat
+  /-- `none` for an ordinary scalar port; `some n` for an array port of `n` elements. -/
+  count : Option Nat := none
+  /-- Where the index goes **at the boundary**, and nowhere else.
+
+  `none` puts it last, so `d[4] : 8` emits `d.0 … d.3` -- the spelling every other array in the
+  package uses. `some f` puts it *before* the field, so `slave i[5]` emits `i.0.valid`: an array
+  of interface ports is an array of bundles, and `i[k]` is one bundle.
+
+  This is the one place an array element is not `indexedName` of its array, which is why the
+  split is recorded here rather than recomputed: `Port.elemName` is the single spelling, as
+  `arrayRegName` is for array registers. -/
+  field : Option Name := none
+  deriving Repr, DecidableEq, Inhabited
+
+namespace Port
+
+/-- The boundary name of element `k`. -/
+def elemName (p : Port) (k : Nat) : Name :=
+  match p.field with
+  | none => indexedName p.name k
+  | some f => indexedName p.name.getPrefix k ++ f
+
+/-- The wires this port is at the module boundary, in order. One for a scalar, `n` for an array --
+`hw.module` has a flat port list and so does every testbench, so this is the view the lowering and
+the harness take. -/
+def wires (p : Port) : List (Name × Nat) :=
+  match p.count with
+  | none => [(p.name, p.width)]
+  | some n => (List.range n).map fun k => (p.elemName k, p.width)
+
+/-- The same wires as the *signals* they denote inside the module: a scalar is itself, an array
+port's element `k` is element `k` of the one cell. Paired with `wires` positionally, which is what
+lets the bridge map a block argument to the place the evaluator keeps it. -/
+def signals (p : Port) : List (Signal × Nat) :=
+  match p.count with
+  | none => [(.sig p.name, p.width)]
+  | some n => (List.range n).map fun k => (.elem p.name k, p.width)
+
+/-- An array port's declaration, in the shape `Module.arrays` uses. -/
+def asArray? (p : Port) : Option (Name × Nat × Nat) :=
+  p.count.map fun n => (p.name, n, p.width)
+
+end Port
+
 /-- A very small module shape. -/
 structure Module where
   name : Name
-  inputs : List (Name × Nat)
-  outputs : List (Name × Nat)
+  inputs : List Port
+  outputs : List Port
   regs : List (Name × Nat)
   /-- Array declarations, as `(name, element count, element width)`.
 
@@ -280,6 +340,36 @@ structure Module where
   insts : List InstInfo := []
   body : List Process
   deriving Repr
+
+/-- A scalar port, which is what most ports are and what every port was before array ports carried
+their arity. Also the coercion, so a module written out by hand still says `inputs := [(`a, 1)]`. -/
+def Port.scalar (x : Name) (w : Nat) : Port := { name := x, width := w }
+
+instance : CoeHead (Name × Nat) Port := ⟨fun (x, w) => Port.scalar x w⟩
+
+namespace Module
+
+/-- The input wires at the boundary, with an array port expanded. This is what `hw.module`'s port
+list, the block arguments and every testbench want; `m.inputs` is what the *language* declared. -/
+def flatInputs (m : Module) : List (Name × Nat) := m.inputs.flatMap Port.wires
+
+/-- The output wires at the boundary. -/
+def flatOutputs (m : Module) : List (Name × Nat) := m.outputs.flatMap Port.wires
+
+/-- Every array port, in the shape `m.arrays` uses -- because that is what an array port *is*
+inside the module, and the width rules and the semantics should not have to ask which it was. -/
+def portArrays (m : Module) : List (Name × Nat × Nat) :=
+  (m.inputs ++ m.outputs).filterMap Port.asArray?
+
+/-- Every array a module has, declared or ported. -/
+def allArrays (m : Module) : List (Name × Nat × Nat) := m.arrays ++ m.portArrays
+
+/-- The ports that are single wires, as `(name, width)`. These are the ones that belong in the
+environment as scalars; an array port belongs in `allArrays` instead. -/
+def scalarPorts (ps : List Port) : List (Name × Nat) :=
+  ps.filterMap fun p => if p.count.isNone then some (p.name, p.width) else none
+
+end Module
 
 /-!
 ## Module assembly
@@ -433,7 +523,7 @@ def instRenaming (instName : Name) (bindings : List (Name × BindTarget)) :
 under its prefixed name. -/
 def instLocals (instName : Name) (bindings : List (Name × BindTarget)) (m : Module) :
     List (Name × Nat) :=
-  (m.inputs ++ m.outputs ++ m.regs).filterMap fun (x, w) =>
+  (Module.scalarPorts m.inputs ++ Module.scalarPorts m.outputs ++ m.regs).filterMap fun (x, w) =>
     match bindings.lookup x with
     -- An expression-bound port needs the wire, at the port's own width, which is why this is
     -- decided here and not in the macro.
@@ -513,14 +603,14 @@ def arrays : List Item → List (Name × Nat × Nat)
 def infos : List Item → List InstInfo
   | [] => []
   | .inst iname sub bindings :: rest =>
-      { name := iname, ports := sub.inputs ++ sub.outputs, inputs := sub.inputs.map Prod.fst,
-        bindings := bindings } :: infos rest
+      { name := iname, ports := sub.flatInputs ++ sub.flatOutputs,
+        inputs := sub.flatInputs.map Prod.fst, bindings := bindings } :: infos rest
   | _ :: rest => infos rest
 
 end Item
 
 /-- Assemble a `Module` from its ports and body items. -/
-def Module.ofItems (name : Name) (ins outs : List (Name × Nat)) (items : List Item) : Module :=
+def Module.ofItems (name : Name) (ins outs : List Port) (items : List Item) : Module :=
   { name := name
     inputs := ins
     outputs := outs

@@ -299,9 +299,9 @@ def Process.exec (σ : State) (p : Process) : Except EvalError State :=
 
 /-- Every declared signal at zero, and every array and memory zero-filled to its length. -/
 def Module.initState (m : Module) : State :=
-  let sigs := (m.inputs ++ m.outputs ++ m.regs).foldl
+  let sigs := (Module.scalarPorts m.inputs ++ Module.scalarPorts m.outputs ++ m.regs).foldl
     (fun σ (x, w) => if σ.any (·.1 == x) then σ else σ ++ [(x, Cell.sig (Value.ofNat w 0))]) []
-  (m.arrays ++ m.mems).foldl
+  (m.allArrays ++ m.mems).foldl
     (fun σ (x, d, w) =>
       if σ.any (·.1 == x) then σ else σ ++ [(x, Cell.mem (List.replicate d (Value.ofNat w 0)))])
     sigs

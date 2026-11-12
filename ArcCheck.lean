@@ -131,7 +131,7 @@ private def driverLines (d : ArcDesign) (sched : List ArcTick) : List String := 
     for c in (if t.reset then d.clocks else [t.clock]) do
       lines := lines ++ [set c 1 0, step, set c 1 1, step]
     for x in d.observe do
-      let w := (d.m.outputs.lookup x).getD 1
+      let w := (d.m.flatOutputs.lookup x).getD 1
       lines := lines ++
         [ s!"    %t{i}_{portIdent x} = arc.sim.get_port %model, \"{portIdent x}\" : i{w}, {instTy d}",
           s!"    arc.sim.emit \"t{i}_{portIdent x}\", %t{i}_{portIdent x} : i{w}" ]

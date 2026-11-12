@@ -299,7 +299,7 @@ def addDecl (env : Env) : Name × Nat → Except CheckError Env
 
 /-- The width environment of a module: its inputs, outputs and regs, checked for consistency. -/
 def Module.declEnv (m : Module) : Except CheckError Env :=
-  (m.inputs ++ m.outputs ++ m.regs).foldlM addDecl []
+  (Module.scalarPorts m.inputs ++ Module.scalarPorts m.outputs ++ m.regs).foldlM addDecl []
 
 /-- Check one instance's bindings: every bound name must be a real port, and the signal it is tied
 to must be the port's width.
@@ -331,7 +331,7 @@ def InstInfo.check (ctx : Ctx) (i : InstInfo) : Except CheckError Unit :=
 def Module.check (m : Module) : Except CheckError Unit := do
   let env ← m.declEnv
   let ctx : Ctx :=
-    { env := env, inputs := m.inputs.map Prod.fst, arrays := m.arrays, mems := m.mems }
+    { env := env, inputs := m.flatInputs.map Prod.fst, arrays := m.arrays, mems := m.mems }
   m.insts.forM (InstInfo.check ctx)
   m.body.forM (Process.check ctx)
 

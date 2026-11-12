@@ -375,7 +375,7 @@ def VeirBridge.ofVeir (m : Module) (ctx : Veir.WfIRContext Veir.OpCode)
   for (op, _) in info.regs do
     let some cur := blank.regs[op.id]? | none
     regWidths := regWidths.push (match cur with | .int w _ => w | _ => 0)
-  return { ctx, info, inputs := m.inputs.toArray, outputs := m.outputs.toArray,
+  return { ctx, info, inputs := m.flatInputs.toArray, outputs := m.flatOutputs.toArray,
            regKeys, memNames, arrays := m.arrays.toArray, blank, regWidths }
 
 def VeirBridge.of (m : Module) : Option VeirBridge := do
