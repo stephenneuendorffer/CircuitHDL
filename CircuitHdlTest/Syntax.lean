@@ -260,6 +260,27 @@ rules through the AST-level checker on hand-built modules.
     body := [{ kind := .combinational, sensitivity := []
                body := [Stmt.assign `a (Expr.lit 1 0)] }] }
 
+-- An element of an **input array port**, which is the same question one level down. Stated
+-- against a hand-built module because the macro answers it first, by name, and would never let
+-- this reach `Module.check` -- and `Module.check` is what an AST built any other way goes through.
+/-- info: Except.error (CircuitHdl.CheckError.assignToInput `i.valid) -/
+#guard_msgs in
+#eval Module.check
+  { name := `bad, inputs := [{ name := `i.valid, width := 1, count := some 2 }]
+    outputs := [Port.scalar `v 1], regs := []
+    body := [{ kind := .combinational, sensitivity := []
+               body := [Stmt.setElem `i.valid 1 0 (Expr.lit 1 0)] }] }
+
+-- And through a dynamic index, which is the form that did not exist at all before an array port
+-- carried its arity.
+/-- info: Except.error (CircuitHdl.CheckError.assignToInput `i.valid) -/
+#guard_msgs in
+#eval Module.check
+  { name := `bad, inputs := [{ name := `i.valid, width := 1, count := some 2 }]
+    outputs := [Port.scalar `v 1], regs := []
+    body := [{ kind := .combinational, sensitivity := []
+               body := [Stmt.setDyn `i.valid 1 (Expr.lit 1 0) (Expr.lit 1 0)] }] }
+
 /-- info: Except.error (CircuitHdl.CheckError.conflictingDecl `q 8 4) -/
 #guard_msgs in
 #eval Module.check
@@ -677,6 +698,24 @@ module! xbar #[(n dw : Nat)] (slave i[n] : handshake dw) -> (master o[n] : hands
   = (List.range 2).map (fun k => (indexedName `o k ++ `valid, 1))
     ++ (List.range 2).map (fun k => (indexedName `o k ++ `data, 8))
     ++ (List.range 2).map (fun k => (indexedName `i k ++ `ready, 1))
+
+-- Binding an element that does not exist. While a port list was flat the only answer available
+-- was `noSuchPort`, naming the wire `i.9.valid` -- true, but a name no design ever wrote, where
+-- the fault is the index. `PortRef` keeps the index, so an array port gets the range check an
+-- array element has always had.
+/-- info: Except.error (CircuitHdl.CheckError.elemRange `i.valid 9 2) -/
+#guard_msgs in
+#eval Module.check (module! badElem (v : 1) -> (q : 1) {
+  assign q = 0;
+  (xbar 2 8) u (.i[9].valid(v));
+})
+
+-- The same binding in range is accepted, so the pin above is about the index and not about the
+-- form of the binding.
+#guard (Module.check (module! okElem (v : 1) -> (q : 1) {
+  assign q = 0;
+  (xbar 2 8) u (.i[1].valid(v));
+})).isOk
 
 /-! Being one array rather than `n` names, an array port is indexed by a **value**. `i[sel].valid`
 is an `Expr.select` and lowers to the mux chain `wire a[4]` already lowered to.

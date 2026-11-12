@@ -136,22 +136,19 @@ Two places keep their five terms written out, and both are reductions rather tha
 own input `k`. A loop generates statements, not a fold over an expression, so there is nothing to
 gain by hiding them.
 
-`ivalid` and `idata` are copies of the input ports into arrays. That is not bookkeeping: an array
-can be indexed by a *value* where an array port cannot -- `i[k].valid` is one of five separate
-ports, not storage -- so the crossbar is `idata[own[j]]`, the mux chain it always was, now
-generated from the array rather than written as four nested ternaries. -/
+The crossbar is `i[own[j]].data`, read **straight from the port**: `own[j]` is a value, and an
+array port is an array, so this is the same mux chain a `wire a[5]` would give. It used to need
+`wire idata[5]` and a copy loop, because a port was `n` separate wires with nothing to select
+from; the copy still exists, but it is now made by the flattener, which has to materialise an
+array port of a submodule anyway. The design says what it means and the copy is nobody's
+business. -/
 module! meshSwitch #[(fw : Nat)]
     (clk : 1, rst : 1, myX : 2, myY : 2, slave i[5] : axis fw) -> (master o[5] : axis fw) {
   -- Which output each input wants. One routing unit per input, so the policy is stated once and
   -- instantiated, rather than copied five times.
   wire rq[5] : 3;
-  -- The input ports as arrays, so the crossbar can select one by value.
-  wire ivalid[5] : 1;
-  wire idata[5] : fw;
 
   for k < 5 {
-    assign ivalid[k] = i[k].valid;
-    assign idata[k] = i[k].data;
     -- The destination slices go straight into the ports: an input bound to an expression keeps a
     -- wire of its own and the expression drives it, so the slices need no array apiece.
     meshRouteUnit r[k]
@@ -196,8 +193,8 @@ module! meshSwitch #[(fw : Nat)]
 
     -- The crossbar, feeding the output *register* rather than the port: what the input that owns
     -- output `j` is offering this cycle. `own[j]` is a value, so this is a dynamic read.
-    assign ov[j] = ivalid[own[j]];
-    assign od[j] = idata[own[j]];
+    assign ov[j] = i[own[j]].valid;
+    assign od[j] = i[own[j]].data;
 
     -- A flit moves into output `j` when the output is allocated, its register is empty, and the
     -- owning input is offering. No `o[j].ready` term: that is the loop this design exists to

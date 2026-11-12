@@ -258,15 +258,17 @@ guards, and it is not visible from any end-to-end test: the old switch delivered
 
 -- Not vacuous: the mesh really does have logic to order, and a good deal of it.
 --
--- 2080 and not the 1600 it was while an array port was `n` scalars. Binding a scalar port is a
+-- 1920 and not the 1600 it was while an array port was `n` scalars. Binding a scalar port is a
 -- *renaming*, which costs no statement; an array port cannot be renamed through -- `Expr.rename`
 -- maps an array by name, and a switch's five inputs come from five scattered slots -- so each of
--- the thirty array-port wires is connected instead, thirty statements across sixteen switches.
+-- the thirty array-port wires is connected instead: +480 across sixteen switches. The switch then
+-- gave back 160 of them, since reading `i[own[j]].data` straight from the port is what let it
+-- delete the two copy arrays it used to need (-10 statements apiece).
 --
--- They cost nothing in the IR: a combinational `setElem` lowers to a scope rebinding, so the mesh
--- is still 320 `seq.firreg`s and about 7200 operations, the figures in `CircuitHdlTest/Mesh4x4`.
--- What they cost is here, in the length of the thing `SettleOrder` sorts.
-#guard (mesh4x4 13).settleOrder.steps.length = 2080
-#guard (meshSwitch 13).settleOrder.steps.length = 95
+-- The connections cost nothing in the IR: a combinational `setElem` lowers to a scope rebinding,
+-- so the mesh is still 320 `seq.firreg`s and 7221 lines, the figures in `CircuitHdlTest/Mesh4x4`,
+-- unmoved across the whole change. What they cost is here, in the length of what gets sorted.
+#guard (mesh4x4 13).settleOrder.steps.length = 1920
+#guard (meshSwitch 13).settleOrder.steps.length = 85
 
 end CircuitHdl

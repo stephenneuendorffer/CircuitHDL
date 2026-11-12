@@ -43,6 +43,45 @@ info: "builtin.module"() ({
 -/
 #guard_msgs in #eval do IO.println (← emit swapComb)
 
+/-! #### Where an array port meets the boundary
+
+An array port is one array inside the module and `n` wires outside it. The join is two functions
+that have to stay in step: `Port.wires` names the wires, `Port.signals` says which element each
+one is, and `Module.toVeir` pairs them positionally. Nothing else decides either.
+
+**Reversing them both is not a bug**, which is worth knowing before trying to test for it.
+`Port.signals` reversed leaves every mesh scenario green *and* this pin green, because the inputs
+and the outputs reverse together and what is left is a consistent renaming of the boundary -- the
+same hardware with element `k` called `i.(n-1-k)`. Measured, not reasoned about.
+
+**Them drifting apart is a bug, and this is the only thing that catches it.** Reversing
+`Port.wires` alone reddens two checks here and leaves the whole mesh green -- the netlist theorems
+cannot see it, because they drive the simulator through the same `Port.signals` the lowering uses
+and so agree with it by construction, whatever it says.
+
+`portPick` crosses `valid` and passes `data` straight through, so the operand list is asymmetric
+and a drift has to disturb it. The names carry the other decision: the index goes before the
+field, so element 0 of `i`'s `valid` is `i_0_valid` and not `i_valid_0`. -/
+module! portPick #[] (slave i[2] : axis 2) -> (master o[2] : axis 2) {
+  assign o[0].valid = i[1].valid;
+  assign o[1].valid = i[0].valid;
+  assign o[0].data = i[0].data;
+  assign o[1].data = i[1].data;
+  for k < 2 { assign i[k].ready = 0; }
+}
+
+/--
+info: "builtin.module"() ({
+  ^2():
+    "hw.module"() <{"module_type" = !hw.modty<input i_0_valid : i1, input i_1_valid : i1, input i_0_data : i2, input i_1_data : i2, input o_0_ready : i1, input o_1_ready : i1, output o_0_valid : i1, output o_1_valid : i1, output o_0_data : i2, output o_1_data : i2, output i_0_ready : i1, output i_1_ready : i1>, "parameters" = [], "per_port_attrs" = [], "sym_name" = "portPick"}> ({
+      ^4(%arg4_0 : i1, %arg4_1 : i1, %arg4_2 : i2, %arg4_3 : i2, %arg4_4 : i1, %arg4_5 : i1):
+        %6 = "hw.constant"() <{"value" = false}> : () -> i1
+        "hw.output"(%arg4_1, %arg4_0, %arg4_2, %arg4_3, %6, %6) : (i1, i1, i2, i2, i1, i1) -> ()
+    }) : () -> ()
+}) : () -> ()
+-/
+#guard_msgs in #eval do IO.println (← emit portPick)
+
 /-! ### What VeIR makes of it
 
 `toVeir` builds the IR operation by operation and runs `WfIRContext.verify` over the result. There

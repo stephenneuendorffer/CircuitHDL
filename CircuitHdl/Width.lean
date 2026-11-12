@@ -256,10 +256,15 @@ def Stmt.check (ctx : Ctx) : Stmt → Except CheckError Unit
       expectWidth s!"element of memory '{m}'" declaredW elemW
       let _ ← Expr.width? ctx addr
       expectWidth s!"write to memory '{m}'" elemW (← Expr.width? ctx data)
+  -- An array may now be an input *port*, which a plain array never was -- so a write to an
+  -- element has to ask the same question `.assign` has always asked. Until array ports carried
+  -- their arity this was unreachable and only the macro caught it, by name.
   | .setElem a elemW i data => do
+      if ctx.inputs.contains a then .error (.assignToInput a)
       let _ ← ctx.elemWidth a elemW (some i)
       expectWidth s!"write to array '{a}'" elemW (← Expr.width? ctx data)
   | .setDyn a elemW addr data => do
+      if ctx.inputs.contains a then .error (.assignToInput a)
       let _ ← ctx.elemWidth a elemW none
       let _ ← Expr.width? ctx addr
       expectWidth s!"write to array '{a}'" elemW (← Expr.width? ctx data)
