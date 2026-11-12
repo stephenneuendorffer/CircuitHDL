@@ -167,23 +167,44 @@ Things the surface syntax does *not* have, each of which has bitten:
   the port keeps its wire, the submodule drives it, and the expression drives it too — two
   drivers, which nothing else here would report, because multiple combinational drivers are legal
   (`swapComb` relies on last-write-wins). `InstInfo` carries the input list for this one question.
-- **An array port is `n` ports, not an array**, and it is an array of **bundles**: `slave i[5] :
-  axis fw` declares `i.0.valid …`, selected as `i[k].valid`, with the index between the port and
-  the field. They are scalars, so the index is elaboration-time only.
+- **An array port is an array.** `slave i[5] : axis fw` is five wires per field at the boundary
+  and **one cell** inside, selected as `i[k].valid` -- the index between the port and the field,
+  because an array of interface ports is an array of bundles. So `i[sel].valid` is an ordinary
+  `Expr.select`: a port array and a `wire a[5]` are the same five wires selected the same way, and
+  differ only in who drives them.
 
-  It was `i.valid[k]` first, which needed no new expression grammar at all -- `qualify` already
-  names a field with a dot and Lean lexes `i.valid` as one identifier, so `i.valid[k]` was the
-  *existing* index rule applied to it. The binding side is what moved it: a binding names a port of
-  the submodule, so `.i.valid[k](..)` would have had to mean "the `k`th of the ports `i.valid`"
-  while reading as an index into a signal, and nothing on that side is a signal. Making the port
-  side `i[k].valid` costs three things -- a postfix `.` on `circuit_expr`, an `assign a[i].f =`
-  statement rule, and `PortDecl.field` so `mkPortList` knows where to put the index.
+  It was `n` separate ports first, erased by the macro, and the cost was not abstract: a dynamic
+  index was a macro error, `Module.check` had nothing to range-check an index against, and
+  `meshSwitch` carried `wire ivalid[5]`/`wire idata[5]` and a copy loop purely to get a crossbar.
 
-  **The port side of a binding is its own syntax category (`circuit_ref`), not `circuit_expr`**,
-  and it has to be: `circuit_expr` now contains the call rule, so `.b(wbnext)` parses there as the
-  *call* `b(wbnext)` and swallows the parentheses the binding needs. Its three rules (`x`, `x[i]`,
-  `x[i].f`) are unambiguous -- Lean's longest-match takes the third where it applies -- so the
-  category is a restriction rather than a workaround.
+  `Module.inputs` is `List Port` -- the *declaration*. `Module.flatInputs` is the boundary, which
+  is what `hw.module`, the harness and `ArcCheck` want. **`Port.wires` and `Port.signals` are the
+  join and must stay in step**; see the `portPick` pin below.
+
+- **An array port of a submodule is materialised, not renamed.** `Expr.rename` maps an array by
+  *name*, so a dynamically-selected port array would have to land on one array in the parent --
+  and a mesh switch's five inputs come from `lvalid[37]`, `[4]`, `[27]`, `[18]` and `inj[5]`, four
+  scattered slots and a different array. So `instArrays` gives the instance a prefixed local array
+  and `instConnections` ties each element to what it was bound to, which is the **first binding
+  whose direction matters**: an input element is driven from its binding, an output drives into it.
+
+  The copy a design used to write by hand did not disappear; it moved here. It costs nothing in
+  the IR -- a combinational `setElem` is a scope rebinding -- and that was measured rather than
+  assumed: the mesh is **320 `seq.firreg`s and 7221 lines** before and after. What it costs is
+  `settleOrder.steps`, 1600 to 1920.
+
+- **The binding key is a `PortRef`, and making it one was worth 43x.** `.i[2].valid` is
+  `PortRef.elem \`i.valid 2`, because the macro has the base, the index and the field in hand.
+  The first version flattened them into the boundary name `i.2.valid` and recovered
+  `(array, index)` in the flattener by building the submodule's element table -- correct, and
+  `whnf` rebuilt that table *per binding*, unfolding `grayOfW` 528,288 times against 12,192 now.
+  `asyncFifo_singleClocked` went 5x over its heartbeat budget. It is the same lesson as the ports
+  themselves: say what you mean rather than encoding it in a name for something else to parse.
+
+  What remains is ~18% more reduction than a pair-typed port list (300,307 `List.rec` against
+  353,992), which took those two symbolic-width `rfl` proofs from under the 200,000 default to
+  250,000. They are set to 400,000, with the numbers written down beside them.
+
 - **`if isEdge(x, y, d)` is the elaboration-time conditional**, where `if c` on a signal is a mux.
   One arm is built and the other does not exist. A **call** marks it, as well as the explicit
   `#(..)`: a Lean function in condition position can only be a `Bool`, where a hardware condition
@@ -407,6 +428,18 @@ Two **design**-level mutations cover the array work, and the first is the more i
 
 Skewing `selectChain`'s comparison (`addrEq addr (i + 1)`) reddens three theorems in
 `CircuitHdlTest/RegFile.lean` and the in-range pin in `CircuitHdlTest/Circt.lean`.
+
+**`portPick` in `CircuitHdlTest/Circt.lean` covers the one thing the netlist theorems cannot.**
+An array port is one cell inside and `n` wires outside; `Port.wires` names them and
+`Port.signals` says which element each is. Reversing **both** is not a defect -- the inputs and
+the outputs reverse together and what is left is a consistent renaming of the boundary, and every
+mesh scenario stays green. Reversing **one** is, and only `portPick` sees it: the netlist
+theorems drive `Veir.Netlist` through the same `Port.signals` the lowering uses, so they agree
+with it by construction whatever it says. Measured both ways.
+
+Two mesh mutations cover the flattener's per-element connections, which replaced a renaming:
+skewing one binding (`.i[0].valid(lvalid[srcIdx(x, y, 0)])` to `srcIdx(x, y, 1)`) and making
+`instConnections` ignore direction each redden `CircuitHdlTest/Mesh4x4.lean`.
 
 **What is *not* independently mutable is the out-of-range element**, and this was worth finding
 out rather than assuming. "Element 0 is the chain's final else" and "element 0 is the chain's

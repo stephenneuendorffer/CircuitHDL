@@ -375,7 +375,7 @@ and index it, which is what the loop is for.
 A loop carries whole **items**, so it generates instances as well as statements:
 
 ```
-slave i[5] : axis fw                      -- an array port: i[k].valid is one of five ports
+slave i[5] : axis fw                      -- an array port: one array per field, i[k].valid
 for k < 5 {
   meshRouteUnit r[k] (.dstX(dx[k]), .dir(rq[k]));
 }
@@ -388,9 +388,16 @@ at all — flattening maps it so that a read of the bound port becomes an elemen
 an element write. That is what makes a mesh expressible: sixteen instances each wired to a
 different slice of the same link arrays. `Examples/Mesh4x4.lean` is written this way.
 
-An array **port** is `n` ports rather than an array, because `Module.inputs` is a list of scalars
-and a port is one wire per element in any hardware. So they are indexed at elaboration time only;
-there is no cell to select from at run time.
+An array **port** is `n` wires per field at the boundary and one **array** inside. `i[k].valid`
+is element `k` — the index between the port and the field, because an array of interface ports is
+an array of bundles — and `i[sel].valid` selects by a *value*, lowering to the same mux chain
+`wire a[5]` does. A port array and a wire array are the same five wires; they differ only in who
+drives them.
+
+`Module.inputs` is the declaration and `Module.flatInputs` is the boundary, which is what
+`hw.module` and any testbench want. Binding a submodule's array port connects it element by
+element rather than renaming it — the only binding whose *direction* matters, since an input
+element is driven from its binding and an output drives into it.
 
 ### Interfaces
 
