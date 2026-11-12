@@ -673,6 +673,36 @@ module! xbar #[(n dw : Nat)] (slave i[n] : handshake dw) -> (master o[n] : hands
     ++ (List.range 2).map (fun k => (indexedName `o k ++ `data, 8))
     ++ (List.range 2).map (fun k => (indexedName `i k ++ `ready, 1))
 
+/-! Being separate ports rather than storage, they are indexed only at elaboration time: there is
+no cell to select from, so a dynamic index is an error rather than a mux.
+
+This is the one claim about array ports that a positive test cannot make, and it was *wrong* in
+the message it gave until the error was split: a dynamic index used to report `indeterminate`,
+whose advice is "give it one with an ascription", which fixes a width that could not be inferred
+and fixes nothing at all about an index naming one of five ports. `notStatic` is the same failure
+with the sentence that matches it.
+-/
+
+/--
+error: this has to be fixed before the design runs, and it is not: an index into an array port
+  names one of several separate ports, so there is nothing to select from at run time
+-/
+#guard_msgs(error, whitespace := lax) in
+module! dynBundlePort #[] (slave i[4] : handshake 8, sel : 2) -> (v : 1) {
+  assign v = i[sel].valid;
+}
+
+-- The plain form reaches it by a different path in `checkExpr` -- no field to look up -- so it
+-- needs its own pin.
+/--
+error: this has to be fixed before the design runs, and it is not: an index into an array port
+  names one of several separate ports, so there is nothing to select from at run time
+-/
+#guard_msgs(error, whitespace := lax) in
+module! dynPlainPort #[] (d[4] : 8, sel : 2) -> (v : 8) {
+  assign v = d[sel];
+}
+
 /-- A plain array port, and the count may be a parameter: the macro never evaluates it. -/
 module! bus #[(n : Nat)] (d[n] : 8) -> (sum : 8) {
   assign sum = d[0] + d[1];

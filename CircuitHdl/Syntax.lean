@@ -740,8 +740,8 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
         | throwWidth stx (.unbound (x.getId ++ f.getId))
       expectSym stx s!"port '{x.getId}[..].{f.getId}'" expected w
       let some idx ← asStaticTerm? ctx i
-        | throwWidth i (.indeterminate "an index into an array port, which names one of several \
-             separate ports rather than selecting one at run time")
+        | throwWidth i (.notStatic "an index into an array port names one of several separate \
+             ports, so there is nothing to select from at run time")
       `(Expr.var (indexedName $(quote x.getId) $idx ++ $(quote f.getId)))
   | `(circuit_expr| $e:circuit_expr [ $i:circuit_expr ]) => do
       match arrayName? ctx e with
@@ -760,8 +760,8 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
       | some (f, w) => do
           expectSym stx s!"port '{f.getId}'" expected w
           let some idx ← asStaticTerm? ctx i
-            | throwWidth i (.indeterminate "an index into an array port, which is a family of \
-                   separate ports rather than storage, so it cannot be selected at run time")
+            | throwWidth i (.notStatic "an index into an array port names one of several \
+                   separate ports, so there is nothing to select from at run time")
           `(Expr.var (indexedName $(quote f.getId) $idx))
       | none =>
       match memoryName? ctx e with
@@ -776,8 +776,7 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
           -- `x[k]` works for a loop binder as well as for a numeral -- a vector sliced bit by
           -- bit inside a loop is exactly what the mesh's flit headers want.
           let some bit ← asStaticTerm? ctx i
-            | throwWidth i (.indeterminate
-                   "a bit select index, which must be fixed before the design runs")
+            | throwWidth i (.notStatic "a bit select names a wire rather than selecting a value")
           let some we ← widthOf? ctx e
             | throwWidth e (.indeterminate "the operand of this bit select")
           if let (some b, some w) := (bit.raw.isNatLit?, asNat? we) then
@@ -854,7 +853,8 @@ private partial def elabStmt (ctx : SymCtx) : TSyntax `circuit_stmt → MacroM (
       let some (_, w) := ctx.families.lookup key | throwWidth x (.unbound key)
       if ctx.inputs.contains key then throwWidth x (.assignToInput key)
       let some idx ← asStaticTerm? ctx i
-        | throwWidth i (.indeterminate "an index into an array port")
+        | throwWidth i (.notStatic "an index into an array port names one of several separate \
+             ports, so there is nothing to select from at run time")
       `(Stmt.assign (indexedName $(quote x.getId) $idx ++ $(quote f.getId))
           $(← checkExpr ctx w e))
   -- `a[i] = e` is an array write or a memory write, and only the declarations say which -- the
@@ -874,7 +874,8 @@ private partial def elabStmt (ctx : SymCtx) : TSyntax `circuit_stmt → MacroM (
       | some (_, w) => do
           if ctx.inputs.contains m.getId then throwWidth m (.assignToInput m.getId)
           let some idx ← asStaticTerm? ctx addr
-            | throwWidth addr (.indeterminate "an index into an array port")
+            | throwWidth addr (.notStatic "an index into an array port names one of several \
+                   separate ports, so there is nothing to select from at run time")
           `(Stmt.assign (indexedName $(quote m.getId) $idx) $(← checkExpr ctx w e))
       | none => do
           let some (_, elemW) := ctx.mems.lookup m.getId
@@ -953,8 +954,8 @@ where
     | _ => Macro.throwErrorAt r "expected a port name"
   portIndex (ctx : SymCtx) (x : Ident) (i : TSyntax `circuit_expr) : MacroM (TSyntax `term) := do
     let some idx ← asStaticTerm? ctx i
-      | throwWidth i (.indeterminate "a port index, which names a port rather than selecting \
-             one at run time")
+      | throwWidth i (.notStatic "a port index names a port rather than selecting one at run \
+             time")
     `(indexedName $(quote x.getId) $idx)
   /-- Where the port is tied. A bare name or an array element is a *place*, and is bound as one;
   anything else is an expression, which `Module.ofItems` turns into a wire of the port's own. -/
@@ -973,8 +974,8 @@ where
         | _, some _ =>
             match ← asStaticTerm? ctx i with
             | some idx => `(BindTarget.sig (indexedName $(quote x.getId) $idx))
-            | none => throwWidth i (.indeterminate "an index into an array port, which names one \
-                   of several ports rather than selecting one at run time")
+            | none => throwWidth i (.notStatic "an index into an array port names one of \
+                   several separate ports, so there is nothing to select from at run time")
         | none, none => exprTarget ctx r
     -- A field of an array-port element is a scalar port, so it binds to that place.
     | `(circuit_expr| $x:ident [ $i:circuit_expr ] . $f:ident) =>
@@ -1008,8 +1009,8 @@ private def elabItem (ctx : SymCtx) : TSyntax `circuit_item → MacroM (TSyntax 
   | `(circuit_item| ( $sub:term ) $iname:ident [ $idx:circuit_expr ] ( $[$bs:circuit_binding],* ) ;)
   | `(circuit_item| $sub:ident $iname:ident [ $idx:circuit_expr ] ( $[$bs:circuit_binding],* ) ;) => do
       let some i ← asStaticTerm? ctx idx
-            | throwWidth idx (.indeterminate "an instance index, which names the instance rather \
-               than selecting anything at run time")
+            | throwWidth idx (.notStatic "an instance index names the instance rather than \
+               selecting anything at run time")
       `(Item.inst (indexedName $(quote iname.getId) $i) $sub $(← mkBindings ctx bs))
   | `(circuit_item| always @(posedge $c:ident ) { $[$ss:circuit_stmt]* }) => do
       checkClock ctx c

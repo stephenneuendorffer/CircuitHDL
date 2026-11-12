@@ -79,6 +79,13 @@ inductive CheckError where
   /-- A width the surface syntax cannot pin down, such as a bare literal in a concatenation.
   Only the macro raises this; every node in the AST already carries its width. -/
   | indeterminate : String → CheckError
+  /-- Something the macro has to compute *before* the design runs -- a port index, an instance
+  index, a bit select -- written as an expression that reads a signal.
+
+  Separate from `indeterminate` because the advice differs and the old shared message was
+  actively misleading: an ascription fixes a width that could not be inferred, and fixes nothing
+  about an index that names one of several ports rather than selecting one. -/
+  | notStatic : String → CheckError
   deriving Repr, DecidableEq
 
 namespace CheckError
@@ -107,6 +114,7 @@ def render : CheckError → String
   | assignToInput x => s!"cannot assign to '{x}': it is an input port"
   | indeterminate what =>
       s!"cannot infer a width for {what}; give it one with an ascription, as in (3 : 8)"
+  | notStatic what => s!"this has to be fixed before the design runs, and it is not: {what}"
 
 instance : ToString CheckError := ⟨render⟩
 
