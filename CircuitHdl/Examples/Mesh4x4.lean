@@ -97,8 +97,8 @@ module! mesh4x4 #[(fw : Nat)]
   wire mx[16] : 2;
   wire my[16] : 2;
   for n < 16 {
-    assign mx[n] = #(n / 4);
-    assign my[n] = #(n % 4);
+    assign mx[n] = n / 4;
+    assign my[n] = n % 4;
   }
 
   for x < 4 {
@@ -106,39 +106,39 @@ module! mesh4x4 #[(fw : Nat)]
       -- A direction that leaves the mesh: its stub offers nothing, and the real link out of it
       -- holds `ready` high, because no neighbour is there to drive it.
       for d < 4 {
-        if #(isEdge x y d) {
-          assign lvalid[#(meshLinks + lnkIdx x y d)] = 0;
-          assign ldata[#(meshLinks + lnkIdx x y d)] = 0;
-          assign lready[#(lnkIdx x y d)] = 1;
+        if isEdge(x, y, d) {
+          assign lvalid[meshLinks() + lnkIdx(x, y, d)] = 0;
+          assign ldata[meshLinks() + lnkIdx(x, y, d)] = 0;
+          assign lready[lnkIdx(x, y, d)] = 1;
         } else { }
       }
 
-      (meshSwitch fw) sw[#(nodeIdx x y)] (
+      (meshSwitch fw) sw[nodeIdx(x, y)] (
         .clk(clk), .rst(rst),
-        .myX(mx[#(nodeIdx x y)]), .myY(my[#(nodeIdx x y)]),
+        .myX(mx[nodeIdx(x, y)]), .myY(my[nodeIdx(x, y)]),
         -- The four sides: each input reads the neighbour's opposite output, each output drives
         -- this node's own link.
-        .i.valid[0](lvalid[#(srcIdx x y 0)]), .i.ready[0](lready[#(srcIdx x y 0)]),
-        .i.data[0](ldata[#(srcIdx x y 0)]),
-        .i.valid[1](lvalid[#(srcIdx x y 1)]), .i.ready[1](lready[#(srcIdx x y 1)]),
-        .i.data[1](ldata[#(srcIdx x y 1)]),
-        .i.valid[2](lvalid[#(srcIdx x y 2)]), .i.ready[2](lready[#(srcIdx x y 2)]),
-        .i.data[2](ldata[#(srcIdx x y 2)]),
-        .i.valid[3](lvalid[#(srcIdx x y 3)]), .i.ready[3](lready[#(srcIdx x y 3)]),
-        .i.data[3](ldata[#(srcIdx x y 3)]),
-        .o.valid[0](lvalid[#(lnkIdx x y 0)]), .o.ready[0](lready[#(lnkIdx x y 0)]),
-        .o.data[0](ldata[#(lnkIdx x y 0)]),
-        .o.valid[1](lvalid[#(lnkIdx x y 1)]), .o.ready[1](lready[#(lnkIdx x y 1)]),
-        .o.data[1](ldata[#(lnkIdx x y 1)]),
-        .o.valid[2](lvalid[#(lnkIdx x y 2)]), .o.ready[2](lready[#(lnkIdx x y 2)]),
-        .o.data[2](ldata[#(lnkIdx x y 2)]),
-        .o.valid[3](lvalid[#(lnkIdx x y 3)]), .o.ready[3](lready[#(lnkIdx x y 3)]),
-        .o.data[3](ldata[#(lnkIdx x y 3)]),
+        .i.valid[0](lvalid[srcIdx(x, y, 0)]), .i.ready[0](lready[srcIdx(x, y, 0)]),
+        .i.data[0](ldata[srcIdx(x, y, 0)]),
+        .i.valid[1](lvalid[srcIdx(x, y, 1)]), .i.ready[1](lready[srcIdx(x, y, 1)]),
+        .i.data[1](ldata[srcIdx(x, y, 1)]),
+        .i.valid[2](lvalid[srcIdx(x, y, 2)]), .i.ready[2](lready[srcIdx(x, y, 2)]),
+        .i.data[2](ldata[srcIdx(x, y, 2)]),
+        .i.valid[3](lvalid[srcIdx(x, y, 3)]), .i.ready[3](lready[srcIdx(x, y, 3)]),
+        .i.data[3](ldata[srcIdx(x, y, 3)]),
+        .o.valid[0](lvalid[lnkIdx(x, y, 0)]), .o.ready[0](lready[lnkIdx(x, y, 0)]),
+        .o.data[0](ldata[lnkIdx(x, y, 0)]),
+        .o.valid[1](lvalid[lnkIdx(x, y, 1)]), .o.ready[1](lready[lnkIdx(x, y, 1)]),
+        .o.data[1](ldata[lnkIdx(x, y, 1)]),
+        .o.valid[2](lvalid[lnkIdx(x, y, 2)]), .o.ready[2](lready[lnkIdx(x, y, 2)]),
+        .o.data[2](ldata[lnkIdx(x, y, 2)]),
+        .o.valid[3](lvalid[lnkIdx(x, y, 3)]), .o.ready[3](lready[lnkIdx(x, y, 3)]),
+        .o.data[3](ldata[lnkIdx(x, y, 3)]),
         -- Local injection and ejection.
-        .i.valid[4](inj.valid[#(nodeIdx x y)]), .i.ready[4](inj.ready[#(nodeIdx x y)]),
-        .i.data[4](inj.data[#(nodeIdx x y)]),
-        .o.valid[4](ej.valid[#(nodeIdx x y)]), .o.ready[4](ej.ready[#(nodeIdx x y)]),
-        .o.data[4](ej.data[#(nodeIdx x y)]));
+        .i.valid[4](inj.valid[nodeIdx(x, y)]), .i.ready[4](inj.ready[nodeIdx(x, y)]),
+        .i.data[4](inj.data[nodeIdx(x, y)]),
+        .o.valid[4](ej.valid[nodeIdx(x, y)]), .o.ready[4](ej.ready[nodeIdx(x, y)]),
+        .o.data[4](ej.data[nodeIdx(x, y)]));
     }
   }
 }

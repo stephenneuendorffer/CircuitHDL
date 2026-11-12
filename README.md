@@ -346,10 +346,16 @@ chain — so they are different AST nodes, and the lowering is never left to not
 happened to be constant. An index that mixes the two, like `r[i + 1]`, is rejected with a message
 naming `#(…)` rather than guessed at.
 
-`#(e)` is a Lean term used as a value: an element index, or a literal of whatever width the
-context wants. It exists because a loop binder is a `Nat`, and `circuit_expr`'s arithmetic is
-hardware -- `+` is an adder and `-` is a subtractor, not elaboration-time arithmetic on an
-index.
+**An expression that reads no signal is computed before the design runs** — in an index and in a
+value alike. The circuit language computes with *signals*, so an expression over none of them is
+just a number: `r[i + 1]` selects an element, and `assign mx[n] = n / 4;` is a constant rather
+than a divider whose operands are both literals.
+
+A Lean function is called Verilog-style, `srcIdx(x, y, 0)`, with circuit expressions as arguments
+so that nested calls read the same way: `lnkIdx(x, y, opposite(d))`. An argument that reads a
+signal is an error — a Lean function takes a number, not a wire.
+
+`#(e)` remains as the escape for anything those two do not reach, but no design here needs it.
 
 A dynamic index is checked where it can be: an element index past the end of its array is a
 `CheckError`, because it is fixed before the design runs, while an address past the end is an
@@ -450,12 +456,21 @@ cannot collide. The width rules and the semantics therefore know nothing about i
 time they are handed a `Module`, there are none left. A submodule's clock is a signal like any
 other, so binding it renames the sensitivity list too.
 
-Port bindings are **plain signal names, not expressions**. `Macro.Context` carries no environment,
-so at macro-expansion time the lowering cannot look up the submodule's port list — it cannot tell an
-input port from an output, and so cannot know which side to lower as an expression. Binding by name
-keeps both directions uniform, and the submodule is simply spliced through as a Lean term and
-resolved later, where the `Module` value is in hand. To feed an expression, assign it to a `wire`
-first.
+A port may be bound to a **name**, an **array element**, or an **expression**:
+
+```
+meshRouteUnit r[k] (.myX(myX), .dstX(i.data[k][1:0]), .dir(rq[k]));
+```
+
+A name or an element binds *to that place*, which is what an output needs. An expression is not a
+place, so the port keeps the local wire it would have had if nothing were bound to it, and the
+expression drives that wire.
+
+Which of the three it is cannot be settled at macro-expansion time: `Macro.Context` carries no
+environment, so the lowering cannot look up the submodule's port list, and therefore knows neither
+the port's width nor whether it is an input. It is settled in `Module.ofItems`, where the `Module`
+value is in hand — the width then comes from the port for free, and an expression bound to an
+**output** is refused rather than silently leaving that wire with two drivers.
 
 Flattening erases the connection, so the bindings are kept on the side in `Module.insts` and checked
 separately. Without that a mistyped port name would silently disconnect a signal — the real port
@@ -464,6 +479,7 @@ would just become an unbound local — and a width mismatch would be blamed on a
 ```
 instance 'a' binds 'nope', which is not a port of the module it instantiates
 width mismatch in port 'b' of instance 'a': expected 3 bits, got 4 bits
+instance 'u' drives 's' with an expression, but 's' is an output: it would have two drivers
 ```
 
 ### Independent clock domains

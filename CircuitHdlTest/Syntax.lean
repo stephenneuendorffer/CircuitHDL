@@ -528,6 +528,45 @@ module! invBank #[] (x : 4) -> (o : 4) {
 #guard (invBank.settle (invBank.initState.apply
   [(`x, Cell.sig (Value.ofNat 4 0))])).toOption.bind (State.valueOf? · `o) = some 0b1111
 
+/-! A binding may also be an **expression**. A name or an array element names a *place*; anything
+else drives a wire of the port's own, which `Module.ofItems` keeps for exactly this. It is decided
+there rather than in the macro because that is where the port's width and direction are known. -/
+
+module! add2 #[] (x : 2, y : 2) -> (s : 2) { assign s = x + y; }
+
+module! sliceBind #[] (d : 8) -> (o : 2) {
+  add2 u (.x(d[1:0]), .y(d[3:2]), .s(o));
+}
+
+#guard (Module.check sliceBind).isOk
+-- The two inputs kept wires of their own; the output did not, being bound to a place.
+#guard sliceBind.regs = [(`u.x, 2), (`u.y, 2)]
+#guard ((List.range 4).map fun n =>
+  (sliceBind.settle (sliceBind.initState.apply
+    [(`d, Cell.sig (Value.ofNat 8 n))])).toOption.bind (State.valueOf? · `o))
+  = [some 0, some 1, some 2, some 3]
+-- d[1:0] + d[3:2] at two bits, including the wrap.
+#guard (sliceBind.settle (sliceBind.initState.apply
+  [(`d, Cell.sig (Value.ofNat 8 0b0110))])).toOption.bind (State.valueOf? · `o) = some 3
+#guard (sliceBind.settle (sliceBind.initState.apply
+  [(`d, Cell.sig (Value.ofNat 8 0b1101))])).toOption.bind (State.valueOf? · `o) = some 0
+
+-- Binding by name still binds to the place, adding no wire at all.
+module! nameBind #[] (a : 2, b : 2) -> (o : 2) {
+  add2 u (.x(a), .y(b), .s(o));
+}
+#guard nameBind.regs = []
+
+/-- **An expression may only drive an input.** On an output the port would keep its wire, the
+submodule would drive it, and the expression would drive it too -- two drivers, and nothing else
+in the package would say so. -/
+module! exprOnOutput #[] (d : 8) -> (o : 2) {
+  add2 u (.x(d[1:0]), .y(d[3:2]), .s(d[5:4]));
+}
+
+/-- info: Except.error (CircuitHdl.CheckError.exprBoundOutput `u `s) -/
+#guard_msgs in #eval Module.check exprOnOutput
+
 /-- An element binding is checked against the array's declaration, exactly as a whole signal is
 checked against its own. -/
 module! bindWrongWidth #[] (o : 1) -> (p : 1) {

@@ -227,13 +227,25 @@ other width in the AST does too. -/
 inductive BindTarget where
   | sig : Name → BindTarget
   | elem : Name → (elemW idx : Nat) → BindTarget
-  deriving Repr, DecidableEq
+  /-- An expression, which is not a place at all. The port keeps the local wire it would have had
+  if nothing were bound to it, and the expression drives that wire -- so `.dstX(i.data[k][1:0])`
+  needs no wire declared by hand for every slice.
+
+  Resolved in `Module.ofItems` rather than in the macro because that is where the information is:
+  the macro cannot see the submodule's port list, so it knows neither the port's width nor -- and
+  this is the one that matters -- whether it is an *input*. Driving an output this way would leave
+  the wire with two drivers and no complaint; `InstInfo.check` refuses it instead. -/
+  | expr : Expr → BindTarget
+  deriving Repr
 
 /-- The declaration a target names. Used where an element cannot arise -- a memory, an array, or a
 clock -- because only *ports* are bound and a port is always a scalar. -/
 def BindTarget.nameOf : BindTarget → Name
   | .sig x => x
   | .elem a _ _ => a
+  -- Unreachable: `instRenaming` maps an expression-bound port to its own local name, so the
+  -- renaming never sees this constructor.
+  | .expr _ => .anonymous
 
 /-- What survives of an instance after it has been flattened, so its bindings can still be checked.
 
@@ -244,6 +256,9 @@ quietly disconnects a signal. -/
 structure InstInfo where
   name : Name
   ports : List (Name × Nat)
+  /-- Which of them are inputs. Kept apart from `ports` because an expression may only drive an
+  input, and that is the only question direction is needed for. -/
+  inputs : List Name
   bindings : List (Name × BindTarget)
   deriving Repr
 
@@ -312,6 +327,10 @@ def Expr.rename (f : Name → BindTarget) : Expr → Expr
       match f x with
       | .sig y => .var y
       | .elem a w i => .elem a w i
+      -- Substituting the expression is the meaningful reading of reading a port tied to one.
+      -- `instRenaming` does not produce this case -- an expression-bound port keeps a wire and is
+      -- renamed to it -- but the rule is the one this constructor would want.
+      | .expr e => e
   | .lit w n => .lit w n
   | .bin op w a b => .bin op w (a.rename f) (b.rename f)
   | .cmp op w a b => .cmp op w (a.rename f) (b.rename f)
@@ -333,6 +352,10 @@ def Stmt.rename (f : Name → BindTarget) : Stmt → Stmt
       match f x with
       | .sig y => .assign y (e.rename f)
       | .elem a w i => .setElem a w i (e.rename f)
+      -- There is no writing *to* an expression. Unreachable for the same reason as above, and
+      -- written to fail loudly rather than quietly if it ever stopped being: `Module.check`
+      -- rejects an assignment to `.anonymous` as unbound.
+      | .expr _ => .assign .anonymous (e.rename f)
   | .store m w a d => .store (f m).nameOf w (a.rename f) (d.rename f)
   | .setElem a w i d => .setElem (f a).nameOf w i (d.rename f)
   | .setDyn a w addr d => .setDyn (f a).nameOf w (addr.rename f) (d.rename f)
@@ -400,6 +423,9 @@ module cannot collide. -/
 def instRenaming (instName : Name) (bindings : List (Name × BindTarget)) :
     Name → BindTarget := fun x =>
   match bindings.lookup x with
+  -- An expression-bound port is renamed like an unbound one: it keeps a wire of its own, which
+  -- `instConnections` then drives. The substitution therefore never yields `.expr`.
+  | some (.expr _) => .sig (instName ++ x)
   | some parent => parent
   | none => .sig (instName ++ x)
 
@@ -408,7 +434,20 @@ under its prefixed name. -/
 def instLocals (instName : Name) (bindings : List (Name × BindTarget)) (m : Module) :
     List (Name × Nat) :=
   (m.inputs ++ m.outputs ++ m.regs).filterMap fun (x, w) =>
-    if (bindings.lookup x).isSome then none else some (instName ++ x, w)
+    match bindings.lookup x with
+    -- An expression-bound port needs the wire, at the port's own width, which is why this is
+    -- decided here and not in the macro.
+    | some (.expr _) => some (instName ++ x, w)
+    | some _ => none
+    | none => some (instName ++ x, w)
+
+/-- The assignments an expression binding needs: one per port tied to an expression, driving the
+wire `instLocals` kept for it. They are statements of the *parent*, so they are not renamed. -/
+def instConnections (instName : Name) (bindings : List (Name × BindTarget)) : List Stmt :=
+  bindings.filterMap fun (port, t) =>
+    match t with
+    | .expr e => some (.assign (instName ++ port) e)
+    | _ => none
 
 /-- The memories an instance adds to the parent, likewise prefixed. -/
 def instMems (instName : Name) (m : Module) : List (Name × Nat × Nat) :=
@@ -437,8 +476,11 @@ def processes (pending : List Stmt) : List Item → List Process
       flushPending pending ++
         { kind := ProcKind.sequential, sensitivity := [ev], body := body } :: processes [] rest
   | .inst iname sub bindings :: rest =>
-      flushPending pending ++
-        sub.body.map (Process.rename (instRenaming iname bindings)) ++ processes [] rest
+      let conns := instConnections iname bindings
+      flushPending pending
+        ++ (if conns.isEmpty then []
+            else [{ kind := ProcKind.combinational, sensitivity := [], body := conns }])
+        ++ sub.body.map (Process.rename (instRenaming iname bindings)) ++ processes [] rest
   | _ :: rest => processes pending rest
 where
   /-- Emit the accumulated run of loose statements, if there is one. -/
@@ -471,7 +513,8 @@ def arrays : List Item → List (Name × Nat × Nat)
 def infos : List Item → List InstInfo
   | [] => []
   | .inst iname sub bindings :: rest =>
-      { name := iname, ports := sub.inputs ++ sub.outputs, bindings := bindings } :: infos rest
+      { name := iname, ports := sub.inputs ++ sub.outputs, inputs := sub.inputs.map Prod.fst,
+        bindings := bindings } :: infos rest
   | _ :: rest => infos rest
 
 end Item

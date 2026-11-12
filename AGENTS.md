@@ -117,11 +117,29 @@ Things the surface syntax does *not* have, each of which has bitten:
   `sle` predicates, but Verilog decides signedness from operand *declarations* and this language
   has no such notion, so a signed form would mean inventing syntax for a case no design here
   needs. `CmpOp` stays unsigned, matching Verilog's default for unsigned operands.
-- **Arrays and `for` exist, and the index rule is syntactic.** `reg r[depth] : dw;` is `depth`
-  registers; `memory m[depth] : dw;` is one `seq.firmem`. An index is an *element* when it is a
-  numeral, a loop binder or an explicit `#(..)`, and hardware otherwise — so `r[i + 1]` inside a
-  loop is **rejected**, not guessed at, and wants `r[#(i + 1)]`. The rule is deliberately shallow:
-  the alternative is a macro deciding whether `+` means an adder by inspecting its leaves.
+- **Arrays and `for` exist, and the index rule is semantic.** `reg r[depth] : dw;` is `depth`
+  registers; `memory m[depth] : dw;` is one `seq.firmem`. **An expression that reads no signal is
+  computed before the design runs**, in an index and in value position alike, which is the whole
+  of the escaping story: the circuit language computes with *signals*, so an expression over none
+  of them is just a number. `r[i + 1]` and `assign mx[n] = n / 4;` need no escape, and the latter
+  would otherwise emit a divider whose operands are both literals.
+
+  The rule used to be syntactic -- a numeral, a loop binder or an explicit `#(..)`, with
+  `r[i + 1]` **rejected** -- on the grounds that deciding `+` by inspecting leaves was too
+  implicit. That reasoning does not survive contact with a hardware `/`: there is no reading of
+  `n / 4` over two literals that anyone wants. `asStaticTerm?` answers both questions at once,
+  since "is this an index I can compute" and "is this an expression I can compute" are the same
+  question asked in two places.
+
+  One reading changed with it: `200 + 100` at eight bits used to build an adder and wrap to 44,
+  and is now `Expr.lit 8 300`, which `Module.check` rejects -- matching what a bare `300` already
+  did.
+- **A call is `srcIdx(x, y, 0)`, Verilog-shaped.** Nothing else in an expression is an identifier
+  followed by `(`, and a signal is never applied, so a call cannot be confused with one and a bare
+  identifier keeps its `unknown signal 'x'` error. Its arguments are *circuit expressions*, so a
+  nested call reads the same way -- `lnkIdx(x, y, opposite(d))` -- and an argument that reads a
+  signal is an error naming the function rather than a fallback to hardware, since there is no
+  hardware reading of `f(wire)` to fall back to.
 - **A keyword reserves its token for the whole file.** Lean's token table is not scoped to a
   syntax category, which is why a memory is `memory` and not `mem` — `asyncFifo`'s memory is
   *called* `mem`, and the keyword would have made that name unspellable. `&"mem"` does not rescue
@@ -139,11 +157,24 @@ Things the surface syntax does *not* have, each of which has bitten:
   `BindTarget`, so a read of the bound port becomes `Expr.elem` and a write `Stmt.setElem`. This
   is what makes a mesh expressible — sixteen instances each wired to a different slice of the same
   arrays.
+- **A binding may also be an expression**, and that is resolved in `Module.ofItems` rather than in
+  the macro, because the macro cannot see the submodule's port list: it knows neither the port's
+  width nor whether it is an *input*. An expression-bound port simply keeps the local wire it
+  would have had if nothing were bound to it, and `instConnections` drives that wire — so the
+  width comes from the port for free. `meshSwitch` lost its `dstx`/`dsty` arrays to this and the
+  settle count did not move: the same ten wires, named by the port instead of by hand.
+- **An expression may only drive an input**, and `InstInfo.check` refuses otherwise. On an output
+  the port keeps its wire, the submodule drives it, and the expression drives it too — two
+  drivers, which nothing else here would report, because multiple combinational drivers are legal
+  (`swapComb` relies on last-write-wins). `InstInfo` carries the input list for this one question.
 - **An array port is `n` ports, not an array.** `slave i[5] : axis fw` declares `i.valid.0 …`, and
   `i.valid[k]` needed no new expression grammar: `qualify` already names a field with a dot and
   Lean lexes `i.valid` as one identifier. They are scalars, so the index is elaboration-time only.
-- **`if #(cond)` is the elaboration-time conditional**, where `if c` on a signal is a mux. One arm
-  is built and the other does not exist.
+- **`if isEdge(x, y, d)` is the elaboration-time conditional**, where `if c` on a signal is a mux.
+  One arm is built and the other does not exist. A **call** marks it, as well as the explicit
+  `#(..)`: a Lean function in condition position can only be a `Bool`, where a hardware condition
+  is one bit. Arithmetic is deliberately *not* a static condition even when it reads no signal, so
+  `if 1 { .. }` stays a constant mux arm and the two readings never overlap.
 - **An index that reads a signal is hardware however many loop binders it mentions.**
   `idata[own[j]]` selects by a value and `j` only says which register holds it; the rule that
   rejects `r[i + 1]` has to let that through, and at first it did not.
@@ -349,7 +380,7 @@ lower `comb.and` as `comb.or` (11 in `ShiftFifo`). If you change the lowering, r
 
 Two **design**-level mutations cover the array work, and the first is the more informative:
 
-- `r[#(i + 1)]` → `r[i]` in `shiftFifo`'s shift reddens **ten** theorems in
+- `r[i + 1]` → `r[i]` in `shiftFifo`'s shift reddens **ten** theorems in
   `CircuitHdlTest/ShiftFifo.lean` — the five `shiftQueueAbstractionOf` ones and their five netlist
   counterparts — and leaves the two counting-model theorems green, because `count` is still
   updated correctly and only the data lands in the wrong slot. That is the `shiftFifoOffByOne`
@@ -529,8 +560,9 @@ that quietly stopped a mutation from biting would look exactly like a rewrite th
   bug, it delivers every packet, and no amount of end-to-end testing would find it.
 - **`rel4 = take4`** — every flit releases the ejection channel instead of only the tail, so the
   switch does per-flit rather than wormhole allocation. Now that `rel` is written in a loop the
-  mutation is `if #(j == 4) { assign rel[j] = take[j]; }`, which is the static conditional earning
-  its keep on a mutation rather than on a design. `wormhole-order` goes from `[1,1,1,2,2,2]` to
+  mutation is `if #(j == 4) { assign rel[j] = take[j]; }` -- the one place `#(..)` is still the
+  shortest spelling, since `j == 4` over a loop binder is arithmetic rather than a call, so it is
+  the static conditional earning its keep on a mutation rather than on a design. `wormhole-order` goes from `[1,1,1,2,2,2]` to
   `[1,2,1,2,1,2]`: **all six flits still arrive**, perfectly interleaved, and *nothing else in the
   suite moves*. That check is the only thing in the package that can see it.
 - **Releasing on `take` of any flit via `alloc4`** loses the second packet outright rather than

@@ -162,6 +162,17 @@ the expected width; in an index position it
 selects an element. A bare numeral and a bare loop binder are the two cases common enough to be
 written without it. -/
 syntax:max "#" "(" term ")" : circuit_expr
+/-- A call to an ordinary Lean function, `srcIdx(x, y, 0)`.
+
+Verilog-shaped, which is both familiar and unambiguous: nothing else in an expression is an
+identifier followed by `(`, so a call can never be confused with a signal -- and a signal is never
+applied, so the "declarations decide" rule is untouched and a bare identifier keeps its
+`unknown signal 'x'` error.
+
+The arguments are **circuit expressions**, not Lean terms, so a nested call reads the same way:
+`lnkIdx(x, y, opposite(d))`. Each must be computable before the design runs; one that reads a
+signal is an error, since a Lean function takes a number and not a wire. -/
+syntax:max ident "(" circuit_expr,* ")" : circuit_expr
 syntax:max "(" circuit_expr ")" : circuit_expr
 syntax:max "(" circuit_expr ":" term ")" : circuit_expr
 syntax:max "{" circuit_expr,+ "}" : circuit_expr
@@ -246,9 +257,13 @@ of an array in the parent, which is not a name at all -- see `BindTarget`. -/
 syntax ident : circuit_ref
 syntax ident "[" circuit_expr "]" : circuit_ref
 
-/-- A port binding, `.b(x)` or `.i.valid[k](l[#(j)])`. The bound signal is a name or an element,
-not an arbitrary expression: feed an expression by assigning it to a wire first. -/
-syntax "." circuit_ref "(" circuit_ref ")" : circuit_binding
+/-- A port binding: `.b(x)`, `.i.valid[k](lvalid[srcIdx(x, y, k)])`, or `.dstX(i.data[k][1:0])`.
+
+The signal side is a whole expression. A name or an array element binds *to that place*, which is
+what an output port needs; anything else drives a wire of the port's own, which only an input can
+want -- `InstInfo.check` refuses an expression on an output, where the port would otherwise have
+two drivers and nothing would say so. -/
+syntax "." circuit_ref "(" circuit_expr ")" : circuit_binding
 /-- An instance, `grayOf wg (.b(x), .g(y));`. -/
 syntax ident ident "(" sepBy(circuit_binding, ",") ")" ";" : circuit_item
 /-- An instance whose name is indexed, `meshRouteUnit r[k] (..)`, which is what a loop generating
@@ -458,27 +473,53 @@ private def familyName? (ctx : SymCtx) : TSyntax `circuit_expr → Option (Ident
 /-- Is this identifier a Lean `Nat` rather than a signal? -/
 private def isGenvar (ctx : SymCtx) (x : Ident) : Bool := ctx.genvars.contains x.getId
 
-/-- An index that selects an element *before the design runs*, as the Lean term it is.
+/-- The Lean term an expression denotes, when it can be computed before the design runs.
 
-Three forms and no more: a numeral, a loop binder or parameter, and the explicit `#(..)`. The rule
-is deliberately shallow -- `r[i + 1]` is **not** accepted here even though it mentions nothing but
-a binder, because the alternative is a macro that decides whether `+` means an adder or addition
-by looking at what its leaves happen to be. `elemIndexOrThrow` turns that case into an error
-naming `#(..)` rather than silently building a mux tree. -/
-private def staticIdx? (ctx : SymCtx) : TSyntax `circuit_expr → Option (TSyntax `term)
-  | `(circuit_expr| $n:num) => some ⟨n.raw⟩
-  | `(circuit_expr| #($t:term)) => some t
-  | `(circuit_expr| $x:ident) => if isGenvar ctx x then some ⟨x.raw⟩ else none
-  | _ => none
+`none` means "this is hardware" -- it reads a signal somewhere, or it is a form with no numeric
+Lean reading, like a comparison. Both callers want the same question answered: an *index* that
+can be computed selects an element, and a *value* that can be computed is a constant rather than
+a circuit that recomputes it.
 
-/-- Does this expression mention a loop binder or a parameter anywhere? -/
-private partial def mentionsGenvar (ctx : SymCtx) (stx : TSyntax `circuit_expr) : Bool :=
-  go stx.raw
+The rule it implements is the whole of the escaping story: **the circuit language computes with
+signals, so an expression over none of them is just a number.** That is why `r[i + 1]` needs no
+`#(..)` any more -- it reads nothing, so there is nothing for an adder to add.
+
+An ascription is deliberately not converted: `(3 : 4)` carries a width, which a `Nat` does not. -/
+private partial def asStaticTerm? (ctx : SymCtx) (stx : TSyntax `circuit_expr) :
+    MacroM (Option (TSyntax `term)) := do
+  match stx with
+  | `(circuit_expr| $n:num) => return some ⟨n.raw⟩
+  | `(circuit_expr| #($t:term)) => return some t
+  | `(circuit_expr| $x:ident) => return (if isGenvar ctx x then some ⟨x.raw⟩ else none)
+  | `(circuit_expr| ($e:circuit_expr)) => asStaticTerm? ctx e
+  -- A call is always elaboration-time, so an argument it cannot compute is an error rather than
+  -- a fallback to hardware: there is no hardware reading of `f(wire)` to fall back to.
+  | `(circuit_expr| $f:ident ($args:circuit_expr,*)) => do
+      let mut acc : TSyntax `term := ⟨f.raw⟩
+      for a in args.getElems do
+        let some t ← asStaticTerm? ctx a
+          | Macro.throwErrorAt a
+              s!"an argument of '{f.getId}' reads a signal, but a Lean function takes a number \
+                 and not a wire; assign it to a wire and pass an index instead"
+        acc ← `($acc $t)
+      return some acc
+  | `(circuit_expr| $a:circuit_expr + $b:circuit_expr) => binary ctx a b (← `(HAdd.hAdd))
+  | `(circuit_expr| $a:circuit_expr - $b:circuit_expr) => binary ctx a b (← `(HSub.hSub))
+  | `(circuit_expr| $a:circuit_expr * $b:circuit_expr) => binary ctx a b (← `(HMul.hMul))
+  | `(circuit_expr| $a:circuit_expr / $b:circuit_expr) => binary ctx a b (← `(HDiv.hDiv))
+  | `(circuit_expr| $a:circuit_expr % $b:circuit_expr) => binary ctx a b (← `(HMod.hMod))
+  | `(circuit_expr| $a:circuit_expr & $b:circuit_expr) => binary ctx a b (← `(HAnd.hAnd))
+  | `(circuit_expr| $a:circuit_expr | $b:circuit_expr) => binary ctx a b (← `(HOr.hOr))
+  -- `^` is xor in the circuit language and exponentiation in Lean, so the conversion names the
+  -- operation rather than reusing the symbol.
+  | `(circuit_expr| $a:circuit_expr ^ $b:circuit_expr) => binary ctx a b (← `(HXor.hXor))
+  | _ => return none
 where
-  go : Syntax → Bool
-    | .ident _ _ n _ => ctx.genvars.contains n
-    | .node _ _ args => args.any go
-    | _ => false
+  binary (ctx : SymCtx) (a b : TSyntax `circuit_expr) (f : TSyntax `term) :
+      MacroM (Option (TSyntax `term)) := do
+    match ← asStaticTerm? ctx a, ← asStaticTerm? ctx b with
+    | some ta, some tb => return some (← `($f $ta $tb))
+    | _, _ => return none
 
 /-- Does it read anything the design declares? -/
 private partial def mentionsSignal (ctx : SymCtx) (stx : TSyntax `circuit_expr) : Bool :=
@@ -490,19 +531,6 @@ where
           || (ctx.families.lookup n).isSome || (ctx.mems.lookup n).isSome
     | .node _ _ args => args.any go
     | _ => false
-
-/-- Reject an index that was *meant* statically: one built from loop binders and circuit syntax
-but reading nothing, like `r[i + 1]`, which is neither an element chosen before the design runs
-nor an address the hardware computes.
-
-An index that reads a signal is hardware however many binders it also mentions -- `idata[own[j]]`
-selects by a value, and `j` only says *which* register holds it. -/
-private def rejectComputedIndex (ctx : SymCtx) (i : TSyntax `circuit_expr) : MacroM Unit := do
-  if mentionsGenvar ctx i && !mentionsSignal ctx i then
-    Macro.throwErrorAt i
-      "this index mixes a loop binder with circuit syntax, so it is neither an element selected \
-       before the design runs nor an address computed by hardware; write `#(..)` around it to \
-       select an element, as in `r[#(i + 1)]`"
 
 mutual
 
@@ -610,6 +638,19 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
         if n ≥ 2 ^ e then throwWidth lit (.litOverflow e n)
       `(Expr.lit $expected $(quote n))
   | `(circuit_expr| ($e:circuit_expr)) => checkExpr ctx expected e
+  -- **An expression over no signals is a constant, not a circuit that recomputes it.** This is
+  -- what `n / 4` means in a loop, and without it the same text would emit a divider whose inputs
+  -- are both literals. It comes after the cases above so that a bare numeral keeps its
+  -- macro-time `litOverflow` check, and before the operators so they never see a signal-free
+  -- operand pair.
+  --
+  -- It does change one reading: `200 + 100` at eight bits used to build an adder and wrap to 44,
+  -- and is now `Expr.lit 8 300`, which `Module.check` rejects. That matches what a bare `300`
+  -- already did, which is the more useful of the two answers.
+  | _ => match ← asStaticTerm? ctx stx with
+    | some t => `(Expr.lit $expected $t)
+    | none =>
+    match stx with
   | `(circuit_expr| ($e:circuit_expr : $w:term)) => do
       expectSym w "ascribed width" expected w
       checkExpr ctx w e
@@ -674,12 +715,11 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
       match arrayName? ctx e with
       | some (a, elemW) => do
           expectSym stx s!"element of array '{a.getId}'" expected elemW
-          match staticIdx? ctx i with
+          match ← asStaticTerm? ctx i with
           -- Whether the element exists is checked by `Module.check`, which has the count as a
           -- `Nat`; here it may be any term.
           | some idx => `(Expr.elem $(quote a.getId) $elemW $idx)
           | none => do
-              rejectComputedIndex ctx i
               let some aw ← widthOf? ctx i
                 | throwWidth i (.indeterminate "the index of this array read")
               `(Expr.select $(quote a.getId) $elemW $(← checkExpr ctx aw i))
@@ -687,9 +727,8 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
       match familyName? ctx e with
       | some (f, w) => do
           expectSym stx s!"port '{f.getId}'" expected w
-          let some idx := staticIdx? ctx i
-            | do rejectComputedIndex ctx i
-                 throwWidth i (.indeterminate "an index into an array port, which is a family of \
+          let some idx ← asStaticTerm? ctx i
+            | throwWidth i (.indeterminate "an index into an array port, which is a family of \
                    separate ports rather than storage, so it cannot be selected at run time")
           `(Expr.var (indexedName $(quote f.getId) $idx))
       | none =>
@@ -704,9 +743,8 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
           -- A bit select. The index is the same elaboration-time kind an array element takes, so
           -- `x[k]` works for a loop binder as well as for a numeral -- a vector sliced bit by
           -- bit inside a loop is exactly what the mesh's flit headers want.
-          let some bit := staticIdx? ctx i
-            | do rejectComputedIndex ctx i
-                 throwWidth i (.indeterminate
+          let some bit ← asStaticTerm? ctx i
+            | throwWidth i (.indeterminate
                    "a bit select index, which must be fixed before the design runs")
           let some we ← widthOf? ctx e
             | throwWidth e (.indeterminate "the operand of this bit select")
@@ -748,10 +786,17 @@ private def asStmts (body : Array (TSyntax `circuit_item)) :
              "only statements may appear here; a declaration or an instance belongs at module \
               level, outside any `always` block"
 
-/-- Is this the elaboration-time conditional rather than the hardware one? -/
-private def staticCond? : TSyntax `circuit_expr → Option (TSyntax `term)
-  | `(circuit_expr| #($t:term)) => some t
-  | _ => none
+/-- Is this the elaboration-time conditional rather than the hardware one?
+
+A **call** counts, as well as the explicit `#(..)`: `isEdge(x, y, d)` is a Lean function and can
+only be a `Bool`, where a hardware condition is a one-bit expression. Arithmetic is deliberately
+not included even when it reads no signal -- `if 1 { .. }` is a constant mux arm, not a static
+choice -- so the two readings never overlap. -/
+private def staticCond? (ctx : SymCtx) :
+    TSyntax `circuit_expr → MacroM (Option (TSyntax `term))
+  | `(circuit_expr| #($t:term)) => return some t
+  | c@`(circuit_expr| $_:ident ($_:circuit_expr,*)) => asStaticTerm? ctx c
+  | _ => return none
 
 /-- The declared width of an assignment target, rejecting assignment to an input port. -/
 private def assignTargetWidth (ctx : SymCtx) (x : Ident) : MacroM SymWidth := do
@@ -775,10 +820,9 @@ private partial def elabStmt (ctx : SymCtx) : TSyntax `circuit_stmt → MacroM (
   | `(circuit_stmt| assign $m:ident [ $addr:circuit_expr ] = $e:circuit_expr ;) => do
       match ctx.arrays.lookup m.getId with
       | some (_, elemW) =>
-          match staticIdx? ctx addr with
+          match ← asStaticTerm? ctx addr with
           | some i => `(Stmt.setElem $(quote m.getId) $elemW $i $(← checkExpr ctx elemW e))
           | none => do
-              rejectComputedIndex ctx addr
               let some aw ← widthOf? ctx addr
                 | throwWidth addr (.indeterminate "the index of this array write")
               `(Stmt.setDyn $(quote m.getId) $elemW
@@ -787,9 +831,8 @@ private partial def elabStmt (ctx : SymCtx) : TSyntax `circuit_stmt → MacroM (
       match ctx.families.lookup m.getId with
       | some (_, w) => do
           if ctx.inputs.contains m.getId then throwWidth m (.assignToInput m.getId)
-          let some idx := staticIdx? ctx addr
-            | do rejectComputedIndex ctx addr
-                 throwWidth addr (.indeterminate "an index into an array port")
+          let some idx ← asStaticTerm? ctx addr
+            | throwWidth addr (.indeterminate "an index into an array port")
           `(Stmt.assign (indexedName $(quote m.getId) $idx) $(← checkExpr ctx w e))
       | none => do
           let some (_, elemW) := ctx.mems.lookup m.getId
@@ -816,7 +859,7 @@ private partial def mkStmtList (ctx : SymCtx) (ss : Array (TSyntax `circuit_stmt
   ss.foldrM (init := nil) fun (s : TSyntax `circuit_stmt) acc => do
     match s with
     | `(circuit_stmt| if $c:circuit_expr { $[$t:circuit_item]* } else { $[$f:circuit_item]* })
-        => match staticCond? c with
+        => match ← staticCond? ctx c with
       | none => do `($(← elabStmt ctx s) :: $acc)
       | some cond => do
           let ts ← mkStmtList ctx (← asStmts t)
@@ -849,7 +892,7 @@ private def mkBindings (ctx : SymCtx) (bs : Array (TSyntax `circuit_binding)) :
     MacroM (TSyntax `term) := do
   let nil ← `(([] : List (Name × BindTarget)))
   bs.foldrM (init := nil) fun b acc => do
-    let `(circuit_binding| . $port:circuit_ref ( $sig:circuit_ref )) := b
+    let `(circuit_binding| . $port:circuit_ref ( $sig:circuit_expr )) := b
       | Macro.throwErrorAt b "expected a port binding of the form `.port(signal)`"
     `(($(← portName ctx port), $(← bindTarget ctx sig)) :: $acc)
 where
@@ -858,27 +901,39 @@ where
     match r with
     | `(circuit_ref| $x:ident) => `($(quote x.getId))
     | `(circuit_ref| $x:ident [ $i:circuit_expr ]) => do
-        let some idx := staticIdx? ctx i
-          | do rejectComputedIndex ctx i
-               throwWidth i (.indeterminate "a port index, which names a port rather than \
+        let some idx ← asStaticTerm? ctx i
+            | throwWidth i (.indeterminate "a port index, which names a port rather than \
                  selecting one at run time")
         `(indexedName $(quote x.getId) $idx)
     | _ => Macro.throwErrorAt r "expected a port name"
-  /-- The signal side may be an element of an array declared in this module, which is the only
-  thing here that is not a name. -/
-  bindTarget (ctx : SymCtx) (r : TSyntax `circuit_ref) : MacroM (TSyntax `term) := do
+  /-- Where the port is tied. A bare name or an array element is a *place*, and is bound as one;
+  anything else is an expression, which `Module.ofItems` turns into a wire of the port's own. -/
+  bindTarget (ctx : SymCtx) (r : TSyntax `circuit_expr) : MacroM (TSyntax `term) := do
     match r with
-    | `(circuit_ref| $x:ident) => `(BindTarget.sig $(quote x.getId))
-    | `(circuit_ref| $x:ident [ $i:circuit_expr ]) => do
-        let some idx := staticIdx? ctx i
-          | do rejectComputedIndex ctx i
-               throwWidth i (.indeterminate "a binding index, which is fixed before the design \
-                 runs -- a port cannot be tied to a different element each cycle")
-        match ctx.arrays.lookup x.getId with
-        | some (_, elemW) => `(BindTarget.elem $(quote x.getId) $elemW $idx)
-        -- Not an array: an indexed *family*, which is a plain name again.
-        | none => `(BindTarget.sig (indexedName $(quote x.getId) $idx))
-    | _ => Macro.throwErrorAt r "expected a signal name"
+    | `(circuit_expr| $x:ident) =>
+        if (ctx.env.lookup x.getId).isSome then `(BindTarget.sig $(quote x.getId))
+        else exprTarget ctx r
+    | `(circuit_expr| $x:ident [ $i:circuit_expr ]) => do
+        match ctx.arrays.lookup x.getId, ctx.families.lookup x.getId with
+        | some (_, elemW), _ =>
+            match ← asStaticTerm? ctx i with
+            | some idx => `(BindTarget.elem $(quote x.getId) $elemW $idx)
+            -- A dynamic index is a mux rather than a place, so it takes the expression path.
+            | none => exprTarget ctx r
+        | _, some _ =>
+            match ← asStaticTerm? ctx i with
+            | some idx => `(BindTarget.sig (indexedName $(quote x.getId) $idx))
+            | none => throwWidth i (.indeterminate "an index into an array port, which names one \
+                   of several ports rather than selecting one at run time")
+        | none, none => exprTarget ctx r
+    | _ => exprTarget ctx r
+  /-- An expression binding. Its width comes from the expression, because the macro cannot see the
+  port's; `InstInfo.check` compares the two once the port list is in hand. -/
+  exprTarget (ctx : SymCtx) (r : TSyntax `circuit_expr) : MacroM (TSyntax `term) := do
+    let some w ← widthOf? ctx r
+      | throwWidth r (.indeterminate "a port binding, whose width must come from the expression \
+             because the macro cannot see the submodule's ports; an ascription gives it one")
+    `(BindTarget.expr $(← checkExpr ctx w r))
 
 /-- Lower a module body item. -/
 private def elabItem (ctx : SymCtx) : TSyntax `circuit_item → MacroM (TSyntax `term)
@@ -896,9 +951,8 @@ private def elabItem (ctx : SymCtx) : TSyntax `circuit_item → MacroM (TSyntax 
       `(Item.inst $(quote iname.getId) $sub $(← mkBindings ctx bs))
   | `(circuit_item| ( $sub:term ) $iname:ident [ $idx:circuit_expr ] ( $[$bs:circuit_binding],* ) ;)
   | `(circuit_item| $sub:ident $iname:ident [ $idx:circuit_expr ] ( $[$bs:circuit_binding],* ) ;) => do
-      let some i := staticIdx? ctx idx
-        | do rejectComputedIndex ctx idx
-             throwWidth idx (.indeterminate "an instance index, which names the instance rather \
+      let some i ← asStaticTerm? ctx idx
+            | throwWidth idx (.indeterminate "an instance index, which names the instance rather \
                than selecting anything at run time")
       `(Item.inst (indexedName $(quote iname.getId) $i) $sub $(← mkBindings ctx bs))
   | `(circuit_item| always @(posedge $c:ident ) { $[$ss:circuit_stmt]* }) => do
@@ -940,7 +994,7 @@ private partial def mkItemList (ctx : SymCtx) : List (TSyntax `circuit_item) →
       -- rules that parse the same text leave an ambiguity node that neither pattern then matches,
       -- which is what the first attempt here did.
       | `(circuit_item| if $c:circuit_expr { $[$t:circuit_item]* } else { $[$f:circuit_item]* })
-          => match staticCond? c with
+          => match ← staticCond? ctx c with
         | none => do `($(← elabItem ctx i) :: $(← mkItemList ctx rest))
         | some cond => do
             let ts ← mkItemList ctx t.toList

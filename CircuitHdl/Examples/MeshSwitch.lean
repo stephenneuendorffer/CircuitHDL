@@ -144,18 +144,17 @@ module! meshSwitch #[(fw : Nat)]
   -- Which output each input wants. One routing unit per input, so the policy is stated once and
   -- instantiated, rather than copied five times.
   wire rq[5] : 3;
-  wire dstx[5] : 2;
-  wire dsty[5] : 2;
   -- The input ports as arrays, so the crossbar can select one by value.
   wire ivalid[5] : 1;
   wire idata[5] : fw;
 
   for k < 5 {
-    assign dstx[k] = i.data[k][1:0];
-    assign dsty[k] = i.data[k][3:2];
     assign ivalid[k] = i.valid[k];
     assign idata[k] = i.data[k];
-    meshRouteUnit r[k] (.myX(myX), .myY(myY), .dstX(dstx[k]), .dstY(dsty[k]), .dir(rq[k]));
+    -- The destination slices go straight into the ports: an input bound to an expression keeps a
+    -- wire of its own and the expression drives it, so the slices need no array apiece.
+    meshRouteUnit r[k]
+      (.myX(myX), .myY(myY), .dstX(i.data[k][1:0]), .dstY(i.data[k][3:2]), .dir(rq[k]));
   }
 
   -- Output ownership, and the one-flit output register that makes the port boundary a register.
@@ -168,7 +167,7 @@ module! meshSwitch #[(fw : Nat)]
   wire req[25] : 1;
   for k < 5 {
     for j < 5 {
-      assign req[#(k * 5 + j)] = i.valid[k] & (rq[k] == j);
+      assign req[k * 5 + j] = i.valid[k] & (rq[k] == j);
     }
   }
 
@@ -186,12 +185,12 @@ module! meshSwitch #[(fw : Nat)]
     assign o.data[j] = obuf[j];
 
     -- Fixed-priority pick among the five, per output. Only consulted while the output is free.
-    assign anyReq[j] = req[#(j)] | req[#(5 + j)] | req[#(10 + j)] | req[#(15 + j)]
-                     | req[#(20 + j)];
-    assign sel[j] = req[#(j)] ? (0 : 3)
-                  : (req[#(5 + j)] ? (1 : 3)
-                  : (req[#(10 + j)] ? (2 : 3)
-                  : (req[#(15 + j)] ? (3 : 3)
+    assign anyReq[j] = req[j] | req[5 + j] | req[10 + j] | req[15 + j]
+                     | req[20 + j];
+    assign sel[j] = req[j] ? (0 : 3)
+                  : (req[5 + j] ? (1 : 3)
+                  : (req[10 + j] ? (2 : 3)
+                  : (req[15 + j] ? (3 : 3)
                   : (4 : 3))));
 
     -- The crossbar, feeding the output *register* rather than the port: what the input that owns

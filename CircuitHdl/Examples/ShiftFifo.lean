@@ -123,11 +123,11 @@ module! shiftFifo #[(depth dw : Nat)]
     -- down on a read, otherwise hold.
     for i < (depth - 1) {
       assign r[i] =
-        rst ? 0 : ((wfire & (widx == i)) ? s.data : (rfire ? r[#(i + 1)] : r[i]));
+        rst ? 0 : ((wfire & (widx == i)) ? s.data : (rfire ? r[i + 1] : r[i]));
     }
     -- The top slot has nothing above it to shift down, so a read leaves it alone.
-    assign r[#(depth - 1)] =
-      rst ? 0 : ((wfire & (widx == #(depth - 1))) ? s.data : r[#(depth - 1)]);
+    assign r[depth - 1] =
+      rst ? 0 : ((wfire & (widx == depth - 1)) ? s.data : r[depth - 1]);
   }
 }
 

@@ -62,6 +62,9 @@ inductive CheckError where
   | conflictingDecl : Name → (w₁ w₂ : Nat) → CheckError
   /-- An instance binding naming a port the submodule does not have. -/
   | noSuchPort : (inst port : Name) → CheckError
+  /-- An expression bound to an *output* port. The port would keep its wire, the submodule would
+  drive it, and the expression would drive it too -- two drivers and no complaint. -/
+  | exprBoundOutput : (inst port : Name) → CheckError
   -- Shape
   /-- Two widths that were required to agree did not. The `String` says where. -/
   | widthMismatch : String → (expected actual : Nat) → CheckError
@@ -94,6 +97,9 @@ def render : CheckError → String
   | conflictingDecl x w₁ w₂ => s!"'{x}' is declared both {w₁} bits and {w₂} bits wide"
   | noSuchPort inst port =>
       s!"instance '{inst}' binds '{port}', which is not a port of the module it instantiates"
+  | exprBoundOutput inst port =>
+      s!"instance '{inst}' drives '{port}' with an expression, but '{port}' is an output: it \
+         would have two drivers. Bind an output to a signal or an array element"
   | widthMismatch where_ expected actual =>
       s!"width mismatch in {where_}: expected {bits expected}, got {bits actual}"
   | litOverflow w n => s!"literal {n} does not fit in {bits w}"
@@ -308,6 +314,10 @@ def InstInfo.check (ctx : Ctx) (i : InstInfo) : Except CheckError Unit :=
         | BindTarget.elem a elemW idx => do
             let _ ← ctx.elemWidth a elemW (some idx)
             expectWidth s!"port '{port}' of instance '{i.name}'" pw elemW
+        | BindTarget.expr e => do
+            if !(i.inputs.contains port) then .error (.exprBoundOutput i.name port)
+            let w ← Expr.width? ctx e
+            expectWidth s!"port '{port}' of instance '{i.name}'" pw w
 
 /-- Check every process in a module against its declarations, and every instance's bindings. -/
 def Module.check (m : Module) : Except CheckError Unit := do
