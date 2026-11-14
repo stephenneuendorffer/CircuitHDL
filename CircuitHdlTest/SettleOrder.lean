@@ -40,14 +40,20 @@ prevent one level up.
 #guard Signal.overlaps (.elem `a [3]) (.elem `a [3])
 #guard !Signal.overlaps (.elem `a [3]) (.elem `a [2])
 #guard !Signal.overlaps (.elem `a [3]) (.elem `b [3])
--- A dynamic access is every element, so it meets each of them, in both directions.
-#guard Signal.overlaps (.whole `a) (.elem `a [3])
-#guard Signal.overlaps (.elem `a [0]) (.whole `a)
-#guard Signal.overlaps (.whole `a) (.whole `a)
-#guard !Signal.overlaps (.whole `a) (.elem `b [0])
+-- A dynamic access is `elem a []` -- the empty prefix, every element -- so it meets each of
+-- them, in both directions.
+#guard Signal.overlaps (.elem `a []) (.elem `a [3])
+#guard Signal.overlaps (.elem `a [0]) (.elem `a [])
+#guard Signal.overlaps (.elem `a []) (.elem `a [])
+#guard !Signal.overlaps (.elem `a []) (.elem `b [0])
+-- A *partial* index is the same rule one level in: a row meets its own elements and no others.
+#guard Signal.overlaps (.elem `a [1]) (.elem `a [1, 3])
+#guard Signal.overlaps (.elem `a [1, 3]) (.elem `a [1])
+#guard !Signal.overlaps (.elem `a [1]) (.elem `a [2, 3])
+#guard !Signal.overlaps (.elem `a [1, 3]) (.elem `a [1, 2])
 -- A name is either an array or it is not, so these never meet whatever the index.
 #guard !Signal.overlaps (.sig `a) (.elem `a [0])
-#guard !Signal.overlaps (.sig `a) (.whole `a)
+#guard !Signal.overlaps (.sig `a) (.elem `a [])
 
 /-! ### A module written back to front
 
@@ -197,7 +203,7 @@ private def dynOrder : Module :=
       Item.stmt (.assign `o (.elem `a 8 [2] [1])),
       Item.stmt (.setDyn `a 8 [2] [.var `i] (.var `x)) ]
 
-#guard dynOrder.settleOrder.steps.map Stmt.targets = [[.whole `a], [.sig `o]]
+#guard dynOrder.settleOrder.steps.map Stmt.targets = [[.elem `a []], [.sig `o]]
 #guard (dynOrder.settle (dynOrder.initState.apply [(`x, w8 42), (`i, w2 1)])).toOption.bind
   (State.valueOf? · `o) = some 42
 

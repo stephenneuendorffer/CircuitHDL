@@ -29,7 +29,7 @@ def Stmt.targets : Stmt → List Signal
   | .assign x _ => [.sig x]
   | .store m _ _ _ => [.sig m]
   | .setElem a _ _ i _ => [.elem a i]
-  | .setDyn a _ _ _ _ => [.whole a]
+  | .setDyn a _ _ _ _ => [.elem a []]
   | .if_ _ t f => Stmt.targetsList t ++ Stmt.targetsList f
 
 def Stmt.targetsList : List Stmt → List Signal

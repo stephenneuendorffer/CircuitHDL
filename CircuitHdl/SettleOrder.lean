@@ -73,7 +73,7 @@ def Expr.uses : Expr → List Signal
   | .index m _ a => .sig m :: a.uses
   | .elem a _ _ i => [.elem a i]
   -- A dynamic read is a mux over every element, so it waits on all of them.
-  | .select a _ _ idx => .whole a :: idx.flatMap Expr.uses
+  | .select a _ _ idx => .elem a [] :: idx.flatMap Expr.uses
 
 end
 
@@ -135,22 +135,28 @@ lookup, because a dynamic write to `a` drives `a[3]` without being equal to it.
 overlapping drivers a lookup again rather than a scan over every statement:
 
 - `exact` counts each target as written;
-- `wholeDefs` counts the dynamic writes to each array;
-- `elemDefs` counts the element writes to each array, at any index.
+- `extending` counts, for each access, the targets that are **strict extensions** of it: a write
+  to `a[1][3]` is an extension of `a[1]` and of `a`.
 
-A read of `a[3]` is driven by the `a[3]` writers *and* every dynamic writer of `a`; a dynamic read
-of `a` is driven by both kinds. Keeping the two apart is what stops a dynamic write from being
-counted twice against itself. -/
+Two accesses overlap when one is a prefix of the other, so the targets overlapping `u` are the
+ones at a prefix of `u` -- of which there are at most `rank + 1`, each an exact lookup -- plus the
+ones extending it, which is the second map in one lookup. Counting the extensions at insert time
+rather than scanning for them at query time is what keeps this O(rank) instead of O(targets of
+that array), which matters: the mesh's link arrays have a hundred and twenty-eight elements. -/
 private structure Defs where
   exact : Std.HashMap Signal Nat := {}
-  wholeDefs : Std.HashMap Name Nat := {}
-  elemDefs : Std.HashMap Name Nat := {}
+  extending : Std.HashMap Signal Nat := {}
 
 private def Defs.add (d : Defs) (t : Signal) : Defs :=
   let d := { d with exact := d.exact.insert t (d.exact.getD t 0 + 1) }
   match t with
-  | .whole a => { d with wholeDefs := d.wholeDefs.insert a (d.wholeDefs.getD a 0 + 1) }
-  | .elem a _ => { d with elemDefs := d.elemDefs.insert a (d.elemDefs.getD a 0 + 1) }
+  | .elem a q =>
+      -- Every proper prefix of `q` gains an extension. `rank` is small, so this is a handful.
+      (List.range q.length).foldl
+        (fun d k =>
+          let key : Signal := .elem a (q.take k)
+          { d with extending := d.extending.insert key (d.extending.getD key 0 + 1) })
+        d
   | .sig _ => d
 
 /-- How many statement-targets overlap `u`. Equal by construction to
@@ -158,8 +164,12 @@ private def Defs.add (d : Defs) (t : Signal) : Defs :=
 one statement at a time. -/
 private def Defs.driving (d : Defs) : Signal → Nat
   | .sig x => d.exact.getD (.sig x) 0
-  | .elem a i => d.exact.getD (.elem a i) 0 + d.wholeDefs.getD a 0
-  | .whole a => d.wholeDefs.getD a 0 + d.elemDefs.getD a 0
+  | .elem a p =>
+      -- At a prefix of `u`, including `u` itself…
+      (List.range (p.length + 1)).foldl
+        (fun n k => n + d.exact.getD (.elem a (p.take k)) 0) 0
+      -- …and strictly beyond it.
+      + d.extending.getD (.elem a p) 0
 
 /-- Order `stmts` so every statement follows the statements that drive it.
 

@@ -283,13 +283,15 @@ private def lookupVal (σ : Scope) (x : Signal) : M Val := do
           match (← read).env.lookup x with
           | some w => constant w 0
           | none => throw (.check (.unbound x))
-      | .elem a _ =>
+      -- A whole or partial array is never a *value*: every access that produces one names an
+      -- element, or is a mux over several built one element at a time. Only a full index
+      -- reaches here with something to look up.
+      | .elem a idx =>
           match (← read).arrays.lookup a with
-          | some (_, w) => constant w 0
+          | some (dims, w) =>
+              if idx.length = dims.length then constant w 0
+              else throw (.check (.notAnArray a))
           | none => throw (.check (.unboundArray a))
-      -- A whole array is never a value: every access names an element, or is a mux over all of
-      -- them built one element at a time.
-      | .whole a => throw (.check (.notAnArray a))
 
 /-- Emit a memory read port, which is how `mem[addr]` lowers.
 
@@ -471,10 +473,15 @@ where
   single value a whole array could be muxed to, and each element already carries its own decoder
   mux from `lowerSeqStmt`. -/
   expand (ctx : Ctx) : Signal → List Signal
-    | .whole a =>
+    | .elem a idx =>
         match ctx.arrays.lookup a with
-        | some (dims, _) => (allIndices dims).map (Signal.elem a)
-        | none => []
+        -- A full index is one signal; anything shorter covers the elements under it, which is
+        -- every element for the `[]` a dynamic write leaves.
+        | some (dims, _) =>
+            if idx.length = dims.length then [.elem a idx]
+            else (allIndices dims).filterMap fun i =>
+              if idx.isPrefixOf i then some (.elem a i) else none
+        | none => [.elem a idx]
     | s => [s]
 
 /-- Reconcile the two arms of an `if` for one signal, taking each arm's value from its own scope

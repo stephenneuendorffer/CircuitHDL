@@ -438,7 +438,6 @@ private def encode (b : VeirBridge) (st : Veir.Netlist.State)
     | .elem a j =>
         let dims := (b.arrays.find? (·.1 == a)).map (·.2.1) |>.getD []
         elems := elems.insert a ((elems.getD a #[]).setIfInBounds (rowMajorOffset dims j) n)
-    | .whole _ => pure ()
   for (a, _, elemW) in b.arrays do
     out := out.setCell a (.mem ((elems.getD a #[]).toList.map (Value.ofNat elemW)))
   for (memEntry, i) in b.info.mems.zipIdx do
@@ -467,7 +466,7 @@ def VeirBridge.sim (b : VeirBridge) : Sim :=
       ++ (b.regKeys.toList.zipIdx.filterMap (fun (key, i) =>
             match key with
             -- Array elements are covered by the array's own cell, below.
-            | .elem _ _ | .whole _ => none
+            | .elem _ _ => none
             | .sig nm => some
               (nm, Cell.sig (Value.ofNat (match b.info.regs[i]? with
                 | some (op, _) =>

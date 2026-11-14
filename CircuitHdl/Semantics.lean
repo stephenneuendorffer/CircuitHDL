@@ -475,7 +475,6 @@ def State.valueAt? (σ : State) (arrays : List (Name × List Nat × Nat)) : Sign
       let (dims, _) ← arrays.lookup a
       let ws ← σ.memOf? a
       ws[rowMajorOffset dims i]?
-  | .whole _ => none
 
 /-- Write one `Signal`. Fails rather than ignoring an out-of-range element or a whole array, so a
 bridge that computed the wrong place says so instead of writing nowhere. -/
@@ -487,6 +486,6 @@ def State.setAt (σ : State) (arrays : List (Name × List Nat × Nat)) (s : Sign
       match arrays.lookup a with
       | some (dims, _) => σ.setMem a (rowMajorOffset dims i) v
       | none => .error (.check (.unboundArray a))
-  | .whole a => .error (.check (.notAnArray a))
+
 
 end CircuitHdl
