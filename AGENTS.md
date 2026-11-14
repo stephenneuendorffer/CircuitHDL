@@ -117,8 +117,32 @@ Things the surface syntax does *not* have, each of which has bitten:
   `sle` predicates, but Verilog decides signedness from operand *declarations* and this language
   has no such notion, so a signed form would mean inventing syntax for a case no design here
   needs. `CmpOp` stays unsigned, matching Verilog's default for unsigned operands.
-- **Arrays and `for` exist, and the index rule is semantic.** `reg r[depth] : dw;` is `depth`
-  registers; `memory m[depth] : dw;` is one `seq.firmem`. **An expression that reads no signal is
+- **An array has a shape, and every index is checked against its own dimension.** `reg r[4][4] :
+  8;` is sixteen registers addressed `r[i][j]`, and `rowMajorStrides` is the only place the
+  layout is decided -- the offset, its inverse, the evaluator's dynamic fold and the lowering's
+  address arithmetic all take their strides from there.
+
+  Per-dimension is not the same as checking the total, and that is the whole point: `r[0][7]` on
+  a 5x5 is offset 7, well inside the twenty-five elements and element `[1][2]`, so a bound on the
+  array as a whole accepts it and returns a neighbour's value.
+
+  **`r[i][j]` already meant bit `j` of element `i`** and still does on a one-dimensional array.
+  One rule keeps both: an array of `n` dimensions consumes the first `n` indices and the rest
+  apply to the result. Dispatch by declaration, as `a[i]` already does across array, memory and
+  bit select.
+
+  **A partial index is an array**, not a value: `r[1]` is the row, a *place*, so it copies
+  (`assign s = r[1];`) and binds (`.d(r[1])`). Static only -- a computed prefix is a mux per
+  element and a mux is neither writable nor bindable to an output. Binding a whole array is a
+  **renaming**, where an element-by-element binding has to be materialised: the prefix composes,
+  so the submodule's `d[sel]` is the parent's `r[1][sel]` and `instArrays` creates nothing.
+
+  Carrying one index per dimension makes `Expr` a *nested* inductive, and that is what stopped
+  `(asyncFifo d w).check` reducing by `rfl` -- the four theorems in `CircuitHdlTest/AsyncFifo.lean`
+  are `native_decide` now. The search not to repeat is written up beside them.
+
+- **`for` exists, and the index rule is semantic.** `memory m[depth] : dw;` is one `seq.firmem`,
+  and memories stay one-dimensional because a `seq.firmem` has one linear address. **An expression that reads no signal is
   computed before the design runs**, in an index and in value position alike, which is the whole
   of the escaping story: the circuit language computes with *signals*, so an expression over none
   of them is just a number. `r[i + 1]` and `assign mx[n] = n / 4;` need no escape, and the latter
@@ -429,6 +453,18 @@ Two **design**-level mutations cover the array work, and the first is the more i
 Skewing `selectChain`'s comparison (`addrEq addr (i + 1)`) reddens three theorems in
 `CircuitHdlTest/RegFile.lean` and the in-range pin in `CircuitHdlTest/Circt.lean`.
 
+**A convention both sides of a comparison share cannot be checked by comparing them**, and this
+has now bitten twice. Reversing `Port.wires` and `Port.signals` *together* is a consistent
+renaming of the boundary and leaves everything green; making the array layout column-major is a
+consistent permutation of storage and did the same, because writes and reads go through the same
+offset and the bridge reassembles the cell through it too. Both were measured, both times after
+assuming the behavioural checks would catch it.
+
+What catches each is a pin on the thing itself rather than on behaviour: the printed boundary in
+`portPick`, and the flat cell contents in `CircuitHdlTest/Grid.lean` -- where `[1][2]` is offset
+6 row-major and 9 column-major, so one line fixes the convention. **If you add a convention that
+both semantics follow, pin it directly; do not expect a comparison to find it.**
+
 **`portPick` in `CircuitHdlTest/Circt.lean` covers the one thing the netlist theorems cannot.**
 An array port is one cell inside and `n` wires outside; `Port.wires` names them and
 `Port.signals` says which element each is. Reversing **both** is not a defect -- the inputs and
@@ -440,6 +476,12 @@ with it by construction whatever it says. Measured both ways.
 Two mesh mutations cover the flattener's per-element connections, which replaced a renaming:
 skewing one binding (`.i[0].valid(lvalid[srcIdx(x, y, 0)])` to `srcIdx(x, y, 1)`) and making
 `instConnections` ignore direction each redden `CircuitHdlTest/Mesh4x4.lean`.
+
+**The two halves of a renaming are two code paths.** A submodule reading a bound array
+*statically* goes through `BindTarget.reindex` and one selecting from it *dynamically* through
+`reindexDyn`, so a test exercising only one leaves the other free to drop the prefix. Measured:
+`pick3` in `CircuitHdlTest/Grid.lean` read only `d[sel]` at first, and mutating the static half
+stayed green. It reads both ways now.
 
 **What is *not* independently mutable is the out-of-range element**, and this was worth finding
 out rather than assuming. "Element 0 is the chain's final else" and "element 0 is the chain's

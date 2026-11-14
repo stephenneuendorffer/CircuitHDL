@@ -328,10 +328,28 @@ surface alias, not real `wire` support.
 ```
 reg r[depth] : dw;       -- `depth` registers, each independently driven
 wire a[4] : 8;           -- the same, as wires
+reg g[4][4] : 8;         -- sixteen, in a shape
 r[0]   r[i]   r[#(n-1)]  -- one element, chosen before the design runs
 r[addr]                  -- a mux chain over every element
+g[i][j]  g[row][col]     -- the same two, a dimension at a time
+g[1]                     -- a *row*: an array, not a value
 for i < (depth - 1) { assign r[i] = r[#(i + 1)]; }
 ```
+
+An array has a **shape**, and every index is checked against its own dimension. That is not the
+same as checking the total: `g[0][7]` on a 4x4 is flat offset 7, well inside the sixteen
+elements and element `[1][3]`, so a bound on the array as a whole accepts it and hands back a
+neighbour's value.
+
+`g[i][j]` already parsed before shapes existed, as **bit `j` of element `i`**, and still does on
+a one-dimensional array. One rule covers both: an array of `n` dimensions consumes the first `n`
+indices and anything after them applies to the result, so `g[i][j][k]` is bit `k` of `g[i][j]`.
+
+A **partial** index is the array that is left -- `g[1]` is the row -- and being a place rather
+than a value it can be copied (`assign s = g[1];`) or bound to an array port (`.d(g[1])`). It
+must be static: a computed prefix would be a mux per element, and a mux is not a place. Binding
+a row is a *renaming* rather than a connection, since the prefix composes onto whatever the
+submodule does with its port.
 
 An array is `depth` separate registers where a `memory` is one `seq.firmem`; which one a design
 wants is a question of cost, not of behaviour. A read port on an array is a mux over outputs that
@@ -357,9 +375,9 @@ signal is an error — a Lean function takes a number, not a wire.
 
 `#(e)` remains as the escape for anything those two do not reach, but no design here needs it.
 
-A dynamic index is checked where it can be: an element index past the end of its array is a
-`CheckError`, because it is fixed before the design runs, while an address past the end is an
-`EvalError` for the same reason a memory address is. The **lowered** form cannot raise either, so
+An index is checked where it can be: a static one past the end of its dimension is a
+`CheckError`, because it is fixed before the design runs, while a dynamic one is an `EvalError`
+for the same reason a memory address is. The **lowered** form cannot raise either, so
 `r[addr]` out of range reads element 0 in the netlist — a mux tree has nowhere to put an error.
 That divergence is deliberate and pinned in `CircuitHdlTest/Circt.lean`, next to the one a
 `seq.firmem` address already has.
