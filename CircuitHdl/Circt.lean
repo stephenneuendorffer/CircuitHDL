@@ -157,8 +157,11 @@ def Scope.set (σ : Scope) (x : Signal) (v : Val) : Scope :=
 
 /-- The name a lowered array element carries, as a `seq.firreg` `name` attribute and therefore as
 the key the test harness reads it back by. `CircuitHdl.indexedName` is the one spelling, shared
-with the loop so that the two cannot drift. -/
-abbrev arrayRegName : Name → Nat → Name := indexedName
+with the loop so that the two cannot drift.
+
+An index per dimension, so element `[1][3]` of `r` is `r.1.3` -- what the declaration says, and
+a shape real CIRCT already accepts (`shiftFifo` reaches arcilator with `r.0`). -/
+def arrayRegName (a : Name) (idx : List Nat) : Name := idx.foldl indexedName a
 
 /-! ### The emitter
 
@@ -307,8 +310,8 @@ private def readPort (m : Name) (addr : Val) : M Val := do
         #[info.value, addr.ptr, (← clockValue info.clock).ptr]
       return { ptr := .opResult ⟨op, 0⟩, width := info.elemW }
 
-/-- The element count and width of a declared array. -/
-private def arrayInfo (a : Name) : M (Nat × Nat) := do
+/-- The shape and element width of a declared array. -/
+private def arrayInfo (a : Name) : M (List Nat × Nat) := do
   match (← read).arrays.lookup a with
   | some cw => pure cw
   | none => throw (.check (.unboundArray a))
@@ -344,12 +347,15 @@ comparison and a zero -- would be hardware that exists only to be wrong differen
 divergence is deliberate, pinned in `CircuitHdlTest/Circt.lean` alongside the one a `seq.firmem`
 address already has, and `selectChain_out_of_range` proves it is what a chain *must* do. -/
 private def selectChain (σ : Scope) (a : Name) (addr : Val) : M Val := do
-  let (count, elemW) ← arrayInfo a
-  let mut acc ← lookupVal σ (.elem a 0)
-  for i in [1 : count] do
+  let (dims, elemW) ← arrayInfo a
+  -- The chain is over the *flat* space -- the address is one number however many dimensions the
+  -- declaration has -- and `rowMajorIndex` turns each position back into the index the scope is
+  -- keyed by. `CircuitHdl/SelectChain.lean` proves this shape right at a flat address.
+  let mut acc ← lookupVal σ (.elem a (rowMajorIndex dims 0))
+  for i in [1 : cellSize dims] do
     if reachable addr.width i then
       let eq ← addrEq addr i
-      let v ← lookupVal σ (.elem a i)
+      let v ← lookupVal σ (.elem a (rowMajorIndex dims i))
       acc ← emit (.comb .mux) () elemW #[eq, v, acc]
   return acc
 
@@ -414,8 +420,8 @@ private def lowerExpr (σ : Scope) : Expr → M Val
       let v ← readPort m addr
       if v.width = elemW then return v
       else throw (.check (.widthMismatch s!"element of memory '{m}'" elemW v.width))
-  | .elem a _ i => lookupVal σ (.elem a i)
-  | .select a _ addr => do
+  | .elem a _ _ i => lookupVal σ (.elem a i)
+  | .select a _ _ addr => do
       let addr ← lowerExpr σ addr
       selectChain σ a addr
 
@@ -437,7 +443,7 @@ where
   expand (ctx : Ctx) : Signal → List Signal
     | .whole a =>
         match ctx.arrays.lookup a with
-        | some (count, _) => (List.range count).map (Signal.elem a)
+        | some (dims, _) => (allIndices dims).map (Signal.elem a)
         | none => []
     | s => [s]
 
@@ -460,10 +466,10 @@ private def lowerStmt (σ : Scope) : Stmt → M Scope
       return σ.set (.sig x) v
   | .store m _ _ _ => throw (.combinationalStore m)
   -- A statically indexed element is an ordinary wire, so this is `assign` with another key.
-  | .setElem a _ i e => do
+  | .setElem a _ _ i e => do
       let v ← lowerExpr σ e
       return σ.set (.elem a i) v
-  | .setDyn a _ _ _ => throw (.combinationalArrayWrite a)
+  | .setDyn a _ _ _ _ => throw (.combinationalArrayWrite a)
   | .if_ c t f => do
       let cv ← lowerExpr σ c
       let σt ← lowerStmtList σ t
@@ -525,7 +531,7 @@ private def lowerSeqStmt (σ₀ : Scope) (guards : Guards) (pending : Scope) : S
       let data ← lowerExpr σ₀ data
       writePort m (← materialize guards) addr data
       return pending
-  | .setElem a _ i e => do
+  | .setElem a _ _ i e => do
       let v ← lowerExpr σ₀ e
       return pending.set (.elem a i) v
   -- The decoder. Every element gets a mux on its own address comparison, holding what it had
@@ -535,16 +541,17 @@ private def lowerSeqStmt (σ₀ : Scope) (guards : Guards) (pending : Scope) : S
   -- The path condition is not needed: an enclosing `if` reconciles each element through
   -- `branchTargets`, exactly as it does an ordinary assignment. Only a memory write, which emits
   -- a port rather than a value, has to take the guard as an enable.
-  | .setDyn a _ addr data => do
+  | .setDyn a _ _ addr data => do
       let addr ← lowerExpr σ₀ addr
       let data ← lowerExpr σ₀ data
-      let (count, elemW) ← arrayInfo a
+      let (dims, elemW) ← arrayInfo a
       let mut out := pending
-      for i in [0 : count] do
+      for i in [0 : cellSize dims] do
         if reachable addr.width i then
+          let key : Signal := .elem a (rowMajorIndex dims i)
           let eq ← addrEq addr i
-          let old ← lookupVal (out ++ σ₀) (.elem a i)
-          out := out.set (.elem a i) (← emit (.comb .mux) () elemW #[eq, data, old])
+          let old ← lookupVal (out ++ σ₀) key
+          out := out.set key (← emit (.comb .mux) () elemW #[eq, data, old])
       return out
   | .if_ c t f => do
       let cv ← lowerExpr σ₀ c
@@ -724,8 +731,8 @@ def Module.toVeir (m : Module) :
     -- `mixedDrive` a scalar would be.
     let elems : List (Signal × Name × Nat) :=
       (env.reverse.map fun (x, w) => (Signal.sig x, x, w))
-      ++ (m.arrays.flatMap fun (a, count, elemW) =>
-            (List.range count).map fun i => (Signal.elem a i, arrayRegName a i, elemW))
+      ++ (m.arrays.flatMap fun (a, dims, elemW) =>
+            (allIndices dims).map fun i => (Signal.elem a i, arrayRegName a i, elemW))
     for (key, regName, w) in elems do
       match ← ofExcept (Module.driveOf m key.name) with
       | .register c =>

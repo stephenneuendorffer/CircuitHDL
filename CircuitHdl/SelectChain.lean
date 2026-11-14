@@ -45,13 +45,13 @@ open Lean
 `selectChain .. (count - 1)`. The `2 ^ addrW` guard is `Circt.selectChain`'s `reachable`: an arm
 whose index does not fit the address would compare against a truncated literal, which is worse
 than useless -- it would fire on an address that means something else. -/
-def Expr.selectChain (a : Name) (elemW addrW : Nat) (addr : Expr) : Nat → Expr
-  | 0 => .elem a elemW 0
+def Expr.selectChain (a : Name) (elemW addrW count : Nat) (addr : Expr) : Nat → Expr
+  | 0 => .elem a elemW [count] [0]
   | k + 1 =>
       if k + 1 < 2 ^ addrW then
-        .mux (.cmp CmpOp.eq addrW addr (.lit addrW (k + 1))) (.elem a elemW (k + 1))
-          (Expr.selectChain a elemW addrW addr k)
-      else Expr.selectChain a elemW addrW addr k
+        .mux (.cmp CmpOp.eq addrW addr (.lit addrW (k + 1))) (.elem a elemW [count] [k + 1])
+          (Expr.selectChain a elemW addrW count addr k)
+      else Expr.selectChain a elemW addrW count addr k
 
 /-- Which element a chain covering `0 .. k` settles on: the addressed one when the chain reaches
 it, and element 0 -- the final else -- when it does not. -/
@@ -94,17 +94,19 @@ the width is a literal: `simp` compares the second argument syntactically, and `
 
 /-! ### The two reads, each on its own -/
 
-theorem eval_elem_eq {σ : State} {a : Name} {ws : List Value} {elemW i : Nat}
+theorem eval_elem_eq {σ : State} {a : Name} {ws : List Value} {elemW count i : Nat}
     (h : σ.HoldsArray a ws elemW) (hi : i < ws.length) :
-    Expr.eval σ (.elem a elemW i) = .ok ws[i] := by
+    Expr.eval σ (.elem a elemW [count] [i]) = .ok ws[i] := by
   have hw : ws[i].width = elemW := h.widths _ (List.getElem_mem hi)
-  simp only [Expr.eval, State.getMem?, h.cell, List.getElem?_eq_getElem hi]
+  simp only [Expr.eval, rowMajorOffset_singleton, State.getMem?, h.cell,
+    List.getElem?_eq_getElem hi]
   exact ite_eq_left hw
 
-theorem eval_elem_out_of_range {σ : State} {a : Name} {ws : List Value} {elemW i : Nat}
+theorem eval_elem_out_of_range {σ : State} {a : Name} {ws : List Value} {elemW count i : Nat}
     (h : σ.HoldsArray a ws elemW) (hi : ws.length ≤ i) :
-    Expr.eval σ (.elem a elemW i) = .error (.indexOutOfRange a i ws.length) := by
-  simp only [Expr.eval, State.getMem?, h.cell, List.getElem?_eq_none_iff.mpr hi]
+    Expr.eval σ (.elem a elemW [count] [i]) = .error (.indexOutOfRange a i ws.length) := by
+  simp only [Expr.eval, rowMajorOffset_singleton, State.getMem?, h.cell,
+    List.getElem?_eq_none_iff.mpr hi]
   rfl
 
 /-- **A dynamic read at a known address is the element read at that index.** The two reach the
@@ -113,22 +115,22 @@ the address has been evaluated there is no difference left at all.
 
 Everything else about `select` follows from this and the `elem` lemmas, which is why the chain
 proof below never unfolds `select` again. -/
-theorem eval_select_eq_elem {σ : State} {a : Name} {elemW : Nat} {addr : Expr} {av : Value}
+theorem eval_select_eq_elem {σ : State} {a : Name} {elemW count : Nat} {addr : Expr} {av : Value}
     (haddr : Expr.eval σ addr = .ok av) :
-    Expr.eval σ (.select a elemW addr) = Expr.eval σ (.elem a elemW av.toNat) := by
-  simp only [Expr.eval, haddr]
+    Expr.eval σ (.select a elemW [count] addr) = Expr.eval σ (.elem a elemW [count] [av.toNat]) := by
+  simp only [Expr.eval, rowMajorOffset_singleton, haddr]
   rfl
 
-theorem eval_select_eq {σ : State} {a : Name} {ws : List Value} {elemW : Nat} {addr : Expr}
+theorem eval_select_eq {σ : State} {a : Name} {ws : List Value} {elemW count : Nat} {addr : Expr}
     {av : Value} (h : σ.HoldsArray a ws elemW) (haddr : Expr.eval σ addr = .ok av)
     (hi : av.toNat < ws.length) :
-    Expr.eval σ (.select a elemW addr) = .ok ws[av.toNat] := by
+    Expr.eval σ (.select a elemW [count] addr) = .ok ws[av.toNat] := by
   rw [eval_select_eq_elem haddr, eval_elem_eq h hi]
 
-theorem eval_select_out_of_range {σ : State} {a : Name} {ws : List Value} {elemW : Nat}
+theorem eval_select_out_of_range {σ : State} {a : Name} {ws : List Value} {elemW count : Nat}
     {addr : Expr} {av : Value} (h : σ.HoldsArray a ws elemW)
     (haddr : Expr.eval σ addr = .ok av) (hi : ws.length ≤ av.toNat) :
-    Expr.eval σ (.select a elemW addr) = .error (.indexOutOfRange a av.toNat ws.length) := by
+    Expr.eval σ (.select a elemW [count] addr) = .error (.indexOutOfRange a av.toNat ws.length) := by
   rw [eval_select_eq_elem haddr, eval_elem_out_of_range h hi]
 
 /-! ### The pieces of one arm -/
@@ -175,11 +177,11 @@ The induction has to carry the fall-through case -- an address beyond `k` reads 
 is why this is stated over `chainIndex` rather than only for addresses in range. The address is
 destructured here rather than carried as a `Value` with a width hypothesis, so that nothing in
 the proof has to move a `BitVec` across a cast. -/
-theorem eval_selectChain_eq {σ : State} {a : Name} {ws : List Value} {elemW addrW : Nat}
+theorem eval_selectChain_eq {σ : State} {a : Name} {ws : List Value} {elemW addrW count : Nat}
     {addr : Expr} {ab : BitVec addrW} (h : σ.HoldsArray a ws elemW)
     (haddr : Expr.eval σ addr = .ok ⟨addrW, ab⟩) :
     ∀ {k : Nat} (hk : k < ws.length),
-      Expr.eval σ (Expr.selectChain a elemW addrW addr k)
+      Expr.eval σ (Expr.selectChain a elemW addrW count addr k)
         = .ok (ws[chainIndex ab.toNat k]'(chainIndex_lt hk)) := by
   intro k
   induction k with
@@ -231,12 +233,12 @@ theorem eval_selectChain_eq {σ : State} {a : Name} {ws : List Value} {elemW add
 /-- **A dynamic read is the mux chain.** They are the same value, at every width, every depth and
 every address in range -- which is the claim `CircuitHdl/Circt.lean` relies on and cannot make
 for itself. -/
-theorem eval_select_eq_selectChain {σ : State} {a : Name} {ws : List Value} {elemW addrW : Nat}
+theorem eval_select_eq_selectChain {σ : State} {a : Name} {ws : List Value} {elemW addrW count : Nat}
     {addr : Expr} {av : Value} (h : σ.HoldsArray a ws elemW)
     (haddr : Expr.eval σ addr = .ok av) (hav : av.width = addrW)
     (hi : av.toNat < ws.length) :
-    Expr.eval σ (.select a elemW addr)
-      = Expr.eval σ (Expr.selectChain a elemW addrW addr (ws.length - 1)) := by
+    Expr.eval σ (.select a elemW [count] addr)
+      = Expr.eval σ (Expr.selectChain a elemW addrW count addr (ws.length - 1)) := by
   obtain ⟨aw, ab⟩ := av
   simp only at hav
   subst hav
@@ -249,12 +251,12 @@ theorem eval_select_eq_selectChain {σ : State} {a : Name} {ws : List Value} {el
 /-- **And out of range they part, in exactly the documented way**: the chain falls through to
 element 0 where the read raises. So the divergence `AGENTS.md` records is not an accident of one
 lowering -- it is what a mux tree *must* do, having nowhere to put an error. -/
-theorem selectChain_out_of_range {σ : State} {a : Name} {ws : List Value} {elemW addrW : Nat}
+theorem selectChain_out_of_range {σ : State} {a : Name} {ws : List Value} {elemW addrW count : Nat}
     {addr : Expr} {av : Value} (h : σ.HoldsArray a ws elemW)
     (haddr : Expr.eval σ addr = .ok av) (hav : av.width = addrW) (hne : 0 < ws.length)
     (hi : ws.length ≤ av.toNat) :
-    Expr.eval σ (Expr.selectChain a elemW addrW addr (ws.length - 1)) = .ok ws[0]
-      ∧ Expr.eval σ (.select a elemW addr)
+    Expr.eval σ (Expr.selectChain a elemW addrW count addr (ws.length - 1)) = .ok ws[0]
+      ∧ Expr.eval σ (.select a elemW [count] addr)
           = .error (.indexOutOfRange a av.toNat ws.length) := by
   refine ⟨?_, eval_select_out_of_range h haddr hi⟩
   obtain ⟨aw, ab⟩ := av

@@ -235,14 +235,14 @@ writing two elements lands both, and that an index past the end is an error rath
 private def rfile : Module :=
   Module.ofItems `rfile
     [(`clk, 1), (`we, 1), (`wa, 2), (`wd, 8), (`ra, 2)] [(`rd, 8), (`first, 8)]
-    [ Item.array `r 4 8,
-      Item.stmt (.assign `rd (.select `r 8 (.var `ra))),
-      Item.stmt (.assign `first (.elem `r 8 0)),
+    [ Item.array `r [4] 8,
+      Item.stmt (.assign `rd (.select `r 8 [4] (.var `ra))),
+      Item.stmt (.assign `first (.elem `r 8 [4] [0])),
       Item.always (.posedge `clk)
-        [.if_ (.var `we) [.setDyn `r 8 (.var `wa) (.var `wd)] []] ]
+        [.if_ (.var `we) [.setDyn `r 8 [4] (.var `wa) (.var `wd)] []] ]
 
 #guard (Module.check rfile).isOk
-#guard rfile.arrays = [(`r, 4, 8)]
+#guard rfile.arrays = [(`r, [4], 8)]
 -- An array is one cell holding four values, not four signals.
 #guard (rfile.initState.memOf? `r) = some [0, 0, 0, 0]
 
@@ -266,9 +266,10 @@ private def rfileRun : Option (List (Option (List Nat) × Option Nat)) :=
 builds on the block's earlier pending write, the way a second store to one memory does. -/
 private def twoWrites : Module :=
   Module.ofItems `twoWrites [(`clk, 1)] [(`o, 8)]
-    [ Item.array `a 4 8,
-      Item.stmt (.assign `o (.elem `a 8 1)),
-      Item.always (.posedge `clk) [.setElem `a 8 0 (.lit 8 7), .setElem `a 8 1 (.lit 8 9)] ]
+    [ Item.array `a [4] 8,
+      Item.stmt (.assign `o (.elem `a 8 [4] [1])),
+      Item.always (.posedge `clk)
+        [.setElem `a 8 [4] [0] (.lit 8 7), .setElem `a 8 [4] [1] (.lit 8 9)] ]
 
 #guard (twoWrites.step twoWrites.initState [(`clk, c 1 1)]).toOption.bind
   (State.memOf? · `a) = some [7, 9, 0, 0]
@@ -278,7 +279,7 @@ for the same reason: a pointer bug should surface rather than silently alias. Th
 *cannot* do this, and the divergence is pinned in `CircuitHdlTest/Circt.lean`. -/
 private def oob : Module :=
   Module.ofItems `oob [(`i, 4)] [(`o, 8)]
-    [ Item.array `a 3 8, Item.stmt (.assign `o (.select `a 8 (.var `i))) ]
+    [ Item.array `a [3] 8, Item.stmt (.assign `o (.select `a 8 [3] (.var `i))) ]
 
 /-- info: Except.error (CircuitHdl.EvalError.indexOutOfRange `a 5 3) -/
 #guard_msgs in #eval oob.settle (oob.initState.apply [(`i, c 4 5)])

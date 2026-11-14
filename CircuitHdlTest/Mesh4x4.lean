@@ -62,9 +62,13 @@ private def meshNodes : List (Nat × Nat) :=
 -- `nodeIdx`. A port of node `(x, y)` is therefore a place inside a cell and not a name of its own,
 -- which is why the driver below writes whole cells -- `State.apply` merges a cell at a time -- and
 -- reads results with `valueAt?` rather than `valueOf?`.
-private def ejValidAt (x y : Nat) : Signal := .elem `ej.valid (nodeIdx x y)
-private def ejDataAt (x y : Nat) : Signal := .elem `ej.data (nodeIdx x y)
-private def injReadyAt (x y : Nat) : Signal := .elem `inj.ready (nodeIdx x y)
+-- The shapes, so an element can be read out of the flat cell it lives in. A `Sim` does not
+-- carry them -- it is just init/settle/step -- so the driver takes them from the design.
+private def meshArrays : List (Name × List Nat × Nat) := (mesh4x4 meshW).allArrays
+
+private def ejValidAt (x y : Nat) : Signal := .elem `ej.valid [nodeIdx x y]
+private def ejDataAt (x y : Nat) : Signal := .elem `ej.data [nodeIdx x y]
+private def injReadyAt (x y : Nat) : Signal := .elem `inj.ready [nodeIdx x y]
 
 /-- One array port's worth of values, in `nodeIdx` order. `meshNodes` is x-major and `nodeIdx` is
 `x * 4 + y`, so the list is already in element order. -/
@@ -103,11 +107,11 @@ def runMesh (s : Sim) (qs : List SourceQueue) (ticks : Nat) :
     let σs ← s.settle (σ.apply ins)
     -- Ejections this cycle. `ready` is held high, so a raised `valid` *is* a transfer.
     for (x, y) in meshNodes do
-      if σs.valueAt? (ejValidAt x y) == some 1 then
-        out := out ++ [(x, y, (σs.valueAt? (ejDataAt x y)).getD 0)]
+      if σs.valueAt? meshArrays (ejValidAt x y) == some 1 then
+        out := out ++ [(x, y, (σs.valueAt? meshArrays (ejDataAt x y)).getD 0)]
     -- Retire an injected flit the switch accepted.
     queues := queues.map fun (node, fs) =>
-      if σs.valueAt? (injReadyAt node.1 node.2) == some 1 then (node, fs.drop 1) else (node, fs)
+      if σs.valueAt? meshArrays (injReadyAt node.1 node.2) == some 1 then (node, fs.drop 1) else (node, fs)
     σ ← s.stepClock `clk σ ins
   return out
 

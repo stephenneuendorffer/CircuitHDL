@@ -37,16 +37,16 @@ prevent one level up.
 #guard Signal.overlaps (.sig `a) (.sig `a)
 #guard !Signal.overlaps (.sig `a) (.sig `b)
 -- Two elements meet only at the same index. This is the line that keeps an array schedulable.
-#guard Signal.overlaps (.elem `a 3) (.elem `a 3)
-#guard !Signal.overlaps (.elem `a 3) (.elem `a 2)
-#guard !Signal.overlaps (.elem `a 3) (.elem `b 3)
+#guard Signal.overlaps (.elem `a [3]) (.elem `a [3])
+#guard !Signal.overlaps (.elem `a [3]) (.elem `a [2])
+#guard !Signal.overlaps (.elem `a [3]) (.elem `b [3])
 -- A dynamic access is every element, so it meets each of them, in both directions.
-#guard Signal.overlaps (.whole `a) (.elem `a 3)
-#guard Signal.overlaps (.elem `a 0) (.whole `a)
+#guard Signal.overlaps (.whole `a) (.elem `a [3])
+#guard Signal.overlaps (.elem `a [0]) (.whole `a)
 #guard Signal.overlaps (.whole `a) (.whole `a)
-#guard !Signal.overlaps (.whole `a) (.elem `b 0)
+#guard !Signal.overlaps (.whole `a) (.elem `b [0])
 -- A name is either an array or it is not, so these never meet whatever the index.
-#guard !Signal.overlaps (.sig `a) (.elem `a 0)
+#guard !Signal.overlaps (.sig `a) (.elem `a [0])
 #guard !Signal.overlaps (.sig `a) (.whole `a)
 
 /-! ### A module written back to front
@@ -178,14 +178,14 @@ silently read stale values, while the loop detector stops seeing the loops it is
 order -- `a[0]` then `a[1]` -- and finding it is the whole point. -/
 private def crossed : Module :=
   Module.ofItems `crossed [(`x, 8)] [(`o, 8)]
-    [ Item.array `a 2 8,
-      Item.stmt (.assign `o (.elem `a 8 1)),
-      Item.stmt (.setElem `a 8 1 (.elem `a 8 0)),
-      Item.stmt (.setElem `a 8 0 (.var `x)) ]
+    [ Item.array `a [2] 8,
+      Item.stmt (.assign `o (.elem `a 8 [2] [1])),
+      Item.stmt (.setElem `a 8 [2] [1] (.elem `a 8 [2] [0])),
+      Item.stmt (.setElem `a 8 [2] [0] (.var `x)) ]
 
 #guard crossed.settleOrder.unresolved = []
 #guard crossed.settleOrder.steps.map Stmt.targets
-  = [[.elem `a 0], [.elem `a 1], [.sig `o]]
+  = [[.elem `a [0]], [.elem `a [1]], [.sig `o]]
 -- Both elements take `x`, and the output sees it in the same pass.
 #guard (crossed.settle (crossed.initState.apply [(`x, w8 42)])).toOption.bind
   (State.memOf? · `a) = some [42, 42]
@@ -193,9 +193,9 @@ private def crossed : Module :=
 /-- A dynamic write touches every element, so a static read of one of them waits for it. -/
 private def dynOrder : Module :=
   Module.ofItems `dynOrder [(`x, 8), (`i, 2)] [(`o, 8)]
-    [ Item.array `a 2 8,
-      Item.stmt (.assign `o (.elem `a 8 1)),
-      Item.stmt (.setDyn `a 8 (.var `i) (.var `x)) ]
+    [ Item.array `a [2] 8,
+      Item.stmt (.assign `o (.elem `a 8 [2] [1])),
+      Item.stmt (.setDyn `a 8 [2] (.var `i) (.var `x)) ]
 
 #guard dynOrder.settleOrder.steps.map Stmt.targets = [[.whole `a], [.sig `o]]
 #guard (dynOrder.settle (dynOrder.initState.apply [(`x, w8 42), (`i, w2 1)])).toOption.bind
@@ -217,16 +217,16 @@ The three elements take *different* values on purpose: with the bug the output s
 in it, so a test whose elements agreed would have passed. -/
 private def multiRead : Module :=
   Module.ofItems `multiRead [(`x, 8)] [(`o, 8)]
-    [ Item.array `a 3 8,
+    [ Item.array `a [3] 8,
       Item.stmt (.assign `o
-        (.bin .add 8 (.elem `a 8 0) (.bin .add 8 (.elem `a 8 1) (.elem `a 8 2)))),
-      Item.stmt (.setElem `a 8 0 (.var `x)),
-      Item.stmt (.setElem `a 8 1 (.lit 8 2)),
-      Item.stmt (.setElem `a 8 2 (.lit 8 4)) ]
+        (.bin .add 8 (.elem `a 8 [3] [0]) (.bin .add 8 (.elem `a 8 [3] [1]) (.elem `a 8 [3] [2])))),
+      Item.stmt (.setElem `a 8 [3] [0] (.var `x)),
+      Item.stmt (.setElem `a 8 [3] [1] (.lit 8 2)),
+      Item.stmt (.setElem `a 8 [3] [2] (.lit 8 4)) ]
 
 #guard multiRead.settleOrder.unresolved = []
 #guard multiRead.settleOrder.steps.map Stmt.targets
-  = [[.elem `a 0], [.elem `a 1], [.elem `a 2], [.sig `o]]
+  = [[.elem `a [0]], [.elem `a [1]], [.elem `a [2]], [.sig `o]]
 #guard (multiRead.settle (multiRead.initState.apply [(`x, w8 9)])).toOption.bind
   (State.valueOf? · `o) = some 15
 
@@ -234,12 +234,12 @@ private def multiRead : Module :=
 reported as the two elements rather than as the array. -/
 private def arrLoop : Module :=
   Module.ofItems `arrLoop [] [(`o, 1)]
-    [ Item.array `a 2 1,
-      Item.stmt (.setElem `a 1 0 (.elem `a 1 1)),
-      Item.stmt (.setElem `a 1 1 (.elem `a 1 0)),
-      Item.stmt (.assign `o (.elem `a 1 0)) ]
+    [ Item.array `a [2] 1,
+      Item.stmt (.setElem `a 1 [2] [0] (.elem `a 1 [2] [1])),
+      Item.stmt (.setElem `a 1 [2] [1] (.elem `a 1 [2] [0])),
+      Item.stmt (.assign `o (.elem `a 1 [2] [0])) ]
 
-#guard arrLoop.settleOrder.unresolved = [.elem `a 1, .elem `a 0]
+#guard arrLoop.settleOrder.unresolved = [.elem `a [1], .elem `a [0]]
 
 /-! ### The mesh, which is the case the file was written for
 

@@ -311,7 +311,7 @@ structure VeirBridge where
   /-- Memory names, parallel to `info.mems`. -/
   memNames : Array Name
   /-- The source module's arrays, which `encode` reassembles from their elements. -/
-  arrays : Array (Name × Nat × Nat)
+  arrays : Array (Name × List Nat × Nat)
   /-- A zeroed state, so `decode` does not rebuild one every tick. -/
   blank : Veir.Netlist.State
   /-- Register widths, parallel to `info.regs`. -/
@@ -332,8 +332,8 @@ private def resolveSignal (m : Module) (s : Veir.StringAttr) : Signal :=
   let str := String.fromUTF8! s.value
   let candidates : List Signal :=
     (m.regs.map (Signal.sig ·.1))
-    ++ (m.arrays.flatMap fun (a, count, _) =>
-          (List.range count).map fun i => Signal.elem a i)
+    ++ (m.arrays.flatMap fun (a, dims, _) =>
+          (allIndices dims).map fun i => Signal.elem a i)
   match candidates.find? (fun k => (keyName k).toString == str) with
   | some k => k
   | none => .sig (Name.mkSimple str)
@@ -396,7 +396,7 @@ private def toNat? (v : Veir.RuntimeValue) : Option Nat :=
 private def decode (b : VeirBridge) (σ : State) : Option (Array Veir.RuntimeValue × Veir.Netlist.State) := do
   let mut args : Array Veir.RuntimeValue := #[]
   for (x, w) in b.inputs do
-    args := args.push (rv w ((σ.valueAt? x).getD 0))
+    args := args.push (rv w ((σ.valueAt? b.arrays.toList x).getD 0))
   let mut regs := b.blank.regs
   for (rg, i) in b.info.regs.zipIdx do
     let (op, _) := rg
@@ -404,10 +404,7 @@ private def decode (b : VeirBridge) (σ : State) : Option (Array Veir.RuntimeVal
     let some w := b.regWidths[i]? | none
     -- An array lives in one cell on this side and in `count` registers on the other, so an
     -- element is read out of the cell by index.
-    let n := match key with
-      | .sig x => (σ.valueOf? x).getD 0
-      | .elem a j => (((σ.memOf? a).bind (·[j]?))).getD 0
-      | .whole _ => 0
+    let n := (σ.valueAt? b.arrays.toList key).getD 0
     regs := regs.setIfInBounds op.id (rv w n)
   let mut st : Veir.Netlist.State := { b.blank with regs }
   for (memEntry, i) in b.info.mems.zipIdx do
@@ -427,7 +424,7 @@ private def encode (b : VeirBridge) (st : Veir.Netlist.State)
   -- Each array is rebuilt whole, because `State` holds it as one cell: an element written on its
   -- own would need the other `count - 1` to be read back out and put in beside it.
   let mut elems : Std.HashMap Name (Array Nat) :=
-    b.arrays.foldl (fun h (a, count, _) => h.insert a (Array.replicate count 0)) {}
+    b.arrays.foldl (fun h (a, dims, _) => h.insert a (Array.replicate (cellSize dims) 0)) {}
   for (rg, i) in b.info.regs.zipIdx do
     let (op, _) := rg
     let some key := b.regKeys[i]? | none
@@ -436,7 +433,11 @@ private def encode (b : VeirBridge) (st : Veir.Netlist.State)
     let w := match v with | .int w _ => w | _ => 0
     match key with
     | .sig x => out := out.set x (Value.ofNat w n)
-    | .elem a j => elems := elems.insert a ((elems.getD a #[]).setIfInBounds j n)
+    -- The netlist has one `seq.firreg` per element and the evaluator one flat cell, so an
+    -- element's indices have to become the offset the cell is keyed by.
+    | .elem a j =>
+        let dims := (b.arrays.find? (·.1 == a)).map (·.2.1) |>.getD []
+        elems := elems.insert a ((elems.getD a #[]).setIfInBounds (rowMajorOffset dims j) n)
     | .whole _ => pure ()
   for (a, _, elemW) in b.arrays do
     out := out.setCell a (.mem ((elems.getD a #[]).toList.map (Value.ofNat elemW)))
@@ -451,7 +452,7 @@ private def encode (b : VeirBridge) (st : Veir.Netlist.State)
     let (x, w) := port
     let some v := outs[i]? | none
     let some n := toNat? v | none
-    let .ok o := out.setAt x (Value.ofNat w n) | none
+    let .ok o := out.setAt b.arrays.toList x (Value.ofNat w n) | none
     out := o
   return out
 
@@ -474,8 +475,8 @@ def VeirBridge.sim (b : VeirBridge) : Sim :=
                     | some (.int w _) => w
                     | _ => 0
                 | none => 0) 0))))
-      ++ (b.arrays.toList.map (fun (a, count, elemW) =>
-            (a, Cell.mem (List.replicate count (Value.ofNat elemW 0)))))
+      ++ (b.arrays.toList.map (fun (a, dims, elemW) =>
+            (a, Cell.mem (List.replicate (cellSize dims) (Value.ofNat elemW 0)))))
       ++ (b.memNames.toList.zipIdx.map (fun (nm, i) =>
             (nm, Cell.mem (match b.info.mems[i]? with
               | some (_, mt) => List.replicate mt.depth (Value.ofNat mt.width 0)

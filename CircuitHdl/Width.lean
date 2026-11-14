@@ -21,16 +21,20 @@ abbrev Env := List (Name × Nat)
 /-- Memory declarations: each name mapped to its depth and element width. -/
 abbrev MemEnv := List (Name × Nat × Nat)
 
+/-- Array declarations: each name mapped to its *shape* and element width. Separate from `MemEnv`
+because a memory has one linear address where an array has dimensions. -/
+abbrev ArrEnv := List (Name × List Nat × Nat)
+
 /-- Everything checking needs. `inputs` is tracked separately from `env` because assigning to an
 input port is an error even though the port has a perfectly good width, and memories are tracked
 separately from signals because they are indexed rather than read whole. -/
 structure Ctx where
   env : Env
   inputs : List Name := []
-  /-- Arrays, as `(name, element count, element width)`. Shaped like `MemEnv` and kept apart from
-  it for the same reason memories are kept apart from signals: what a name means when it is
-  indexed is decided by which list declares it. -/
-  arrays : MemEnv := []
+  /-- Arrays, as `(name, shape, element width)`. Kept apart from `mems` for the same reason
+  memories are kept apart from signals: what a name means when it is indexed is decided by which
+  list declares it. -/
+  arrays : ArrEnv := []
   mems : MemEnv := []
   deriving Repr
 
@@ -55,9 +59,20 @@ inductive CheckError where
   | unboundArray : Name → CheckError
   /-- Something that is not an array -- a scalar, or a memory -- indexed as though it were one. -/
   | notAnArray : Name → CheckError
-  /-- An element index past the end of its array. Unlike a memory address, which is a value and so
-  can only be checked when it is evaluated, this one is fixed before the design runs. -/
-  | elemRange : Name → (idx count : Nat) → CheckError
+  /-- An element index past the end of its dimension. Unlike a memory address, which is a value
+  and so can only be checked when it is evaluated, this one is fixed before the design runs.
+
+  The dimension's *position* is carried as well as its extent, because on a multi-dimensional
+  array "7 is out of range" is not enough to find the fault: `r[0][7]` on a 5x5 is in range for
+  the twenty-five elements and wrong in dimension 1, and catching that is the whole reason the
+  shape sits on the declaration. -/
+  | elemRange : Name → (dim idx extent : Nat) → CheckError
+  /-- An access whose recorded shape is not the declared one. Only reachable from an AST built by
+  hand: the macro reads the shape off the declaration. -/
+  | shapeMismatch : Name → (declared actual : List Nat) → CheckError
+  /-- An access naming the wrong number of dimensions -- `r[1]` on a 2-D array, or `r[1][2]` on a
+  1-D one. A partial index is not an element. -/
+  | rank : Name → (declared actual : Nat) → CheckError
   /-- A name declared twice with disagreeing widths. -/
   | conflictingDecl : Name → (w₁ w₂ : Nat) → CheckError
   /-- An instance binding naming a port the submodule does not have. -/
@@ -99,8 +114,12 @@ def render : CheckError → String
   | notAMemory x => s!"'{x}' is a scalar signal, not a memory"
   | unboundArray x => s!"unknown array '{x}'; it is not a declared array"
   | notAnArray x => s!"'{x}' is not an array"
-  | elemRange a i c =>
-      s!"element {i} is out of range for array '{a}', which has {c} elements"
+  | elemRange a d i c =>
+      s!"index {i} is out of range for dimension {d} of array '{a}', which has {c} elements"
+  | shapeMismatch a declared actual =>
+      s!"array '{a}' is declared {declared} but this access records {actual}"
+  | rank a declared actual =>
+      s!"array '{a}' has {declared} dimension(s) and this access gives {actual}"
   | conflictingDecl x w₁ w₂ => s!"'{x}' is declared both {w₁} bits and {w₂} bits wide"
   | noSuchPort inst port =>
       s!"instance '{inst}' binds '{port}', which is not a port of the module it instantiates"
@@ -178,22 +197,41 @@ def Ctx.memOf (ctx : Ctx) (x : Name) : Except CheckError (Nat × Nat) :=
 /-- Resolve an array to its element count and element width, the counterpart of `memOf`. A name
 that is declared as something else -- a signal, or a memory -- is `notAnArray` rather than
 unbound, so an array access to a memory says what is actually wrong. -/
-def Ctx.arrayOf (ctx : Ctx) (x : Name) : Except CheckError (Nat × Nat) :=
+def Ctx.arrayOf (ctx : Ctx) (x : Name) : Except CheckError (List Nat × Nat) :=
   match ctx.arrays.lookup x with
   | some cw => .ok cw
   | none =>
       if (ctx.env.lookup x).isSome || (ctx.mems.lookup x).isSome then .error (.notAnArray x)
       else .error (.unboundArray x)
 
-/-- The element width an array access must have, and a check that a static index is in range.
-Shared by the expression and statement rules so the two cannot drift. -/
-def Ctx.elemWidth (ctx : Ctx) (a : Name) (elemW : Nat) (idx : Option Nat) :
+/-- The element width an array access must have, that the access agrees with the declaration
+about the array's *shape*, and that a static index is in range in every dimension. Shared by the
+expression and statement rules so the two cannot drift.
+
+The shape check is the counterpart of the width check beside it: a node carries `dims` so that
+renaming stays context-free, and carrying it means it can disagree with the declaration, so it is
+compared rather than believed. -/
+def Ctx.elemWidth (ctx : Ctx) (a : Name) (elemW : Nat) (dims : List Nat) (idx : Option (List Nat)) :
     Except CheckError Nat := do
-  let (count, declaredW) ← ctx.arrayOf a
+  let (declaredDims, declaredW) ← ctx.arrayOf a
   expectWidth s!"element of array '{a}'" declaredW elemW
+  if dims ≠ declaredDims then .error (.shapeMismatch a declaredDims dims)
   match idx with
-  | some i => if i < count then .ok elemW else .error (.elemRange a i count)
   | none => .ok elemW
+  | some i =>
+      if i.length ≠ dims.length then .error (.rank a dims.length i.length)
+      else do
+        let _ ← inRange 0 dims i
+        .ok elemW
+where
+  /-- Every dimension, not just the flat total. `r[0][7]` on a 5x5 is offset 7, which is in range
+  for the twenty-five elements and is element `[1][2]` -- a wrong value, silently, which is the
+  failure this whole shape exists to make reportable. -/
+  inRange (d : Nat) : List Nat → List Nat → Except CheckError Unit
+    | _, [] => .ok ()
+    | [], _ => .ok ()
+    | ext :: ds, v :: vs =>
+        if v < ext then inRange (d + 1) ds vs else .error (.elemRange a d v ext)
 
 /-- The width of an expression, checking that the widths recorded on each node are consistent.
 
@@ -236,9 +274,9 @@ def Expr.width? (ctx : Ctx) : Expr → Except CheckError Nat
       -- evaluator against the memory's actual depth.
       let _ ← Expr.width? ctx addr
       .ok elemW
-  | .elem a elemW i => ctx.elemWidth a elemW (some i)
-  | .select a elemW addr => do
-      let w ← ctx.elemWidth a elemW none
+  | .elem a elemW ds i => ctx.elemWidth a elemW ds (some i)
+  | .select a elemW ds addr => do
+      let w ← ctx.elemWidth a elemW ds none
       let _ ← Expr.width? ctx addr
       .ok w
 
@@ -259,13 +297,13 @@ def Stmt.check (ctx : Ctx) : Stmt → Except CheckError Unit
   -- An array may now be an input *port*, which a plain array never was -- so a write to an
   -- element has to ask the same question `.assign` has always asked. Until array ports carried
   -- their arity this was unreachable and only the macro caught it, by name.
-  | .setElem a elemW i data => do
+  | .setElem a elemW ds i data => do
       if ctx.inputs.contains a then .error (.assignToInput a)
-      let _ ← ctx.elemWidth a elemW (some i)
+      let _ ← ctx.elemWidth a elemW ds (some i)
       expectWidth s!"write to array '{a}'" elemW (← Expr.width? ctx data)
-  | .setDyn a elemW addr data => do
+  | .setDyn a elemW ds addr data => do
       if ctx.inputs.contains a then .error (.assignToInput a)
-      let _ ← ctx.elemWidth a elemW none
+      let _ ← ctx.elemWidth a elemW ds none
       let _ ← Expr.width? ctx addr
       expectWidth s!"write to array '{a}'" elemW (← Expr.width? ctx data)
   | .if_ c t f => do
@@ -323,8 +361,8 @@ def InstInfo.check (ctx : Ctx) (i : InstInfo) : Except CheckError Unit :=
     | BindTarget.sig parent => do
         let w ← ctx.env.widthOf parent
         expectWidth where_ pw w
-    | BindTarget.elem a elemW idx => do
-        let _ ← ctx.elemWidth a elemW (some idx)
+    | BindTarget.elem a elemW ds idx => do
+        let _ ← ctx.elemWidth a elemW ds (some idx)
         expectWidth where_ pw elemW
     | BindTarget.expr e => do
         if !(i.inputs.contains port.name) then .error (.exprBoundOutput i.name port.name)
@@ -345,7 +383,7 @@ where
     | .elem a k =>
         match i.ports.find? (fun p => p.name == a) with
         | some { count := some n, width := w, .. } =>
-            if k < n then .ok w else .error (.elemRange a k n)
+            if k < n then .ok w else .error (.elemRange a 0 k n)
         | _ => .error (.noSuchPort i.name a)
 
 /-- Check every process in a module against its declarations, and every instance's bindings. -/

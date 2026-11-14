@@ -180,14 +180,15 @@ def Expr.eval (σ : State) : Expr → Except EvalError Value
       let v ← σ.getMem? m i.toNat
       if v.width = elemW then .ok v
       else .error (.check (.widthMismatch s!"element of memory '{m}'" elemW v.width))
-  | .elem a elemW i => do
-      let v ← σ.getMem? a i
+  | .elem a elemW ds i => do
+      let v ← σ.getMem? a (rowMajorOffset ds i)
       if v.width = elemW then .ok v
       else .error (.check (.widthMismatch s!"element of array '{a}'" elemW v.width))
   -- An index past the end is an error here and element 0 in the netlist, where the mux chain has
   -- nowhere to put one. `CircuitHdlTest/Circt.lean` pins the divergence.
-  | .select a elemW addr => do
+  | .select a elemW ds addr => do
       let i ← Expr.eval σ addr
+      let _ := ds
       let v ← σ.getMem? a i.toNat
       if v.width = elemW then .ok v
       else .error (.check (.widthMismatch s!"element of array '{a}'" elemW v.width))
@@ -209,12 +210,12 @@ def Stmt.execBlocking (σ : State) : Stmt → Except EvalError State
       if v.width != elemW then
         .error (.check (.widthMismatch s!"write to memory '{m}'" elemW v.width))
       else σ.setMem m i.toNat v
-  | .setElem a elemW i data => do
+  | .setElem a elemW ds i data => do
       let v ← Expr.eval σ data
       if v.width != elemW then
         .error (.check (.widthMismatch s!"write to array '{a}'" elemW v.width))
-      else σ.setMem a i v
-  | .setDyn a elemW addr data => do
+      else σ.setMem a (rowMajorOffset ds i) v
+  | .setDyn a elemW _ addr data => do
       let i ← Expr.eval σ addr
       let v ← Expr.eval σ data
       if v.width != elemW then
@@ -261,12 +262,12 @@ def Stmt.execNonBlocking (σ₀ : State) (pending : State) : Stmt → Except Eva
       if v.width != elemW then
         .error (.check (.widthMismatch s!"write to memory '{m}'" elemW v.width))
       else pendingWord σ₀ pending m i.toNat v
-  | .setElem a elemW i data => do
+  | .setElem a elemW ds i data => do
       let v ← Expr.eval σ₀ data
       if v.width != elemW then
         .error (.check (.widthMismatch s!"write to array '{a}'" elemW v.width))
-      else pendingWord σ₀ pending a i v
-  | .setDyn a elemW addr data => do
+      else pendingWord σ₀ pending a (rowMajorOffset ds i) v
+  | .setDyn a elemW _ addr data => do
       let i ← Expr.eval σ₀ addr
       let v ← Expr.eval σ₀ data
       if v.width != elemW then
@@ -301,10 +302,17 @@ def Process.exec (σ : State) (p : Process) : Except EvalError State :=
 def Module.initState (m : Module) : State :=
   let sigs := (Module.scalarPorts m.inputs ++ Module.scalarPorts m.outputs ++ m.regs).foldl
     (fun σ (x, w) => if σ.any (·.1 == x) then σ else σ ++ [(x, Cell.sig (Value.ofNat w 0))]) []
-  (m.allArrays ++ m.mems).foldl
+  -- Arrays and memories both become one cell, but an array's length is the product of its
+  -- shape where a memory's is its depth, so the two folds no longer share.
+  let withArrays := m.allArrays.foldl
+    (fun σ (x, dims, w) =>
+      if σ.any (·.1 == x) then σ
+      else σ ++ [(x, Cell.mem (List.replicate (cellSize dims) (Value.ofNat w 0)))])
+    sigs
+  m.mems.foldl
     (fun σ (x, d, w) =>
       if σ.any (·.1 == x) then σ else σ ++ [(x, Cell.mem (List.replicate d (Value.ofNat w 0)))])
-    sigs
+    withArrays
 
 /-- Run the combinational logic to a settled state.
 
@@ -417,18 +425,28 @@ def State.memOf? (σ : State) (x : Name) : Option (List Nat) :=
   | _ => none
 
 /-- The value of one `Signal` -- a scalar, or one element of a cell. `State.valueOf?` for a world
-in which an array element is a place a port can live. -/
-def State.valueAt? (σ : State) : Signal → Option Nat
+in which an array element is a place a port can live.
+
+The shapes have to be passed in: an element is named by its indices and the storage is flat, so
+reading one means a row-major offset, which only the declaration knows. -/
+def State.valueAt? (σ : State) (arrays : List (Name × List Nat × Nat)) : Signal → Option Nat
   | .sig x => σ.valueOf? x
-  | .elem a i => (σ.memOf? a).bind (·[i]?)
+  | .elem a i => do
+      let (dims, _) ← arrays.lookup a
+      let ws ← σ.memOf? a
+      ws[rowMajorOffset dims i]?
   | .whole _ => none
 
 /-- Write one `Signal`. Fails rather than ignoring an out-of-range element or a whole array, so a
 bridge that computed the wrong place says so instead of writing nowhere. -/
-def State.setAt (σ : State) (s : Signal) (v : Value) : Except EvalError State :=
+def State.setAt (σ : State) (arrays : List (Name × List Nat × Nat)) (s : Signal) (v : Value) :
+    Except EvalError State :=
   match s with
   | .sig x => .ok (σ.set x v)
-  | .elem a i => σ.setMem a i v
+  | .elem a i =>
+      match arrays.lookup a with
+      | some (dims, _) => σ.setMem a (rowMajorOffset dims i) v
+      | none => .error (.check (.unboundArray a))
   | .whole a => .error (.check (.notAnArray a))
 
 end CircuitHdl

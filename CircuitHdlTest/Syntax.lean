@@ -269,7 +269,7 @@ rules through the AST-level checker on hand-built modules.
   { name := `bad, inputs := [{ name := `i.valid, width := 1, count := some 2 }]
     outputs := [Port.scalar `v 1], regs := []
     body := [{ kind := .combinational, sensitivity := []
-               body := [Stmt.setElem `i.valid 1 0 (Expr.lit 1 0)] }] }
+               body := [Stmt.setElem `i.valid 1 [2] [0] (Expr.lit 1 0)] }] }
 
 -- And through a dynamic index, which is the form that did not exist at all before an array port
 -- carried its arity.
@@ -279,7 +279,7 @@ rules through the AST-level checker on hand-built modules.
   { name := `bad, inputs := [{ name := `i.valid, width := 1, count := some 2 }]
     outputs := [Port.scalar `v 1], regs := []
     body := [{ kind := .combinational, sensitivity := []
-               body := [Stmt.setDyn `i.valid 1 (Expr.lit 1 0) (Expr.lit 1 0)] }] }
+               body := [Stmt.setDyn `i.valid 1 [2] (Expr.lit 1 0) (Expr.lit 1 0)] }] }
 
 /-- info: Except.error (CircuitHdl.CheckError.conflictingDecl `q 8 4) -/
 #guard_msgs in
@@ -311,26 +311,45 @@ disagrees -- rather than collapsing into one "unknown signal".
 private def arrMod (items : List Item) : Module :=
   Module.ofItems `arrMod [] [(`o, 8)] items
 
-/-- info: Except.error (CircuitHdl.CheckError.elemRange `a 7 3) -/
+/-- info: Except.error (CircuitHdl.CheckError.elemRange `a 0 7 3) -/
 #guard_msgs in
-#eval Module.check (arrMod [Item.array `a 3 8, Item.stmt (.assign `o (.elem `a 8 7))])
+#eval Module.check (arrMod [Item.array `a [3] 8, Item.stmt (.assign `o (.elem `a 8 [3] [7]))])
+
+-- The dimension is named, and it is **not** the flat total: offset `0 * 5 + 7` is 7, which is
+-- well inside a 5x5's twenty-five elements, so a bound on the whole array accepts this and reads
+-- element `[1][2]`. Only asking each dimension separately sees it.
+/-- info: Except.error (CircuitHdl.CheckError.elemRange `a 1 7 5) -/
+#guard_msgs in
+#eval Module.check
+  (arrMod [Item.array `a [5, 5] 8, Item.stmt (.assign `o (.elem `a 8 [5, 5] [0, 7]))])
+
+-- A partial index is not an element, and neither is one index too many.
+/-- info: Except.error (CircuitHdl.CheckError.rank `a 2 1) -/
+#guard_msgs in
+#eval Module.check (arrMod [Item.array `a [5, 5] 8, Item.stmt (.assign `o (.elem `a 8 [5, 5] [0]))])
+
+-- A node whose recorded shape disagrees with the declaration. Only an AST built by hand can say
+-- this, which is why `Module.check` compares rather than believing it.
+/-- info: Except.error (CircuitHdl.CheckError.shapeMismatch `a [5, 5] [25]) -/
+#guard_msgs in
+#eval Module.check (arrMod [Item.array `a [5, 5] 8, Item.stmt (.assign `o (.elem `a 8 [25] [7]))])
 
 /-- info: Except.error (CircuitHdl.CheckError.unboundArray `nope) -/
-#guard_msgs in #eval Module.check (arrMod [Item.stmt (.assign `o (.elem `nope 8 0))])
+#guard_msgs in #eval Module.check (arrMod [Item.stmt (.assign `o (.elem `nope 8 [1] [0]))])
 
 -- A memory is not an array: the two are declared apart precisely so this is caught.
 /-- info: Except.error (CircuitHdl.CheckError.notAnArray `m) -/
 #guard_msgs in
-#eval Module.check (arrMod [Item.mem `m 4 8, Item.stmt (.assign `o (.elem `m 8 0))])
+#eval Module.check (arrMod [Item.mem `m 4 8, Item.stmt (.assign `o (.elem `m 8 [1] [0]))])
 
 /-- info: Except.error (CircuitHdl.CheckError.widthMismatch "element of array 'a'" 4 8) -/
 #guard_msgs in
-#eval Module.check (arrMod [Item.array `a 3 4, Item.stmt (.assign `o (.elem `a 8 0))])
+#eval Module.check (arrMod [Item.array `a [3] 4, Item.stmt (.assign `o (.elem `a 8 [3] [0]))])
 
 -- A dynamic index is *not* checked here, because whether it is in range depends on the value it
 -- evaluates to. That one is `EvalError.indexOutOfRange`, in `CircuitHdlTest/Semantics.lean`.
 #guard (Module.check (arrMod
-  [Item.array `a 3 8, Item.reg `i 8, Item.stmt (.assign `o (.select `a 8 (.var `i)))])).isOk
+  [Item.array `a [3] 8, Item.reg `i 8, Item.stmt (.assign `o (.select `a 8 [3] (.var `i)))])).isOk
 
 /-! Slice and concat have no surface syntax, but the checker covers them. -/
 
@@ -435,7 +454,7 @@ module! arrDecl #[(depth dw : Nat)] (clk : 1, d : dw) -> (o : dw) {
   always @(posedge clk) { assign r[0] = d; }
 }
 
-#guard (arrDecl 4 8).arrays = [(`r, 4, 8)]
+#guard (arrDecl 4 8).arrays = [(`r, [4], 8)]
 #guard (arrDecl 4 8).regs = []
 #guard (Module.check (arrDecl 4 8)).isOk
 -- `wire` and `reg` declare the same thing here too, as they do for a scalar.
@@ -444,18 +463,18 @@ module! arrDecl #[(depth dw : Nat)] (clk : 1, d : dw) -> (o : dw) {
   assign a[0] = x;
   assign a[1] = a[0];
   assign y = a[1];
-}).arrays = [(`a, 2, 4)]
+}).arrays = [(`a, [2], 4)]
 
 -- A static index writes one element, by an index that is a Lean term and so survives a symbolic
 -- depth.
 #guard ((module! staticIdx (x : 4) -> (y : 4) {
   wire a[2] : 4; assign a[1] = x; assign y = a[1];
-}).body.flatMap Process.body).any (· matches Stmt.setElem `a 4 1 _)
+}).body.flatMap Process.body).any (· matches Stmt.setElem `a 4 [2] [1] _)
 
 -- An index naming a signal is `Expr.select` instead: a mux over every element.
 #guard ((module! dynIdx (x : 4, i : 1) -> (y : 4) {
   wire a[2] : 4; assign a[0] = x; assign a[1] = x; assign y = a[i];
-}).body.flatMap Process.body).any (· matches Stmt.assign `y (Expr.select `a 4 _))
+}).body.flatMap Process.body).any (· matches Stmt.assign `y (Expr.select `a 4 [2] _))
 
 -- And the same text with `a` declared a memory instead reaches `Expr.index`, which is the whole
 -- content of "the declarations decide".
@@ -474,7 +493,7 @@ module! bothKinds #[] (clk : 1, i : 2) -> (fromArray : 8, fromMem : 8) {
   always @(posedge clk) { assign m[i] = 1; }
 }
 
-#guard bothKinds.arrays = [(`arr, 4, 8)]
+#guard bothKinds.arrays = [(`arr, [4], 8)]
 #guard bothKinds.mems = [(`m, 4, 8)]
 #guard (Module.check bothKinds).isOk
 
@@ -542,7 +561,7 @@ module! invBank #[] (x : 4) -> (o : 4) {
 }
 
 #guard (Module.check invBank).isOk
-#guard invBank.arrays = [(`src, 4, 1), (`dst, 4, 1)]
+#guard invBank.arrays = [(`src, [4], 1), (`dst, [4], 1)]
 -- Each instance inverts its own bit, which is only true if each got its own pair of elements.
 #guard (invBank.settle (invBank.initState.apply
   [(`x, Cell.sig (Value.ofNat 4 0b1010))])).toOption.bind (State.valueOf? · `o) = some 0b0101
@@ -605,7 +624,7 @@ module! bindOutOfRange #[] (o : 1) -> (p : 1) {
   notGate u (.a(src[#(5)]), .y(p));
 }
 
-/-- info: Except.error (CircuitHdl.CheckError.elemRange `src 5 2) -/
+/-- info: Except.error (CircuitHdl.CheckError.elemRange `src 0 5 2) -/
 #guard_msgs in #eval Module.check bindOutOfRange
 
 /-- A bit select takes the same elaboration-time index an element does, so a vector can be picked
@@ -703,7 +722,7 @@ module! xbar #[(n dw : Nat)] (slave i[n] : handshake dw) -> (master o[n] : hands
 -- was `noSuchPort`, naming the wire `i.9.valid` -- true, but a name no design ever wrote, where
 -- the fault is the index. `PortRef` keeps the index, so an array port gets the range check an
 -- array element has always had.
-/-- info: Except.error (CircuitHdl.CheckError.elemRange `i.valid 9 2) -/
+/-- info: Except.error (CircuitHdl.CheckError.elemRange `i.valid 0 9 2) -/
 #guard_msgs in
 #eval Module.check (module! badElem (v : 1) -> (q : 1) {
   assign q = 0;

@@ -120,17 +120,22 @@ inductive Expr where
   is the width of the result; the depth is not recorded here, because at evaluation the memory
   lives in the state and its length is its depth. -/
   | index : Name → (elemW : Nat) → Expr → Expr
-  /-- One element of an array, at an index fixed before the design runs: `a[3]`.
+  /-- One element of an array, at indices fixed before the design runs: `a[3]`, `r[1][3]`.
 
   Separate from `select` rather than `select` over a literal, because the two are different
   hardware -- this is a wire, that is a mux chain -- and because it is what lets the settle order
   tell `a[0]` apart from `a[3]`. Leaving the lowering to notice a constant index would make the
-  difference implicit, and the count of elements it reads would depend on a fold. -/
-  | elem : Name → (elemW : Nat) → (idx : Nat) → Expr
+  difference implicit, and the count of elements it reads would depend on a fold.
+
+  **`dims` rides on the node for the same reason `elemW` does**: it keeps `Expr.rename`
+  context-free, and the storage is flat, so reading `r[1][3]` means computing a row-major offset
+  and that needs the strides. `Module.check` compares it against the declaration exactly as it
+  compares `elemW`, so an AST built by hand is checked rather than trusted. -/
+  | elem : Name → (elemW : Nat) → (dims : List Nat) → (idx : List Nat) → Expr
   /-- A dynamic read from an array, `a[i]`. Shaped exactly like `index`, and the difference is
   entirely in the declaration it names: a memory is one object with ports, an array is `count`
   registers and this is the mux tree over them. -/
-  | select : Name → (elemW : Nat) → Expr → Expr
+  | select : Name → (elemW : Nat) → (dims : List Nat) → Expr → Expr
   deriving Repr
 
 /-- Statements in the typed circuit core. -/
@@ -138,10 +143,10 @@ inductive Stmt where
   | assign : Name → Expr → Stmt
   /-- A write to a memory, `mem[addr] = data`. -/
   | store : Name → (elemW : Nat) → Expr → Expr → Stmt
-  /-- A write to one element of an array, `a[3] = data`. -/
-  | setElem : Name → (elemW : Nat) → (idx : Nat) → Expr → Stmt
+  /-- A write to one element of an array, `a[3] = data`, `r[1][3] = data`. -/
+  | setElem : Name → (elemW : Nat) → (dims : List Nat) → (idx : List Nat) → Expr → Stmt
   /-- A dynamic write to an array, `a[i] = data`: a decoder, where `store` is a write port. -/
-  | setDyn : Name → (elemW : Nat) → Expr → Expr → Stmt
+  | setDyn : Name → (elemW : Nat) → (dims : List Nat) → Expr → Expr → Stmt
   | if_ : Expr → List Stmt → List Stmt → Stmt
   deriving Repr
 
@@ -157,8 +162,9 @@ exist, so they answer with a `Signal`.
 A scalar signal is `sig`, and so is a whole memory: a memory is addressed, but every access to it
 is ordered against every other, because a `seq.firmem` port is a port.
 
-An array splits in two. `elem` is one element at an index known without running the design;
-`whole` is every element at once, which is what a dynamically indexed access touches.
+An array splits in two. `elem` is one element at indices known without running the design --
+a *list* of them, since an array may have several dimensions; `whole` is every element at once,
+which is what a dynamically indexed access touches.
 
 **The split is what keeps an array out of its own way.** `CircuitHdl.SettleOrder` orders
 statements by the signals they share, so an array that is a single vertex in that graph makes a
@@ -167,7 +173,7 @@ would then be a cycle -- which is precisely the failure that forced `SettleOrder
 mesh, one level up. -/
 inductive Signal where
   | sig : Name → Signal
-  | elem : Name → Nat → Signal
+  | elem : Name → List Nat → Signal
   | whole : Name → Signal
   deriving Repr, DecidableEq, BEq, Hashable
 
@@ -177,6 +183,37 @@ a loop.
 `Name.num`, so it prints `x.3` and `portIdent` makes it `x_3`. It cannot collide with anything the
 surface syntax can declare, which spells every name it builds with `Name.str`. -/
 def indexedName (x : Name) (i : Nat) : Name := Name.num x i
+
+/-- The flat offset of `idx` in an array shaped `dims`, row-major: the stride of a dimension is
+the product of the ones after it.
+
+**This is the only place strides are computed.** The evaluator, the lowering and
+`CircuitHdl/SelectChain.lean` all go through it, so the three cannot disagree about what
+`r[1][3]` means. A `dims` longer than `idx` is a *partial* index and gives the offset of where
+that sub-array starts, which is what makes a row a contiguous run of the flat cell. -/
+def rowMajorOffset : List Nat → List Nat → Nat
+  | _, [] => 0
+  | [], _ => 0
+  | _ :: ds, i :: is => i * ds.prod + rowMajorOffset ds is
+
+/-- How many elements an array of this shape holds. -/
+def cellSize (dims : List Nat) : Nat := dims.prod
+
+/-- The inverse of `rowMajorOffset` on a full index: which element of a `dims`-shaped array sits
+at flat position `k`. Needed wherever the flat storage is enumerated back into the indices the
+rest of the language speaks -- the mux chain, the register names, the test bridge. -/
+def rowMajorIndex : List Nat → Nat → List Nat
+  | [], _ => []
+  | _ :: ds, k => let stride := ds.prod; (k / stride) :: rowMajorIndex ds (k % stride)
+
+/-- A one-dimensional array's only index *is* its offset. Stated for `simp`, because
+`CircuitHdl/SelectChain.lean` reduces `Expr.eval` through it on every arm of the chain. -/
+@[simp] theorem rowMajorOffset_singleton (n i : Nat) : rowMajorOffset [n] [i] = i := by
+  simp [rowMajorOffset]
+
+/-- Every index of a `dims`-shaped array, in flat order. -/
+def allIndices (dims : List Nat) : List (List Nat) :=
+  (List.range (cellSize dims)).map (rowMajorIndex dims)
 
 /-- The name of a signal that *is* a whole declaration, which an element is not. Distinct from
 `Signal.name`, which answers "which declaration does this touch" and so flattens an element onto
@@ -233,7 +270,7 @@ element width here rather than looking it up keeps `Expr.rename` context-free, w
 other width in the AST does too. -/
 inductive BindTarget where
   | sig : Name → BindTarget
-  | elem : Name → (elemW idx : Nat) → BindTarget
+  | elem : Name → (elemW : Nat) → (dims : List Nat) → (idx : List Nat) → BindTarget
   /-- An expression, which is not a place at all. The port keeps the local wire it would have had
   if nothing were bound to it, and the expression drives that wire -- so `.dstX(i[k].data[1:0])`
   needs no wire declared by hand for every slice.
@@ -248,7 +285,7 @@ inductive BindTarget where
 /-- The value a target denotes, for driving an *input* from whatever it was tied to. -/
 def BindTarget.asExpr : BindTarget → Expr
   | .sig x => .var x
-  | .elem a w i => .elem a w i
+  | .elem a w ds i => .elem a w ds i
   | .expr e => e
 
 /-- The statement that drives a target with `e`, for an **output**, which runs the other way: the
@@ -258,14 +295,14 @@ the connection. -/
 def BindTarget.drive (t : BindTarget) (e : Expr) : Option Stmt :=
   match t with
   | .sig x => some (.assign x e)
-  | .elem a w i => some (.setElem a w i e)
+  | .elem a w ds i => some (.setElem a w ds i e)
   | .expr _ => none
 
 /-- The declaration a target names. Used where an element cannot arise -- a memory, an array, or a
 clock -- because only *ports* are bound and a port is always a scalar. -/
 def BindTarget.nameOf : BindTarget → Name
   | .sig x => x
-  | .elem a _ _ => a
+  | .elem a _ _ _ => a
   -- Unreachable: `instRenaming` maps an expression-bound port to its own local name, so the
   -- renaming never sees this constructor.
   | .expr _ => .anonymous
@@ -322,11 +359,12 @@ lets the bridge map a block argument to the place the evaluator keeps it. -/
 def signals (p : Port) : List (Signal × Nat) :=
   match p.count with
   | none => [(.sig p.name, p.width)]
-  | some n => (List.range n).map fun k => (.elem p.name k, p.width)
+  | some n => (List.range n).map fun k => (.elem p.name [k], p.width)
 
-/-- An array port's declaration, in the shape `Module.arrays` uses. -/
-def asArray? (p : Port) : Option (Name × Nat × Nat) :=
-  p.count.map fun n => (p.name, n, p.width)
+/-- An array port's declaration, in the shape `Module.arrays` uses. An array port is
+one-dimensional, so its shape is a singleton. -/
+def asArray? (p : Port) : Option (Name × List Nat × Nat) :=
+  p.count.map fun n => (p.name, [n], p.width)
 
 end Port
 
@@ -379,12 +417,16 @@ structure Module where
   inputs : List Port
   outputs : List Port
   regs : List (Name × Nat)
-  /-- Array declarations, as `(name, element count, element width)`.
+  /-- Array declarations, as `(name, shape, element width)`.
 
-  Declared like a memory and held like one, but built as `count` independently driven registers
-  or wires rather than as one `seq.firmem` with ports -- which is also why an element may be
-  addressed statically, where a memory word never can. -/
-  arrays : List (Name × Nat × Nat) := []
+  Declared like a memory and held like one, but built as `cellSize dims` independently driven
+  registers or wires rather than as one `seq.firmem` with ports -- which is also why an element
+  may be addressed statically, where a memory word never can.
+
+  The shape is a *list*, so `reg r[4][4] : 8` is sixteen registers addressed `r[i][j]` rather
+  than sixteen addressed by a stride the design had to compute. The storage stays flat and
+  row-major; `rowMajorOffset` is the only thing that knows that. -/
+  arrays : List (Name × List Nat × Nat) := []
   /-- Memory declarations, as `(name, depth, element width)`. -/
   mems : List (Name × Nat × Nat) := []
   /-- Instances, already flattened into `body`, kept only so their bindings can be checked. -/
@@ -409,11 +451,11 @@ def flatOutputs (m : Module) : List (Name × Nat) := m.outputs.flatMap Port.wire
 
 /-- Every array port, in the shape `m.arrays` uses -- because that is what an array port *is*
 inside the module, and the width rules and the semantics should not have to ask which it was. -/
-def portArrays (m : Module) : List (Name × Nat × Nat) :=
+def portArrays (m : Module) : List (Name × List Nat × Nat) :=
   (m.inputs ++ m.outputs).filterMap Port.asArray?
 
 /-- Every array a module has, declared or ported. -/
-def allArrays (m : Module) : List (Name × Nat × Nat) := m.arrays ++ m.portArrays
+def allArrays (m : Module) : List (Name × List Nat × Nat) := m.arrays ++ m.portArrays
 
 /-- The input wires as the *signals* they denote inside the module, paired positionally with
 `flatInputs`. An array port's element `k` is element `k` of its one cell, which is what lets a
@@ -445,8 +487,8 @@ inductive Item where
   | reg : Name → Nat → Item
   /-- A memory declaration, `memory m[4] : 8;`. -/
   | mem : Name → (depth elemW : Nat) → Item
-  /-- An array declaration, `reg a[4] : 8;`. -/
-  | array : Name → (count elemW : Nat) → Item
+  /-- An array declaration, `reg a[4] : 8;` or `reg r[4][4] : 8;`. -/
+  | array : Name → (dims : List Nat) → (elemW : Nat) → Item
   /-- A clocked block, `always @posedge(clk) { .. }`. -/
   | always : Event → List Stmt → Item
   /-- A statement sitting directly in the module body, outside any `always`. -/
@@ -475,7 +517,7 @@ def Expr.rename (f : Name → BindTarget) : Expr → Expr
   | .var x =>
       match f x with
       | .sig y => .var y
-      | .elem a w i => .elem a w i
+      | .elem a w ds i => .elem a w ds i
       -- Substituting the expression is the meaningful reading of reading a port tied to one.
       -- `instRenaming` does not produce this case -- an expression-bound port keeps a wire and is
       -- renamed to it -- but the rule is the one this constructor would want.
@@ -489,8 +531,8 @@ def Expr.rename (f : Name → BindTarget) : Expr → Expr
   | .concat a b => .concat (a.rename f) (b.rename f)
   | .slice e hi lo => .slice (e.rename f) hi lo
   | .index m w a => .index (f m).nameOf w (a.rename f)
-  | .elem a w i => .elem (f a).nameOf w i
-  | .select a w addr => .select (f a).nameOf w (addr.rename f)
+  | .elem a w ds i => .elem (f a).nameOf w ds i
+  | .select a w ds addr => .select (f a).nameOf w ds (addr.rename f)
 
 mutual
 
@@ -500,14 +542,14 @@ def Stmt.rename (f : Name → BindTarget) : Stmt → Stmt
   | .assign x e =>
       match f x with
       | .sig y => .assign y (e.rename f)
-      | .elem a w i => .setElem a w i (e.rename f)
+      | .elem a w ds i => .setElem a w ds i (e.rename f)
       -- There is no writing *to* an expression. Unreachable for the same reason as above, and
       -- written to fail loudly rather than quietly if it ever stopped being: `Module.check`
       -- rejects an assignment to `.anonymous` as unbound.
       | .expr _ => .assign .anonymous (e.rename f)
   | .store m w a d => .store (f m).nameOf w (a.rename f) (d.rename f)
-  | .setElem a w i d => .setElem (f a).nameOf w i (d.rename f)
-  | .setDyn a w addr d => .setDyn (f a).nameOf w (addr.rename f) (d.rename f)
+  | .setElem a w ds i d => .setElem (f a).nameOf w ds i (d.rename f)
+  | .setDyn a w ds addr d => .setDyn (f a).nameOf w ds (addr.rename f) (d.rename f)
   | .if_ c t e => .if_ (c.rename f) (Stmt.renameList f t) (Stmt.renameList f e)
 
 def Stmt.renameList (f : Name → BindTarget) : List Stmt → List Stmt
@@ -623,9 +665,15 @@ def instConnections (instName : Name) (bindings : List (PortRef × BindTarget)) 
         | .expr e => some (.assign (instName ++ x) e)
         | _ => none
     | .elem a i =>
-        let w := ((m.inputs ++ m.outputs).find? (·.name == a)).map Port.width |>.getD 0
-        if (m.inputs.any (·.name == a)) then some (.setElem (instName ++ a) w i t.asExpr)
-        else t.drive (.elem (instName ++ a) w i)
+        match (m.inputs ++ m.outputs).find? (·.name == a) with
+        | none => none
+        | some p =>
+            -- An array port is one-dimensional, so its shape is `[count]` and the index a
+            -- singleton. `InstInfo.check` has already said the element exists.
+            let ds := [p.count.getD 0]
+            if m.inputs.any (·.name == a) then
+              some (.setElem (instName ++ a) p.width ds [i] t.asExpr)
+            else t.drive (.elem (instName ++ a) p.width ds [i])
 
 /-- The memories an instance adds to the parent, likewise prefixed. -/
 def instMems (instName : Name) (m : Module) : List (Name × Nat × Nat) :=
@@ -642,7 +690,7 @@ two different arrays. So the array is materialised here instead, as a prefixed l
 This is the copy a design used to write by hand (`meshSwitch`'s `idata`), moved to the one place
 that can always do it. It costs nothing in the lowering: a combinational `setElem` is a scope
 rebinding, not an operation. -/
-def instArrays (instName : Name) (m : Module) : List (Name × Nat × Nat) :=
+def instArrays (instName : Name) (m : Module) : List (Name × List Nat × Nat) :=
   m.allArrays.map fun (x, c, w) => (instName ++ x, c, w)
 
 /-! The pieces of assembly are top-level rather than `let rec` inside `ofItems`, so that `simp` has
@@ -690,9 +738,9 @@ def memories : List Item → List (Name × Nat × Nat)
   | _ :: rest => memories rest
 
 /-- Every array, including those an instance contributes. -/
-def arrays : List Item → List (Name × Nat × Nat)
+def arrays : List Item → List (Name × List Nat × Nat)
   | [] => []
-  | .array n c w :: rest => (n, c, w) :: arrays rest
+  | .array n ds w :: rest => (n, ds, w) :: arrays rest
   | .inst iname sub _ :: rest => instArrays iname sub ++ arrays rest
   | _ :: rest => arrays rest
 

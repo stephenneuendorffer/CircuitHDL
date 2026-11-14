@@ -27,7 +27,7 @@ open Lean
 private def rf : Module := regFile 4 8 2
 
 #guard (Module.check rf).isOk
-#guard rf.arrays = [(`r, 4, 8)]
+#guard rf.arrays = [(`r, [4], 8)]
 -- The storage is an array, not a memory: four registers, and no `seq.firmem` anywhere.
 #guard rf.mems = []
 #guard rf.singleClocked
@@ -152,7 +152,7 @@ module! arrFile #[(depth dw aw : Nat)]
 #guard (Module.check (memFile 4 8 2)).isOk
 #guard (Module.check (arrFile 4 8 2)).isOk
 #guard (memFile 4 8 2).mems = [(`m, 4, 8)]
-#guard (arrFile 4 8 2).arrays = [(`r, 4, 8)]
+#guard (arrFile 4 8 2).arrays = [(`r, [4], 8)]
 
 /-- The same scenario, through the single read port the two designs share. -/
 private def oneReadTrace (s : Sim) : Option (List Nat) :=

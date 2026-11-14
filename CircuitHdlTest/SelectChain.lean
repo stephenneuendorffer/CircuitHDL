@@ -28,20 +28,20 @@ private def c (w n : Nat) : Cell := .sig (Value.ofNat w n)
 /-- Three 8-bit elements behind a dynamic read: what `Expr.select` lowers to. -/
 private def viaSelect : Module :=
   Module.ofItems `viaSelect [(`clk, 1), (`i, 2)] [(`o, 8)]
-    [ Item.array `a 3 8,
-      Item.stmt (.assign `o (.select `a 8 (.var `i))),
+    [ Item.array `a [3] 8,
+      Item.stmt (.assign `o (.select `a 8 [3] (.var `i))),
       Item.always (.posedge `clk)
-        [.setElem `a 8 0 (.lit 8 11), .setElem `a 8 1 (.lit 8 22),
-         .setElem `a 8 2 (.lit 8 33)] ]
+        [.setElem `a 8 [3] [0] (.lit 8 11), .setElem `a 8 [3] [1] (.lit 8 22),
+         .setElem `a 8 [3] [2] (.lit 8 33)] ]
 
 /-- The same design with the read written out as the chain the theorem is about. -/
 private def viaChain : Module :=
   Module.ofItems `viaChain [(`clk, 1), (`i, 2)] [(`o, 8)]
-    [ Item.array `a 3 8,
-      Item.stmt (.assign `o (Expr.selectChain `a 8 2 (.var `i) 2)),
+    [ Item.array `a [3] 8,
+      Item.stmt (.assign `o (Expr.selectChain `a 8 2 3 (.var `i) 2)),
       Item.always (.posedge `clk)
-        [.setElem `a 8 0 (.lit 8 11), .setElem `a 8 1 (.lit 8 22),
-         .setElem `a 8 2 (.lit 8 33)] ]
+        [.setElem `a 8 [3] [0] (.lit 8 11), .setElem `a 8 [3] [1] (.lit 8 22),
+         .setElem `a 8 [3] [2] (.lit 8 33)] ]
 
 #guard (Module.check viaSelect).isOk
 #guard (Module.check viaChain).isOk
@@ -101,11 +101,11 @@ a missing arm would be comparing nothing.
 
 private def viaShortChain : Module :=
   Module.ofItems `viaShortChain [(`clk, 1), (`i, 2)] [(`o, 8)]
-    [ Item.array `a 3 8,
-      Item.stmt (.assign `o (Expr.selectChain `a 8 2 (.var `i) 1)),
+    [ Item.array `a [3] 8,
+      Item.stmt (.assign `o (Expr.selectChain `a 8 2 3 (.var `i) 1)),
       Item.always (.posedge `clk)
-        [.setElem `a 8 0 (.lit 8 11), .setElem `a 8 1 (.lit 8 22),
-         .setElem `a 8 2 (.lit 8 33)] ]
+        [.setElem `a 8 [3] [0] (.lit 8 11), .setElem `a 8 [3] [1] (.lit 8 22),
+         .setElem `a 8 [3] [2] (.lit 8 33)] ]
 
 -- Address 2 falls through to element 0 instead of reaching element 2.
 #guard (List.range 3).map (readAt viaShortChain.sim) = [some 11, some 22, some 11]

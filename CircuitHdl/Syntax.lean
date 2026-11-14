@@ -212,7 +212,7 @@ syntax:24 circuit_expr:24 " || " circuit_expr:25 : circuit_expr
 syntax:20 circuit_expr:21 " ? " circuit_expr " : " circuit_expr:20 : circuit_expr
 
 syntax "assign" ident "=" circuit_expr ";" : circuit_stmt
-syntax "assign" ident "[" circuit_expr "]" "=" circuit_expr ";" : circuit_stmt
+syntax "assign" ident ("[" circuit_expr "]")+ "=" circuit_expr ";" : circuit_stmt
 /-- Assigning a field of one element of an array port, `assign o[k].valid = ..;`. -/
 syntax "assign" ident "[" circuit_expr "]" "." ident "=" circuit_expr ";" : circuit_stmt
 syntax "assign" ident ":" term:51 "=" circuit_expr ";" : circuit_stmt
@@ -260,8 +260,8 @@ syntax "wire" ident ":" term ";" : circuit_item
 `count` registers, each independently driven, against the one `seq.firmem` a `memory` becomes.
 As with the scalar forms, `reg` and `wire` build the same declaration and which one an array
 turns out to be is read off how it is driven. -/
-syntax "reg" ident "[" term "]" ":" term ";" : circuit_item
-syntax "wire" ident "[" term "]" ":" term ";" : circuit_item
+syntax "reg" ident ("[" term "]")+ ":" term ";" : circuit_item
+syntax "wire" ident ("[" term "]")+ ":" term ";" : circuit_item
 /-- The *port* side of a binding: a name, an element of an array port, or one field of one element
 of an array of bundles -- `.b`, `.o[4]`, `.i[k].valid`.
 
@@ -337,11 +337,15 @@ structure SymCtx where
   inputs : List Name := []
   /-- Memories, as `(name, depth, element width)`. -/
   mems : List (Name × SymWidth × SymWidth) := []
-  /-- Arrays, as `(name, element count, element width)` -- **including array ports**, which are
-  arrays in every way that matters here: `slave i[5]`'s `valid` field and `wire a[5] : 1` are the
-  same five wires selected the same way, and differ only in who drives them. Keeping them in one
-  table is what lets `i[sel].valid` be an ordinary `Expr.select`. -/
-  arrays : List (Name × SymWidth × SymWidth) := []
+  /-- Arrays, as `(name, shape, element width)` -- **including array ports**, which are arrays in
+  every way that matters here: `slave i[5]`'s `valid` field and `wire a[5] : 1` are the same five
+  wires selected the same way, and differ only in who drives them. Keeping them in one table is
+  what lets `i[sel].valid` be an ordinary `Expr.select`.
+
+  The *extents* stay terms, since a dimension may be a parameter the macro never evaluates, but
+  the *rank* is the length of the list and is known here -- which is what the index-chain rule
+  needs to decide how many of `r[i][j][k]`'s indices address the array. -/
+  arrays : List (Name × List SymWidth × SymWidth) := []
   /-- Identifiers standing for Lean `Nat`s rather than for signals: the binder of an enclosing
   `for`, and the module's own parameters.
 
@@ -484,6 +488,22 @@ private def arrayName? (ctx : SymCtx) : TSyntax `circuit_expr → Option (Ident 
   | `(circuit_expr| $x:ident) => (ctx.arrays.lookup x.getId).map fun (_, w) => (x, w)
   | _ => none
 
+/-- Take `e[i][j][k]` apart into the identifier it bottoms out at and the indices applied to it,
+outermost last. `none` for anything whose base is not a plain name.
+
+This is what lets one spelling serve two readings. **An array of `n` dimensions consumes the
+first `n` indices and the rest apply to the result**, so a 1-D `a[i][j]` is bit `j` of element
+`i` -- which is what it has always meant -- a 2-D `r[i][j]` is one element, and `r[i][j][k]` is
+bit `k` of that element. Dispatch by declaration, the same way `a[i]` already chooses between an
+array, a memory and a bit select. -/
+private partial def indexChain? :
+    TSyntax `circuit_expr → Option (Ident × Array (TSyntax `circuit_expr))
+  | `(circuit_expr| $x:ident) => some (x, #[])
+  | `(circuit_expr| $e:circuit_expr [ $i:circuit_expr ]) => do
+      let (x, idxs) ← indexChain? e
+      return (x, idxs.push i)
+  | _ => none
+
 /-- Is this identifier a Lean `Nat` rather than a signal? -/
 private def isGenvar (ctx : SymCtx) (x : Ident) : Bool := ctx.genvars.contains x.getId
 
@@ -588,10 +608,21 @@ private partial def widthOf? (ctx : SymCtx) (stx : TSyntax `circuit_expr) :
   | `(circuit_expr| $_:circuit_expr [ $hi:term : $lo:term ]) => return some (← `($hi - $lo + 1))
   | `(circuit_expr| $x:ident [ $_:circuit_expr ] . $f:ident) =>
       return (ctx.arrays.lookup (x.getId ++ f.getId)).map fun (_, w) => w
-  | `(circuit_expr| $e:circuit_expr [ $_:circuit_expr ]) =>
-      match arrayName? ctx e, memoryName? ctx e with
-      | some (_, w), _ | _, some (_, w) => return some w
-      | none, none => return some (← ofNat 1)
+  | `(circuit_expr| $e:circuit_expr [ $i:circuit_expr ]) =>
+      -- The chain decides: an array access exactly as wide as its declared rank yields an
+      -- element, anything longer is a bit select of one.
+      match indexChain? (← `(circuit_expr| $e[$i])) with
+      | some (x, idxs) =>
+          match ctx.arrays.lookup x.getId with
+          | some (dims, w) =>
+              if idxs.size == dims.length then return some w else return some (← ofNat 1)
+          | none => match memoryName? ctx e with
+                    | some (_, w) => return some w
+                    | none => return some (← ofNat 1)
+      | none =>
+          match memoryName? ctx e with
+          | some (_, w) => return some w
+          | none => return some (← ofNat 1)
   | `(circuit_expr| { $es,* }) => do
       let mut total : Option SymWidth := none
       for e in es.getElems do
@@ -631,6 +662,45 @@ private partial def checkLogical (ctx : SymCtx) (expected : SymWidth) (ref : Syn
     (ctor : TSyntax `term) (a b : TSyntax `circuit_expr) : MacroM (TSyntax `term) := do
   expectSym ref "result of a logical operator" expected (← ofNat 1)
   `(Expr.bin $ctor 1 $(← nonzero ctx a) $(← nonzero ctx b))
+
+/-- An array access, if this index chain is one.
+
+`none` means "not an array access, try the next rule" and covers two cases: the base is not a
+declared array, or the chain is **longer** than the array's rank -- which is a bit select of an
+element, so the caller falls through to the bit-select rule and recurses on one fewer index until
+the rank matches. A chain *shorter* than the rank is a partial index and is an error rather than
+a fall-through, because it names an array where a value is wanted. -/
+private partial def arrayAccess? (ctx : SymCtx) (stx : Syntax) (expected : SymWidth)
+    (e : TSyntax `circuit_expr) : MacroM (Option (TSyntax `term)) := do
+  let some (x, idxs) := indexChain? e | return none
+  let some (dims, elemW) := ctx.arrays.lookup x.getId | return none
+  if idxs.size > dims.length then return none
+  if idxs.size < dims.length then throwWidth e (.rank x.getId dims.length idxs.size)
+  expectSym stx s!"element of array '{x.getId}'" expected elemW
+  -- Whether each index is in range is checked by `Module.check`, which has the extents as `Nat`s;
+  -- here a dimension may still be a parameter.
+  let dimsT ← `([$(dims.toArray),*])
+  match ← allStatic ctx idxs with
+  | some ts => return some (← `(Expr.elem $(quote x.getId) $elemW $dimsT [$ts,*]))
+  | none =>
+      if h : idxs.size = 1 then
+        let i := idxs[0]'(by omega)
+        let some aw ← widthOf? ctx i
+          | throwWidth i (.indeterminate "the index of this array read")
+        return some (← `(Expr.select $(quote x.getId) $elemW $dimsT $(← checkExpr ctx aw i)))
+      else
+        throwWidth e (.notStatic "an index into a multi-dimensional array, which this version \
+               addresses only with indices fixed before the design runs")
+
+/-- Every index, as Lean terms, or `none` if any of them reads a signal. -/
+private partial def allStatic (ctx : SymCtx) (idxs : Array (TSyntax `circuit_expr)) :
+    MacroM (Option (Array (TSyntax `term))) := do
+  let mut out : Array (TSyntax `term) := #[]
+  for i in idxs do
+    match ← asStaticTerm? ctx i with
+    | some t => out := out.push t
+    | none => return none
+  return some out
 
 /-- Lower an expression, checking it against `expected` and recording that width on every node. -/
 private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSyntax `circuit_expr) :
@@ -732,26 +802,17 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
   -- array's name arrives as two tokens rather than one.
   | `(circuit_expr| $x:ident [ $i:circuit_expr ] . $f:ident) => do
       let a := x.getId ++ f.getId
-      let some (_, elemW) := ctx.arrays.lookup a | throwWidth stx (.unboundArray a)
+      let some (dims, elemW) := ctx.arrays.lookup a | throwWidth stx (.unboundArray a)
       expectSym stx s!"element of array port '{x.getId}[..].{f.getId}'" expected elemW
       match ← asStaticTerm? ctx i with
-      | some idx => `(Expr.elem $(quote a) $elemW $idx)
+      | some idx => `(Expr.elem $(quote a) $elemW [$(dims.toArray),*] [$idx])
       | none => do
           let some aw ← widthOf? ctx i
             | throwWidth i (.indeterminate "the index of this array port read")
-          `(Expr.select $(quote a) $elemW $(← checkExpr ctx aw i))
+          `(Expr.select $(quote a) $elemW [$(dims.toArray),*] $(← checkExpr ctx aw i))
   | `(circuit_expr| $e:circuit_expr [ $i:circuit_expr ]) => do
-      match arrayName? ctx e with
-      | some (a, elemW) => do
-          expectSym stx s!"element of array '{a.getId}'" expected elemW
-          match ← asStaticTerm? ctx i with
-          -- Whether the element exists is checked by `Module.check`, which has the count as a
-          -- `Nat`; here it may be any term.
-          | some idx => `(Expr.elem $(quote a.getId) $elemW $idx)
-          | none => do
-              let some aw ← widthOf? ctx i
-                | throwWidth i (.indeterminate "the index of this array read")
-              `(Expr.select $(quote a.getId) $elemW $(← checkExpr ctx aw i))
+      match ← arrayAccess? ctx stx expected (← `(circuit_expr| $e[$i])) with
+      | some built => return built
       | none =>
       match memoryName? ctx e with
       | some (m, elemW) =>
@@ -840,36 +901,51 @@ private partial def elabStmt (ctx : SymCtx) : TSyntax `circuit_stmt → MacroM (
   -- at; `Stmt.check` catches the same thing on an AST built by hand.
   | `(circuit_stmt| assign $x:ident [ $i:circuit_expr ] . $f:ident = $e:circuit_expr ;) => do
       let a := x.getId ++ f.getId
-      let some (_, elemW) := ctx.arrays.lookup a | throwWidth x (.unboundArray a)
+      let some (dims, elemW) := ctx.arrays.lookup a | throwWidth x (.unboundArray a)
       if ctx.inputs.contains a then throwWidth x (.assignToInput a)
       match ← asStaticTerm? ctx i with
-      | some idx => `(Stmt.setElem $(quote a) $elemW $idx $(← checkExpr ctx elemW e))
+      | some idx =>
+          `(Stmt.setElem $(quote a) $elemW [$(dims.toArray),*] [$idx] $(← checkExpr ctx elemW e))
       | none => do
           let some aw ← widthOf? ctx i
             | throwWidth i (.indeterminate "the index of this array port write")
-          `(Stmt.setDyn $(quote a) $elemW
+          `(Stmt.setDyn $(quote a) $elemW [$(dims.toArray),*]
               $(← checkExpr ctx aw i) $(← checkExpr ctx elemW e))
   -- `a[i] = e` is an array write or a memory write, and only the declarations say which -- the
   -- same dispatch `a[i]` gets when it is read.
-  | `(circuit_stmt| assign $m:ident [ $addr:circuit_expr ] = $e:circuit_expr ;) => do
+  | `(circuit_stmt| assign $m:ident $[[$addrs:circuit_expr]]* = $e:circuit_expr ;) => do
       match ctx.arrays.lookup m.getId with
-      | some (_, elemW) => do
+      | some (dims, elemW) => do
           if ctx.inputs.contains m.getId then throwWidth m (.assignToInput m.getId)
-          match ← asStaticTerm? ctx addr with
-          | some i => `(Stmt.setElem $(quote m.getId) $elemW $i $(← checkExpr ctx elemW e))
-          | none => do
-              let some aw ← widthOf? ctx addr
-                | throwWidth addr (.indeterminate "the index of this array write")
-              `(Stmt.setDyn $(quote m.getId) $elemW
-                  $(← checkExpr ctx aw addr) $(← checkExpr ctx elemW e))
+          -- A write names an element and nothing else: there is no bit-select target, so the
+          -- chain has to be exactly the rank rather than at least it, as a read allows.
+          if addrs.size ≠ dims.length then
+            throwWidth m (.rank m.getId dims.length addrs.size)
+          let dimsT ← `([$(dims.toArray),*])
+          match ← allStatic ctx addrs with
+          | some ts =>
+              `(Stmt.setElem $(quote m.getId) $elemW $dimsT [$ts,*] $(← checkExpr ctx elemW e))
+          | none =>
+              if h : addrs.size = 1 then
+                let addr := addrs[0]'(by omega)
+                let some aw ← widthOf? ctx addr
+                  | throwWidth addr (.indeterminate "the index of this array write")
+                `(Stmt.setDyn $(quote m.getId) $elemW $dimsT
+                    $(← checkExpr ctx aw addr) $(← checkExpr ctx elemW e))
+              else
+                throwWidth m (.notStatic "an index into a multi-dimensional array, which this \
+                       version addresses only with indices fixed before the design runs")
       | none => do
           let some (_, elemW) := ctx.mems.lookup m.getId
             | throwWidth m (if (ctx.env.lookup m.getId).isSome then .notAMemory m.getId
                             else .unboundMem m.getId)
-          let some aw ← widthOf? ctx addr
-            | throwWidth addr (.indeterminate "the address of this memory write")
-          `(Stmt.store $(quote m.getId) $elemW
-              $(← checkExpr ctx aw addr) $(← checkExpr ctx elemW e))
+          if h : addrs.size = 1 then
+            let addr := addrs[0]'(by omega)
+            let some aw ← widthOf? ctx addr
+              | throwWidth addr (.indeterminate "the address of this memory write")
+            `(Stmt.store $(quote m.getId) $elemW
+                $(← checkExpr ctx aw addr) $(← checkExpr ctx elemW e))
+          else throwWidth m (.rank m.getId 1 addrs.size)
   | `(circuit_stmt| if $c:circuit_expr { $[$t:circuit_item]* } else { $[$f:circuit_item]* }) => do
       let cond ← checkExpr ctx (← ofNat 1) c
       `(Stmt.if_ $cond $(← mkStmtList ctx (← asStmts t)) $(← mkStmtList ctx (← asStmts f)))
@@ -955,9 +1031,10 @@ where
         else exprTarget ctx r
     | `(circuit_expr| $x:ident [ $i:circuit_expr ]) => do
         match ctx.arrays.lookup x.getId with
-        | some (_, elemW) =>
+        | some (dims, elemW) =>
             match ← asStaticTerm? ctx i with
-            | some idx => `(BindTarget.elem $(quote x.getId) $elemW $idx)
+            | some idx =>
+                `(BindTarget.elem $(quote x.getId) $elemW [$(dims.toArray),*] [$idx])
             -- A dynamic index is a mux rather than a place, so it takes the expression path.
             | none => exprTarget ctx r
         | none => exprTarget ctx r
@@ -965,8 +1042,8 @@ where
     -- which is an element of an array like any other.
     | `(circuit_expr| $x:ident [ $i:circuit_expr ] . $f:ident) =>
         match ctx.arrays.lookup (x.getId ++ f.getId), ← asStaticTerm? ctx i with
-        | some (_, elemW), some idx =>
-            `(BindTarget.elem $(quote (x.getId ++ f.getId)) $elemW $idx)
+        | some (dims, elemW), some idx =>
+            `(BindTarget.elem $(quote (x.getId ++ f.getId)) $elemW [$(dims.toArray),*] [$idx])
         | _, _ => exprTarget ctx r
     | _ => exprTarget ctx r
   /-- An expression binding. Its width comes from the expression, because the macro cannot see the
@@ -983,9 +1060,9 @@ private def elabItem (ctx : SymCtx) : TSyntax `circuit_item → MacroM (TSyntax 
   | `(circuit_item| memory $x:ident [ $d:term ] : $w:term ;) =>
       `(Item.mem $(quote x.getId) $d $w)
   | `(circuit_item| wire $x:ident : $w:term ;) => `(Item.reg $(quote x.getId) $w)
-  | `(circuit_item| reg $x:ident [ $n:term ] : $w:term ;)
-  | `(circuit_item| wire $x:ident [ $n:term ] : $w:term ;) =>
-      `(Item.array $(quote x.getId) $n $w)
+  | `(circuit_item| reg $x:ident $[[$ns:term]]* : $w:term ;)
+  | `(circuit_item| wire $x:ident $[[$ns:term]]* : $w:term ;) =>
+      `(Item.array $(quote x.getId) [$ns,*] $w)
   | `(circuit_item| ( $sub:term ) $iname:ident ( $[$bs:circuit_binding],* ) ;)
   | `(circuit_item| $sub:ident $iname:ident ( $[$bs:circuit_binding],* ) ;) => do
       -- `$sub` is spliced as the user wrote it, so it resolves at the use site. The macro has no
@@ -1087,15 +1164,16 @@ private def memDecls (is : Array (TSyntax `circuit_item)) :
       mems := mems.push (x, d, w)
   return mems
 
-/-- The array declarations in a module body. -/
+/-- The array declarations in a module body, each with its *shape*: `reg r[4][4] : 8` is one
+array of two dimensions, not two arrays. -/
 private def arrayDecls (is : Array (TSyntax `circuit_item)) :
-    MacroM (Array (Ident × SymWidth × SymWidth)) := do
-  let mut arrays : Array (Ident × SymWidth × SymWidth) := #[]
+    MacroM (Array (Ident × List SymWidth × SymWidth)) := do
+  let mut arrays : Array (Ident × List SymWidth × SymWidth) := #[]
   for i in is do
-    if let `(circuit_item| reg $x:ident [ $n:term ] : $w:term ;) := i then
-      arrays := arrays.push (x, n, w)
-    if let `(circuit_item| wire $x:ident [ $n:term ] : $w:term ;) := i then
-      arrays := arrays.push (x, n, w)
+    if let `(circuit_item| reg $x:ident $[[$ns:term]]* : $w:term ;) := i then
+      arrays := arrays.push (x, ns.toList, w)
+    if let `(circuit_item| wire $x:ident $[[$ns:term]]* : $w:term ;) := i then
+      arrays := arrays.push (x, ns.toList, w)
   return arrays
 
 /-- The names a module's parameter list binds, which are Lean terms wherever the body mentions
@@ -1147,8 +1225,8 @@ private def buildModule (name : Ident) (ins outs : Array (TSyntax `circuit_port)
       mems := (memsP.map (fun (x, d, w) => (x.getId, d, w))).toList
       -- An array port joins the arrays: one entry with its count, not `n` entries, which is
       -- what lets the count be a parameter the macro never evaluates.
-      arrays := (arraysP.map (fun (x, n, w) => (x.getId, n, w))).toList
-        ++ (ports.filterMap fun p => p.count.map fun n => (p.name.getId, n, p.width)).toList
+      arrays := (arraysP.map (fun (x, ds, w) => (x.getId, ds, w))).toList
+        ++ (ports.filterMap fun p => p.count.map fun n => (p.name.getId, [n], p.width)).toList
       genvars := params.toList }
   `(Module.ofItems $(quote name.getId)
       $(← mkPortList insP) $(← mkPortList outsP) $(← mkItemList ctx items.toList))

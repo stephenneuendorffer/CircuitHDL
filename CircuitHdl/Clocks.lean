@@ -28,8 +28,8 @@ because the path taken is a run-time matter and the clock is not. -/
 def Stmt.targets : Stmt → List Signal
   | .assign x _ => [.sig x]
   | .store m _ _ _ => [.sig m]
-  | .setElem a _ i _ => [.elem a i]
-  | .setDyn a _ _ _ => [.whole a]
+  | .setElem a _ _ i _ => [.elem a i]
+  | .setDyn a _ _ _ _ => [.whole a]
   | .if_ _ t f => Stmt.targetsList t ++ Stmt.targetsList f
 
 def Stmt.targetsList : List Stmt → List Signal

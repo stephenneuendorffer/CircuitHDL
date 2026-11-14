@@ -71,9 +71,9 @@ def Expr.uses : Expr → List Signal
   | .concat a b => a.uses ++ b.uses
   | .slice a _ _ => a.uses
   | .index m _ a => .sig m :: a.uses
-  | .elem a _ i => [.elem a i]
+  | .elem a _ _ i => [.elem a i]
   -- A dynamic read is a mux over every element, so it waits on all of them.
-  | .select a _ addr => .whole a :: addr.uses
+  | .select a _ _ addr => .whole a :: addr.uses
 
 end
 
@@ -87,11 +87,11 @@ consistent: scheduling an arm independently of its condition would be meaningles
 def Stmt.uses : Stmt → List Signal
   | .assign _ e => e.uses
   | .store _ _ addr data => addr.uses ++ data.uses
-  | .setElem _ _ _ data => data.uses
+  | .setElem _ _ _ _ data => data.uses
   -- Only the address and the data. The *netlist's* decoder also reads each element, to hold the
   -- ones it does not write -- which is a latch, and why a combinational `setDyn` is refused by
   -- the lowering rather than ordered here.
-  | .setDyn _ _ addr data => addr.uses ++ data.uses
+  | .setDyn _ _ _ addr data => addr.uses ++ data.uses
   | .if_ c t f => c.uses ++ Stmt.usesList t ++ Stmt.usesList f
 
 def Stmt.usesList : List Stmt → List Signal
