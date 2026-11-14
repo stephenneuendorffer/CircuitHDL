@@ -236,10 +236,10 @@ private def rfile : Module :=
   Module.ofItems `rfile
     [(`clk, 1), (`we, 1), (`wa, 2), (`wd, 8), (`ra, 2)] [(`rd, 8), (`first, 8)]
     [ Item.array `r [4] 8,
-      Item.stmt (.assign `rd (.select `r 8 [4] (.var `ra))),
+      Item.stmt (.assign `rd (.select `r 8 [4] [.var `ra])),
       Item.stmt (.assign `first (.elem `r 8 [4] [0])),
       Item.always (.posedge `clk)
-        [.if_ (.var `we) [.setDyn `r 8 [4] (.var `wa) (.var `wd)] []] ]
+        [.if_ (.var `we) [.setDyn `r 8 [4] [.var `wa] (.var `wd)] []] ]
 
 #guard (Module.check rfile).isOk
 #guard rfile.arrays = [(`r, [4], 8)]
@@ -279,7 +279,7 @@ for the same reason: a pointer bug should surface rather than silently alias. Th
 *cannot* do this, and the divergence is pinned in `CircuitHdlTest/Circt.lean`. -/
 private def oob : Module :=
   Module.ofItems `oob [(`i, 4)] [(`o, 8)]
-    [ Item.array `a [3] 8, Item.stmt (.assign `o (.select `a 8 [3] (.var `i))) ]
+    [ Item.array `a [3] 8, Item.stmt (.assign `o (.select `a 8 [3] [.var `i])) ]
 
 /-- info: Except.error (CircuitHdl.EvalError.indexOutOfRange `a 5 3) -/
 #guard_msgs in #eval oob.settle (oob.initState.apply [(`i, c 4 5)])

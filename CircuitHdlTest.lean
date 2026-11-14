@@ -9,6 +9,7 @@ import CircuitHdlTest.Circt
 import CircuitHdlTest.FifoHarness
 import CircuitHdlTest.ShiftFifo
 import CircuitHdlTest.PipeFifo
+import CircuitHdlTest.Grid
 import CircuitHdlTest.RegFile
 import CircuitHdlTest.SelectChain
 import CircuitHdlTest.MeshRoutingModel
@@ -44,6 +45,8 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 refines the same two models by entirely different means
 - `CircuitHdlTest.PipeFifo`  -- the pipeline FIFO: a valid bit per stage, so the queue is not a
                                 dense prefix and the gaps between words are permanent
+- `CircuitHdlTest.Grid`      -- the 4x4 grid: that a dynamic index in two dimensions lands where
+                             --   it should, and that one outside its dimension is caught
 - `CircuitHdlTest.RegFile`   -- the register file: that a dynamic index reads and writes where it
                                 says, that the lowered mux chain and decoder agree with the
                                 evaluator, and that an array and a memory are the same storage

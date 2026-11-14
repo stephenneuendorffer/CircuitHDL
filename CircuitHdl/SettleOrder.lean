@@ -73,7 +73,7 @@ def Expr.uses : Expr → List Signal
   | .index m _ a => .sig m :: a.uses
   | .elem a _ _ i => [.elem a i]
   -- A dynamic read is a mux over every element, so it waits on all of them.
-  | .select a _ _ addr => .whole a :: addr.uses
+  | .select a _ _ idx => .whole a :: idx.flatMap Expr.uses
 
 end
 
@@ -91,7 +91,7 @@ def Stmt.uses : Stmt → List Signal
   -- Only the address and the data. The *netlist's* decoder also reads each element, to hold the
   -- ones it does not write -- which is a latch, and why a combinational `setDyn` is refused by
   -- the lowering rather than ordered here.
-  | .setDyn _ _ _ addr data => addr.uses ++ data.uses
+  | .setDyn _ _ _ idx data => idx.flatMap Expr.uses ++ data.uses
   | .if_ c t f => c.uses ++ Stmt.usesList t ++ Stmt.usesList f
 
 def Stmt.usesList : List Stmt → List Signal

@@ -279,7 +279,7 @@ rules through the AST-level checker on hand-built modules.
   { name := `bad, inputs := [{ name := `i.valid, width := 1, count := some 2 }]
     outputs := [Port.scalar `v 1], regs := []
     body := [{ kind := .combinational, sensitivity := []
-               body := [Stmt.setDyn `i.valid 1 [2] (Expr.lit 1 0) (Expr.lit 1 0)] }] }
+               body := [Stmt.setDyn `i.valid 1 [2] [Expr.lit 1 0] (Expr.lit 1 0)] }] }
 
 /-- info: Except.error (CircuitHdl.CheckError.conflictingDecl `q 8 4) -/
 #guard_msgs in
@@ -349,7 +349,7 @@ private def arrMod (items : List Item) : Module :=
 -- A dynamic index is *not* checked here, because whether it is in range depends on the value it
 -- evaluates to. That one is `EvalError.indexOutOfRange`, in `CircuitHdlTest/Semantics.lean`.
 #guard (Module.check (arrMod
-  [Item.array `a [3] 8, Item.reg `i 8, Item.stmt (.assign `o (.select `a 8 [3] (.var `i)))])).isOk
+  [Item.array `a [3] 8, Item.reg `i 8, Item.stmt (.assign `o (.select `a 8 [3] [.var `i]))])).isOk
 
 /-! Slice and concat have no surface syntax, but the checker covers them. -/
 
@@ -775,6 +775,37 @@ module! bus #[(n : Nat)] (d[n] : 8) -> (sum : 8) {
 #guard ((bus 3).settle ((bus 3).initState.apply
   [(`d, Cell.mem ([5, 7, 0].map (Value.ofNat 8)))])).toOption.bind
   (State.valueOf? · `sum) = some 12
+
+/-! ### Multi-dimensional arrays, and the one spelling that serves two readings
+
+`r[i][j]` parses as `(r[i])[j]` and has always meant **bit `j` of element `i`**. An array of `n`
+dimensions consumes the first `n` indices and anything after them applies to the result, so both
+readings survive and which one applies is decided by the declaration -- the same dispatch `a[i]`
+already does across array, memory and bit select.
+-/
+
+module! chainRule #[] (x : 8) -> (one : 1, two : 8, three : 1, clear : 1) {
+  wire a[4] : 8;
+  wire r[2][3] : 8;
+  for k < 4 { assign a[k] = x + k; }
+  for i < 2 { for j < 3 { assign r[i][j] = x + (i * 3 + j); } }
+  -- A one-dimensional array takes one index; the second is a bit select, as it always was.
+  assign one = a[1][0];
+  -- A two-dimensional array takes two, and they are an element.
+  assign two = r[1][2];
+  -- And a third index past that is a bit select of *that* element.
+  assign three = r[1][2][0];
+  -- Not vacuous about *which* bit: `a[1] = 11 = 0b1011` has bit 2 clear, so an index taken one
+  -- too many or one too few moves this one and not the others.
+  assign clear = a[1][2];
+}
+
+#guard (Module.check chainRule).isOk
+-- `x = 10`, so `a[1] = 11 = 0b1011` and bit 0 is 1; `r[1][2] = 10 + 5 = 15`, bit 0 is 1.
+#guard (chainRule.settle (chainRule.initState.apply
+    [(`x, Cell.sig (Value.ofNat 8 10))])).toOption.bind (fun σ => do
+      return (← σ.valueOf? `one, ← σ.valueOf? `two, ← σ.valueOf? `three, ← σ.valueOf? `clear))
+  = some (1, 15, 1, 0)
 
 /-! ### The static conditional
 

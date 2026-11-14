@@ -125,6 +125,31 @@ end State
 
 /-! ### Expressions -/
 
+/-- Fold a dynamic access's evaluated indices row-major, **checking each against its own
+extent**.
+
+Checking per dimension rather than once against `cellSize dims` is the whole reason `select`
+carries the indices instead of a flat address the macro folded: `grid[0][7]` on a 4x4 is offset
+7, which is in range for the sixteen elements and is element `[1][3]`. A flat bound hands back a
+wrong value; this refuses.
+
+It widens an already-pinned divergence, and knowingly: the netlist's mux chain has nowhere to put
+an error and reads element 0 instead, so every index refused here is one the lowered design
+answers. `CircuitHdlTest/Circt.lean` is where that is recorded. -/
+def dynOffset (a : Name) (dims : List Nat) (idx : List Nat) : Except EvalError Nat :=
+  go 0 dims idx
+where
+  go (k : Nat) : List Nat → List Nat → Except EvalError Nat
+    | _, [] => .ok 0
+    | [], _ => .ok 0
+    | d :: ds, i :: is =>
+        if i < d then do
+          return i * (rowMajorStrides (d :: ds)).headD 1 + (← go (k + 1) ds is)
+        -- A one-dimensional array's only index is its offset, so the older error already says
+        -- everything; past that the *dimension* is what was exceeded and has to be named.
+        else if dims.length = 1 then .error (.indexOutOfRange a i d)
+        else .error (.dimOutOfRange a k i d)
+
 /-- View both operands of a binary operation at width `w`.
 
 Public, unlike the other helpers here, because a proof about `.bin` or `.cmp` has to unfold it --
@@ -137,6 +162,8 @@ def operands (sym : String) (w : Nat) (a b : Value) :
   let a' ← a.atWidth w s!"left operand of {sym}"
   let b' ← b.atWidth w s!"right operand of {sym}"
   .ok (a', b')
+
+mutual
 
 /-- Evaluate an expression against the current state.
 
@@ -186,12 +213,23 @@ def Expr.eval (σ : State) : Expr → Except EvalError Value
       else .error (.check (.widthMismatch s!"element of array '{a}'" elemW v.width))
   -- An index past the end is an error here and element 0 in the netlist, where the mux chain has
   -- nowhere to put one. `CircuitHdlTest/Circt.lean` pins the divergence.
-  | .select a elemW ds addr => do
-      let i ← Expr.eval σ addr
-      let _ := ds
-      let v ← σ.getMem? a i.toNat
+  | .select a elemW ds idx => do
+      let vs ← Expr.evalIndices σ idx
+      let off ← dynOffset a ds vs
+      let v ← σ.getMem? a off
       if v.width = elemW then .ok v
       else .error (.check (.widthMismatch s!"element of array '{a}'" elemW v.width))
+
+/-- A dynamic access's indices, as numbers, left to right.
+
+Spelled out rather than `List.mapM` because `Expr.select` nests `List Expr`, and `mapM` over a
+nested inductive makes the recursion **well-founded**, which does not reduce under `rfl`. The
+same shape and the same reason as `Expr.widthList?`. -/
+def Expr.evalIndices (σ : State) : List Expr → Except EvalError (List Nat)
+  | [] => .ok []
+  | e :: es => do return (← Expr.eval σ e).toNat :: (← Expr.evalIndices σ es)
+
+end
 
 /-! ### Statements
 
@@ -215,12 +253,13 @@ def Stmt.execBlocking (σ : State) : Stmt → Except EvalError State
       if v.width != elemW then
         .error (.check (.widthMismatch s!"write to array '{a}'" elemW v.width))
       else σ.setMem a (rowMajorOffset ds i) v
-  | .setDyn a elemW _ addr data => do
-      let i ← Expr.eval σ addr
+  | .setDyn a elemW ds idx data => do
+      let vs ← idx.mapM (Expr.eval σ)
+      let off ← dynOffset a ds (vs.map Value.toNat)
       let v ← Expr.eval σ data
       if v.width != elemW then
         .error (.check (.widthMismatch s!"write to array '{a}'" elemW v.width))
-      else σ.setMem a i.toNat v
+      else σ.setMem a off v
   | .if_ c t f => do
       let cb ← (← Expr.eval σ c).atWidth 1 "if condition"
       if cb = 1#1 then Stmt.execBlockingList σ t else Stmt.execBlockingList σ f
@@ -267,12 +306,13 @@ def Stmt.execNonBlocking (σ₀ : State) (pending : State) : Stmt → Except Eva
       if v.width != elemW then
         .error (.check (.widthMismatch s!"write to array '{a}'" elemW v.width))
       else pendingWord σ₀ pending a (rowMajorOffset ds i) v
-  | .setDyn a elemW _ addr data => do
-      let i ← Expr.eval σ₀ addr
+  | .setDyn a elemW ds idx data => do
+      let vs ← idx.mapM (Expr.eval σ₀)
+      let off ← dynOffset a ds (vs.map Value.toNat)
       let v ← Expr.eval σ₀ data
       if v.width != elemW then
         .error (.check (.widthMismatch s!"write to array '{a}'" elemW v.width))
-      else pendingWord σ₀ pending a i.toNat v
+      else pendingWord σ₀ pending a off v
   | .if_ c t f => do
       let cb ← (← Expr.eval σ₀ c).atWidth 1 "if condition"
       if cb = 1#1 then Stmt.execNonBlockingList σ₀ pending t

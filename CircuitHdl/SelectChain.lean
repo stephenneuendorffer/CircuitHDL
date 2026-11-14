@@ -109,29 +109,45 @@ theorem eval_elem_out_of_range {σ : State} {a : Name} {ws : List Value} {elemW 
     List.getElem?_eq_none_iff.mpr hi]
   rfl
 
-/-- **A dynamic read at a known address is the element read at that index.** The two reach the
-same `getMem?` and the same width check; all that differs is where the index came from, and once
-the address has been evaluated there is no difference left at all.
+/-- **A dynamic read at an in-range address is the element read at that index.** The two reach
+the same `getMem?` and the same width check; all that differs is where the index came from, and
+once the address has been evaluated and found to be inside its dimension there is no difference
+left at all.
+
+The range hypothesis is new with multi-dimensional arrays and is not bookkeeping. `select` now
+checks each index against *its own extent* before folding -- which is the whole reason it carries
+the indices rather than an address the macro folded -- so out of range the two no longer even
+raise the same error: `select` reports the dimension, `elem` reports the cell. In range they
+coincide, and `eval_select_out_of_range` below handles the rest.
 
 Everything else about `select` follows from this and the `elem` lemmas, which is why the chain
 proof below never unfolds `select` again. -/
 theorem eval_select_eq_elem {σ : State} {a : Name} {elemW count : Nat} {addr : Expr} {av : Value}
-    (haddr : Expr.eval σ addr = .ok av) :
-    Expr.eval σ (.select a elemW [count] addr) = Expr.eval σ (.elem a elemW [count] [av.toNat]) := by
-  simp only [Expr.eval, rowMajorOffset_singleton, haddr]
-  rfl
+    (haddr : Expr.eval σ addr = .ok av) (hlt : av.toNat < count) :
+    Expr.eval σ (.select a elemW [count] [addr])
+      = Expr.eval σ (.elem a elemW [count] [av.toNat]) := by
+  simp only [Expr.eval, Expr.evalIndices, haddr, bind_ok, pure_bind, dynOffset, dynOffset.go,
+    rowMajorStrides, hlt, if_pos, List.prod_nil, Nat.mul_one, Nat.add_zero,
+    rowMajorOffset_singleton, List.headD, List.head?]
 
 theorem eval_select_eq {σ : State} {a : Name} {ws : List Value} {elemW count : Nat} {addr : Expr}
     {av : Value} (h : σ.HoldsArray a ws elemW) (haddr : Expr.eval σ addr = .ok av)
-    (hi : av.toNat < ws.length) :
-    Expr.eval σ (.select a elemW [count] addr) = .ok ws[av.toNat] := by
-  rw [eval_select_eq_elem haddr, eval_elem_eq h hi]
+    (hc : count = ws.length) (hi : av.toNat < ws.length) :
+    Expr.eval σ (.select a elemW [count] [addr]) = .ok ws[av.toNat] := by
+  rw [eval_select_eq_elem haddr (by omega), eval_elem_eq h hi]
 
+/-- Out of range, the *dimension* is what refuses -- before `getMem?` is ever reached. With the
+shape agreeing with the cell the two bounds are the same number, so the reported error is the one
+it always was. -/
 theorem eval_select_out_of_range {σ : State} {a : Name} {ws : List Value} {elemW count : Nat}
-    {addr : Expr} {av : Value} (h : σ.HoldsArray a ws elemW)
-    (haddr : Expr.eval σ addr = .ok av) (hi : ws.length ≤ av.toNat) :
-    Expr.eval σ (.select a elemW [count] addr) = .error (.indexOutOfRange a av.toNat ws.length) := by
-  rw [eval_select_eq_elem haddr, eval_elem_out_of_range h hi]
+    {addr : Expr} {av : Value} (haddr : Expr.eval σ addr = .ok av)
+    (hc : count = ws.length) (hi : ws.length ≤ av.toNat) :
+    Expr.eval σ (.select a elemW [count] [addr])
+      = .error (.indexOutOfRange a av.toNat ws.length) := by
+  subst hc
+  simp only [Expr.eval, Expr.evalIndices, haddr, bind_ok, pure_bind, dynOffset, dynOffset.go]
+  rw [if_neg (Nat.not_lt.mpr hi)]
+  rfl
 
 /-! ### The pieces of one arm -/
 
@@ -236,14 +252,14 @@ for itself. -/
 theorem eval_select_eq_selectChain {σ : State} {a : Name} {ws : List Value} {elemW addrW count : Nat}
     {addr : Expr} {av : Value} (h : σ.HoldsArray a ws elemW)
     (haddr : Expr.eval σ addr = .ok av) (hav : av.width = addrW)
-    (hi : av.toNat < ws.length) :
-    Expr.eval σ (.select a elemW [count] addr)
+    (hc : count = ws.length) (hi : av.toNat < ws.length) :
+    Expr.eval σ (.select a elemW [count] [addr])
       = Expr.eval σ (Expr.selectChain a elemW addrW count addr (ws.length - 1)) := by
   obtain ⟨aw, ab⟩ := av
   simp only at hav
   subst hav
   have hk : ws.length - 1 < ws.length := by omega
-  rw [eval_select_eq h haddr hi, eval_selectChain_eq h haddr hk]
+  rw [eval_select_eq h haddr hc hi, eval_selectChain_eq h haddr hk]
   simp only [chainIndex_of_le (show ab.toNat ≤ ws.length - 1 by
     simp only [Value.toNat] at hi; omega)]
   rfl
@@ -254,11 +270,11 @@ lowering -- it is what a mux tree *must* do, having nowhere to put an error. -/
 theorem selectChain_out_of_range {σ : State} {a : Name} {ws : List Value} {elemW addrW count : Nat}
     {addr : Expr} {av : Value} (h : σ.HoldsArray a ws elemW)
     (haddr : Expr.eval σ addr = .ok av) (hav : av.width = addrW) (hne : 0 < ws.length)
-    (hi : ws.length ≤ av.toNat) :
+    (hc : count = ws.length) (hi : ws.length ≤ av.toNat) :
     Expr.eval σ (Expr.selectChain a elemW addrW count addr (ws.length - 1)) = .ok ws[0]
-      ∧ Expr.eval σ (.select a elemW [count] addr)
+      ∧ Expr.eval σ (.select a elemW [count] [addr])
           = .error (.indexOutOfRange a av.toNat ws.length) := by
-  refine ⟨?_, eval_select_out_of_range h haddr hi⟩
+  refine ⟨?_, eval_select_out_of_range haddr hc hi⟩
   obtain ⟨aw, ab⟩ := av
   simp only at hav
   subst hav

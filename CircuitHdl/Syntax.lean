@@ -683,14 +683,14 @@ private partial def arrayAccess? (ctx : SymCtx) (stx : Syntax) (expected : SymWi
   match ← allStatic ctx idxs with
   | some ts => return some (← `(Expr.elem $(quote x.getId) $elemW $dimsT [$ts,*]))
   | none =>
-      if h : idxs.size = 1 then
-        let i := idxs[0]'(by omega)
+      -- One index per dimension, each at whatever width it happens to be: the lowering widens
+      -- them before folding, and which values are in range is decided when they are evaluated.
+      let mut built : Array (TSyntax `term) := #[]
+      for i in idxs do
         let some aw ← widthOf? ctx i
-          | throwWidth i (.indeterminate "the index of this array read")
-        return some (← `(Expr.select $(quote x.getId) $elemW $dimsT $(← checkExpr ctx aw i)))
-      else
-        throwWidth e (.notStatic "an index into a multi-dimensional array, which this version \
-               addresses only with indices fixed before the design runs")
+          | throwWidth i (.indeterminate "an index of this array read")
+        built := built.push (← checkExpr ctx aw i)
+      return some (← `(Expr.select $(quote x.getId) $elemW $dimsT [$built,*]))
 
 /-- Every index, as Lean terms, or `none` if any of them reads a signal. -/
 private partial def allStatic (ctx : SymCtx) (idxs : Array (TSyntax `circuit_expr)) :
@@ -809,7 +809,7 @@ private partial def checkExpr (ctx : SymCtx) (expected : SymWidth) (stx : TSynta
       | none => do
           let some aw ← widthOf? ctx i
             | throwWidth i (.indeterminate "the index of this array port read")
-          `(Expr.select $(quote a) $elemW [$(dims.toArray),*] $(← checkExpr ctx aw i))
+          `(Expr.select $(quote a) $elemW [$(dims.toArray),*] [$(← checkExpr ctx aw i)])
   | `(circuit_expr| $e:circuit_expr [ $i:circuit_expr ]) => do
       match ← arrayAccess? ctx stx expected (← `(circuit_expr| $e[$i])) with
       | some built => return built
@@ -910,7 +910,7 @@ private partial def elabStmt (ctx : SymCtx) : TSyntax `circuit_stmt → MacroM (
           let some aw ← widthOf? ctx i
             | throwWidth i (.indeterminate "the index of this array port write")
           `(Stmt.setDyn $(quote a) $elemW [$(dims.toArray),*]
-              $(← checkExpr ctx aw i) $(← checkExpr ctx elemW e))
+              [$(← checkExpr ctx aw i)] $(← checkExpr ctx elemW e))
   -- `a[i] = e` is an array write or a memory write, and only the declarations say which -- the
   -- same dispatch `a[i]` gets when it is read.
   | `(circuit_stmt| assign $m:ident $[[$addrs:circuit_expr]]* = $e:circuit_expr ;) => do
@@ -925,16 +925,14 @@ private partial def elabStmt (ctx : SymCtx) : TSyntax `circuit_stmt → MacroM (
           match ← allStatic ctx addrs with
           | some ts =>
               `(Stmt.setElem $(quote m.getId) $elemW $dimsT [$ts,*] $(← checkExpr ctx elemW e))
-          | none =>
-              if h : addrs.size = 1 then
-                let addr := addrs[0]'(by omega)
+          | none => do
+              let mut built : Array (TSyntax `term) := #[]
+              for addr in addrs do
                 let some aw ← widthOf? ctx addr
-                  | throwWidth addr (.indeterminate "the index of this array write")
-                `(Stmt.setDyn $(quote m.getId) $elemW $dimsT
-                    $(← checkExpr ctx aw addr) $(← checkExpr ctx elemW e))
-              else
-                throwWidth m (.notStatic "an index into a multi-dimensional array, which this \
-                       version addresses only with indices fixed before the design runs")
+                  | throwWidth addr (.indeterminate "an index of this array write")
+                built := built.push (← checkExpr ctx aw addr)
+              `(Stmt.setDyn $(quote m.getId) $elemW $dimsT [$built,*]
+                  $(← checkExpr ctx elemW e))
       | none => do
           let some (_, elemW) := ctx.mems.lookup m.getId
             | throwWidth m (if (ctx.env.lookup m.getId).isSome then .notAMemory m.getId

@@ -359,6 +359,36 @@ private def selectChain (σ : Scope) (a : Name) (addr : Val) : M Val := do
       acc ← emit (.comb .mux) () elemW #[eq, v, acc]
   return acc
 
+/-- The flat address of a dynamic access, as hardware: `i0 * s0 + i1 * s1 + ...` where each
+stride is the product of the dimensions after it.
+
+Every index is widened to the width `cellSize dims` needs before the arithmetic, since `comb.add`
+and `comb.mul` want their operands the same width and an index is only as wide as its own
+dimension. `adaptWidth` is the one place that resizing happens -- which is also the first time a
+*design* reaches it: `CircuitHdl/Examples` never did, and `memAdapt` in `CircuitHdlTest/Circt`
+existed only to.
+
+The chain below is then over the flat space and unchanged, which is what lets
+`CircuitHdl/SelectChain.lean` keep proving it at one address. -/
+private def flatAddr (dims : List Nat) (idxs : List Val) : M Val := do
+  -- Wide enough for the cell, and **never narrower than an index already is**. Sizing it to the
+  -- cell alone would truncate an out-of-range address rather than leaving it to miss every arm
+  -- of the chain, which is a different divergence from the pinned one: element `addr % 2 ^ w`
+  -- instead of element 0. In range the two agree, so the width only shows up out of it.
+  let needed := max 1 (Nat.log2 (max 1 (cellSize dims)) + 1)
+  let w := idxs.foldl (fun acc v => max acc v.width) needed
+  let mut acc ← constant w 0
+  let mut rest := rowMajorStrides dims
+  for v in idxs do
+    let stride := rest.headD 1
+    rest := rest.drop 1
+    let vw ← adaptWidth v w
+    let term ← if stride == 1 then pure vw else do
+      let sv ← constant w stride
+      emit (.comb .mul) () w #[vw, sv]
+    acc ← emit (.comb .add) () w #[acc, term]
+  return acc
+
 /-- Lower an expression to the value it computes, one case per rule in `Expr.width?`. -/
 private def lowerExpr (σ : Scope) : Expr → M Val
   | .var x => lookupVal σ (.sig x)
@@ -421,9 +451,9 @@ private def lowerExpr (σ : Scope) : Expr → M Val
       if v.width = elemW then return v
       else throw (.check (.widthMismatch s!"element of memory '{m}'" elemW v.width))
   | .elem a _ _ i => lookupVal σ (.elem a i)
-  | .select a _ _ addr => do
-      let addr ← lowerExpr σ addr
-      selectChain σ a addr
+  | .select a _ ds idx => do
+      let vs ← idx.mapM (lowerExpr σ)
+      selectChain σ a (← flatAddr ds vs)
 
 /-! ### Statements
 
@@ -541,8 +571,9 @@ private def lowerSeqStmt (σ₀ : Scope) (guards : Guards) (pending : Scope) : S
   -- The path condition is not needed: an enclosing `if` reconciles each element through
   -- `branchTargets`, exactly as it does an ordinary assignment. Only a memory write, which emits
   -- a port rather than a value, has to take the guard as an enable.
-  | .setDyn a _ _ addr data => do
-      let addr ← lowerExpr σ₀ addr
+  | .setDyn a _ ds idx data => do
+      let vs ← idx.mapM (lowerExpr σ₀)
+      let addr ← flatAddr ds vs
       let data ← lowerExpr σ₀ data
       let (dims, elemW) ← arrayInfo a
       let mut out := pending

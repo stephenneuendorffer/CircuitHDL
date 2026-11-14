@@ -327,7 +327,7 @@ A *static* element index is not affected at all. It is fixed before the design r
 private def oobArray : Module :=
   Module.ofItems `oobArray [(`clk, 1), (`i, 4)] [(`o, 8)]
     [ Item.array `a [3] 8,
-      Item.stmt (.assign `o (.select `a 8 [3] (.var `i))),
+      Item.stmt (.assign `o (.select `a 8 [3] [.var `i])),
       Item.always (.posedge `clk)
         [.setElem `a 8 [3] [0] (.lit 8 11), .setElem `a 8 [3] [1] (.lit 8 22),
          .setElem `a 8 [3] [2] (.lit 8 33)] ]

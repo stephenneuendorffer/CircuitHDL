@@ -148,6 +148,14 @@ inductive EvalError where
   | check : CheckError → EvalError
   /-- A memory or an array indexed past the last value it holds. -/
   | indexOutOfRange : Name → (index depth : Nat) → EvalError
+  /-- An index outside its *dimension*, on an array that has more than one.
+
+  Separate from `indexOutOfRange` because the number means something different: there it is how
+  much the whole thing holds, here it is one dimension's extent, and on a 4x4 "out of range for
+  'g', which holds 4 values" would be saying the array has four elements when it has sixteen. A
+  one-dimensional array keeps the older error, where its only index *is* its offset and the
+  sentence is already the whole truth. -/
+  | dimOutOfRange : Name → (dim index extent : Nat) → EvalError
   /-- A zero divisor. The `String` is the operator, `/` or `%`. CIRCT makes this *poison*; this
   evaluator has none, so it refuses, which is the same choice `indexOutOfRange` makes. -/
   | divideByZero : String → EvalError
@@ -160,6 +168,8 @@ def render : EvalError → String
   -- Neutral about which kind of declaration it was: an array raises this too, and the one message
   -- has to read correctly for both.
   | indexOutOfRange m i d => s!"index {i} is out of range for '{m}', which holds {d} values"
+  | dimOutOfRange m k i d =>
+      s!"index {i} is out of range for dimension {k} of '{m}', which has {d} elements"
   | divideByZero sym => s!"the right operand of {sym} is zero"
 
 instance : ToString EvalError := ⟨render⟩
@@ -233,6 +243,8 @@ where
     | ext :: ds, v :: vs =>
         if v < ext then inRange (d + 1) ds vs else .error (.elemRange a d v ext)
 
+mutual
+
 /-- The width of an expression, checking that the widths recorded on each node are consistent.
 
 This synthesises rather than checks: every node already carries its width, so there is nothing to
@@ -275,10 +287,33 @@ def Expr.width? (ctx : Ctx) : Expr → Except CheckError Nat
       let _ ← Expr.width? ctx addr
       .ok elemW
   | .elem a elemW ds i => ctx.elemWidth a elemW ds (some i)
-  | .select a elemW ds addr => do
+  | .select a elemW ds idx => do
       let w ← ctx.elemWidth a elemW ds none
-      let _ ← Expr.width? ctx addr
+      -- One index per dimension. Each may be any width; which values are in range is a fact
+      -- about the run, and `dynOffset` is what decides it there.
+      if idx.length ≠ ds.length then .error (.rank a ds.length idx.length)
+      let _ ← Expr.widthList? ctx idx
       .ok w
+termination_by structural e => e
+
+/-- The widths of a dynamic access's indices, spelled out rather than `List.mapM`.
+
+`Expr.select` nests `List Expr`, and `mapM` over a nested inductive makes the recursion
+**well-founded** -- which no longer reduces under `rfl`. `CircuitHdlTest/AsyncFifo.lean` proves
+`(asyncFifo 4 8).check = .ok ()` by kernel computation, and it stops being provable the moment
+this is a `mapM`: measured, not guessed. The same shape `Stmt.checkList` already has, for the
+same reason one level up. -/
+def Expr.widthList? (ctx : Ctx) : List Expr → Except CheckError (List Nat)
+  | [] => .ok []
+  | e :: es => do return (← Expr.width? ctx e) :: (← Expr.widthList? ctx es)
+termination_by structural es => es
+
+end
+
+-- **Structural, and asserted rather than hoped for.** Left to itself Lean compiles this pair by
+-- well-founded recursion, which does not reduce far enough for `rfl`: `check_4_8` in
+-- `CircuitHdlTest/AsyncFifo.lean` stops being provable, while small expressions still reduce, so
+-- the failure looks like a size limit rather than a recursion-kind change. Measured both ways.
 
 mutual
 
@@ -301,23 +336,32 @@ def Stmt.check (ctx : Ctx) : Stmt → Except CheckError Unit
       if ctx.inputs.contains a then .error (.assignToInput a)
       let _ ← ctx.elemWidth a elemW ds (some i)
       expectWidth s!"write to array '{a}'" elemW (← Expr.width? ctx data)
-  | .setDyn a elemW ds addr data => do
+  | .setDyn a elemW ds idx data => do
       if ctx.inputs.contains a then .error (.assignToInput a)
       let _ ← ctx.elemWidth a elemW ds none
-      let _ ← Expr.width? ctx addr
+      if idx.length ≠ ds.length then .error (.rank a ds.length idx.length)
+      let _ ← Expr.widthList? ctx idx
       expectWidth s!"write to array '{a}'" elemW (← Expr.width? ctx data)
   | .if_ c t f => do
       expectWidth "if condition" 1 (← Expr.width? ctx c)
       Stmt.checkList ctx t
       Stmt.checkList ctx f
+termination_by structural s => s
 
 /-- Check a block of statements. Spelled out rather than using `List.forM` because `Stmt.if_` nests
-`List Stmt`, so the recursion has to be mutual for Lean to see it as structural. -/
+`List Stmt`, so the recursion has to be mutual for Lean to see it as structural.
+
+**The annotation is load-bearing, not decoration.** Left to infer, Lean compiles this pair by
+well-founded recursion, which stopped reducing the moment `Expr` gained a nested `List Expr` --
+`check_4_8` in `CircuitHdlTest/AsyncFifo.lean` is `rfl` over a whole module and simply failed,
+while every small expression still reduced, so it read as a size limit rather than a change of
+recursion kind. -/
 def Stmt.checkList (ctx : Ctx) : List Stmt → Except CheckError Unit
   | [] => .ok ()
   | s :: rest => do
       Stmt.check ctx s
       Stmt.checkList ctx rest
+termination_by structural ss => ss
 
 end
 

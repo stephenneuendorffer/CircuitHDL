@@ -255,10 +255,31 @@ These go through by kernel computation. The `∀ k dw` version does **not** -- s
 --   asyncFifo 5 8   -- `decide` proved that the proposition validDepth 5 = true is false
 #guard validDepth 4 && validDepth 32 && !validDepth 5 && !validDepth 2 && !validDepth 0
 
-theorem check_4_8 : (asyncFifo 4 8).check = .ok () := rfl
-theorem check_8_8 : (asyncFifo 8 8).check = .ok () := rfl
-theorem check_16_32 : (asyncFifo 16 32).check = .ok () := rfl
-theorem check_64_8 : (asyncFifo 64 8).check = .ok () := rfl
+/-! These were `rfl` -- kernel computation, nothing trusted but the kernel -- until `Expr.select`
+began carrying **one index per dimension** so that a dynamic `grid[row][col]` could be checked
+against each extent rather than only against the whole array.
+
+That makes `Expr` a *nested* inductive (`List Expr` inside `Expr`), and a module's `check` then
+stops reducing definitionally. What was measured, because the symptom is misleading: a
+twenty-statement module still reduces, and so does every individual statement and expression of
+`asyncFifo`, so it reads as a size limit -- but raising `maxHeartbeats` to 1,000,000 and
+`maxRecDepth` to 100,000 changes nothing and the failure arrives in seven seconds, so it is not
+fuel. Annotating `Stmt.check` and `Expr.width?` as `termination_by structural` does not restore
+it either; removing the index recursion from `Width.lean` while keeping the nested constructor
+does not restore it. The nesting itself is what costs this.
+
+So these four are now **compiler-trusted rather than kernel-only**, and that is a real loss on
+the one property this file proves by computation rather than by test. It was weighed against the
+alternative -- folding a dynamic index into a flat address in the macro, which keeps `rfl` and
+gives up the per-dimension check -- and the check was judged worth more.
+
+`#print axioms check_4_8` now shows a `_native.native_decide.ax_*`, which is the signal to look
+here. -/
+
+theorem check_4_8 : (asyncFifo 4 8).check = .ok () := by native_decide
+theorem check_8_8 : (asyncFifo 8 8).check = .ok () := by native_decide
+theorem check_16_32 : (asyncFifo 16 32).check = .ok () := by native_decide
+theorem check_64_8 : (asyncFifo 64 8).check = .ok () := by native_decide
 
 /-- The declaration environment of a FIFO with `n` address bits and `dw`-bit data. -/
 private def fifoEnv (n dw : Nat) : Env :=

@@ -195,7 +195,7 @@ private def dynOrder : Module :=
   Module.ofItems `dynOrder [(`x, 8), (`i, 2)] [(`o, 8)]
     [ Item.array `a [2] 8,
       Item.stmt (.assign `o (.elem `a 8 [2] [1])),
-      Item.stmt (.setDyn `a 8 [2] (.var `i) (.var `x)) ]
+      Item.stmt (.setDyn `a 8 [2] [.var `i] (.var `x)) ]
 
 #guard dynOrder.settleOrder.steps.map Stmt.targets = [[.whole `a], [.sig `o]]
 #guard (dynOrder.settle (dynOrder.initState.apply [(`x, w8 42), (`i, w2 1)])).toOption.bind

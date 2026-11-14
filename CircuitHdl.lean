@@ -18,6 +18,7 @@ import CircuitHdl.Examples.AsyncFifo
 import CircuitHdl.Examples.ShiftFifo
 import CircuitHdl.Examples.PipeFifo
 import CircuitHdl.Examples.RegFile
+import CircuitHdl.Examples.Grid
 import CircuitHdl.Examples.MeshRoutingModel
 import CircuitHdl.Examples.MeshSwitch
 import CircuitHdl.Examples.Mesh4x4
@@ -62,6 +63,8 @@ language they need:
                                       pointers do not, and one clock means one reset
 - `CircuitHdl.Examples.PipeFifo`   -- a valid bit per stage and writes entering at the far end,
                                       so latency is the depth and bubbles are permanent
+- `CircuitHdl.Examples.Grid`       -- a 4x4 grid: the one design indexed by a value in *two*
+                                  --   dimensions, so the only one that builds a flat address
 - `CircuitHdl.Examples.RegFile`    -- storage addressed by a *value*: the one design whose index
                                       is not known before it runs, so its read ports are mux
                                       chains over an array and its write port is a decoder

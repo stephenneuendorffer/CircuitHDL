@@ -29,7 +29,7 @@ private def c (w n : Nat) : Cell := .sig (Value.ofNat w n)
 private def viaSelect : Module :=
   Module.ofItems `viaSelect [(`clk, 1), (`i, 2)] [(`o, 8)]
     [ Item.array `a [3] 8,
-      Item.stmt (.assign `o (.select `a 8 [3] (.var `i))),
+      Item.stmt (.assign `o (.select `a 8 [3] [.var `i])),
       Item.always (.posedge `clk)
         [.setElem `a 8 [3] [0] (.lit 8 11), .setElem `a 8 [3] [1] (.lit 8 22),
          .setElem `a 8 [3] [2] (.lit 8 33)] ]

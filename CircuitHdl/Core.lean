@@ -132,10 +132,14 @@ inductive Expr where
   and that needs the strides. `Module.check` compares it against the declaration exactly as it
   compares `elemW`, so an AST built by hand is checked rather than trusted. -/
   | elem : Name → (elemW : Nat) → (dims : List Nat) → (idx : List Nat) → Expr
-  /-- A dynamic read from an array, `a[i]`. Shaped exactly like `index`, and the difference is
-  entirely in the declaration it names: a memory is one object with ports, an array is `count`
-  registers and this is the mux tree over them. -/
-  | select : Name → (elemW : Nat) → (dims : List Nat) → Expr → Expr
+  /-- A dynamic read from an array, `a[i]` or `grid[row][col]`. Shaped exactly like `index`, and
+  the difference is entirely in the declaration it names: a memory is one object with ports, an
+  array is `cellSize dims` registers and this is the mux tree over them.
+
+  One index per dimension, each evaluated and **checked against its own extent** before they are
+  folded row-major. Folding in the macro instead would be a number the check can no longer see:
+  `grid[0][7]` on a 4x4 is offset 7, in range for the sixteen elements and element `[1][3]`. -/
+  | select : Name → (elemW : Nat) → (dims : List Nat) → (idx : List Expr) → Expr
   deriving Repr
 
 /-- Statements in the typed circuit core. -/
@@ -146,7 +150,7 @@ inductive Stmt where
   /-- A write to one element of an array, `a[3] = data`, `r[1][3] = data`. -/
   | setElem : Name → (elemW : Nat) → (dims : List Nat) → (idx : List Nat) → Expr → Stmt
   /-- A dynamic write to an array, `a[i] = data`: a decoder, where `store` is a write port. -/
-  | setDyn : Name → (elemW : Nat) → (dims : List Nat) → Expr → Expr → Stmt
+  | setDyn : Name → (elemW : Nat) → (dims : List Nat) → (idx : List Expr) → Expr → Stmt
   | if_ : Expr → List Stmt → List Stmt → Stmt
   deriving Repr
 
@@ -184,17 +188,25 @@ a loop.
 surface syntax can declare, which spells every name it builds with `Name.str`. -/
 def indexedName (x : Name) (i : Nat) : Name := Name.num x i
 
-/-- The flat offset of `idx` in an array shaped `dims`, row-major: the stride of a dimension is
-the product of the ones after it.
+/-- The stride of each dimension: the product of the ones after it.
 
-**This is the only place strides are computed.** The evaluator, the lowering and
-`CircuitHdl/SelectChain.lean` all go through it, so the three cannot disagree about what
-`r[1][3]` means. A `dims` longer than `idx` is a *partial* index and gives the offset of where
-that sub-array starts, which is what makes a row a contiguous run of the flat cell. -/
+**This is the only place the layout is decided.** `rowMajorOffset`, its inverse, the evaluator's
+dynamic fold and the lowering's address arithmetic all take their strides from here, so there is
+one thing to change to make the storage column-major and one thing to mutate to find out what
+would notice. It used to be four separate `ds.prod`s, which is three too many for a convention
+that has to hold across two semantics. -/
+def rowMajorStrides : List Nat → List Nat
+  | [] => []
+  | _ :: ds => ds.prod :: rowMajorStrides ds
+
+/-- The flat offset of `idx` in an array shaped `dims`.
+
+A `dims` longer than `idx` is a *partial* index and gives the offset of where that sub-array
+starts, which is what makes a row a contiguous run of the flat cell. -/
 def rowMajorOffset : List Nat → List Nat → Nat
   | _, [] => 0
   | [], _ => 0
-  | _ :: ds, i :: is => i * ds.prod + rowMajorOffset ds is
+  | d :: ds, i :: is => i * (rowMajorStrides (d :: ds)).headD 1 + rowMajorOffset ds is
 
 /-- How many elements an array of this shape holds. -/
 def cellSize (dims : List Nat) : Nat := dims.prod
@@ -204,12 +216,14 @@ at flat position `k`. Needed wherever the flat storage is enumerated back into t
 rest of the language speaks -- the mux chain, the register names, the test bridge. -/
 def rowMajorIndex : List Nat → Nat → List Nat
   | [], _ => []
-  | _ :: ds, k => let stride := ds.prod; (k / stride) :: rowMajorIndex ds (k % stride)
+  | d :: ds, k =>
+      let stride := (rowMajorStrides (d :: ds)).headD 1
+      (k / stride) :: rowMajorIndex ds (k % stride)
 
 /-- A one-dimensional array's only index *is* its offset. Stated for `simp`, because
 `CircuitHdl/SelectChain.lean` reduces `Expr.eval` through it on every arm of the chain. -/
 @[simp] theorem rowMajorOffset_singleton (n i : Nat) : rowMajorOffset [n] [i] = i := by
-  simp [rowMajorOffset]
+  simp [rowMajorOffset, rowMajorStrides]
 
 /-- Every index of a `dims`-shaped array, in flat order. -/
 def allIndices (dims : List Nat) : List (List Nat) :=
@@ -532,7 +546,7 @@ def Expr.rename (f : Name → BindTarget) : Expr → Expr
   | .slice e hi lo => .slice (e.rename f) hi lo
   | .index m w a => .index (f m).nameOf w (a.rename f)
   | .elem a w ds i => .elem (f a).nameOf w ds i
-  | .select a w ds addr => .select (f a).nameOf w ds (addr.rename f)
+  | .select a w ds addr => .select (f a).nameOf w ds (addr.map (Expr.rename f))
 
 mutual
 
@@ -549,7 +563,7 @@ def Stmt.rename (f : Name → BindTarget) : Stmt → Stmt
       | .expr _ => .assign .anonymous (e.rename f)
   | .store m w a d => .store (f m).nameOf w (a.rename f) (d.rename f)
   | .setElem a w ds i d => .setElem (f a).nameOf w ds i (d.rename f)
-  | .setDyn a w ds addr d => .setDyn (f a).nameOf w ds (addr.rename f) (d.rename f)
+  | .setDyn a w ds addr d => .setDyn (f a).nameOf w ds (addr.map (Expr.rename f)) (d.rename f)
   | .if_ c t e => .if_ (c.rename f) (Stmt.renameList f t) (Stmt.renameList f e)
 
 def Stmt.renameList (f : Name → BindTarget) : List Stmt → List Stmt
