@@ -268,6 +268,12 @@ guards, and it is not visible from any end-to-end test: the old switch delivered
 -- The connections cost nothing in the IR: a combinational `setElem` lowers to a scope rebinding,
 -- so the mesh is still 320 `seq.firreg`s and 7221 lines, the figures in `CircuitHdlTest/Mesh4x4`,
 -- unmoved across the whole change. What they cost is here, in the length of what gets sorted.
+--
+-- **This count is a check, not a sanity number.** A binding that quietly takes the *expression*
+-- path instead of naming a place still works -- the port keeps a wire and a connection drives it
+-- -- and costs one statement per binding. Nothing else in the suite can see that: measured, by
+-- making `bindTarget` match a single index again after `mx` became two-dimensional, which
+-- reddens these two lines and leaves the mesh delivery report entirely green.
 #guard (mesh4x4 13).settleOrder.steps.length = 1920
 #guard (meshSwitch 13).settleOrder.steps.length = 85
 

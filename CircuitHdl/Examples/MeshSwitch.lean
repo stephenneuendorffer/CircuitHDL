@@ -161,11 +161,11 @@ module! meshSwitch #[(fw : Nat)]
   reg full[5] : 1;
   reg obuf[5] : fw;
 
-  -- Who is asking for each output this cycle: `req[k * 5 + j]` is input `k` wanting output `j`.
-  wire req[25] : 1;
+  -- Who is asking for each output this cycle: `req[k][j]` is input `k` wanting output `j`.
+  wire req[5][5] : 1;
   for k < 5 {
     for j < 5 {
-      assign req[k * 5 + j] = i[k].valid & (rq[k] == j);
+      assign req[k][j] = i[k].valid & (rq[k] == j);
     }
   }
 
@@ -183,12 +183,11 @@ module! meshSwitch #[(fw : Nat)]
     assign o[j].data = obuf[j];
 
     -- Fixed-priority pick among the five, per output. Only consulted while the output is free.
-    assign anyReq[j] = req[j] | req[5 + j] | req[10 + j] | req[15 + j]
-                     | req[20 + j];
-    assign sel[j] = req[j] ? (0 : 3)
-                  : (req[5 + j] ? (1 : 3)
-                  : (req[10 + j] ? (2 : 3)
-                  : (req[15 + j] ? (3 : 3)
+    assign anyReq[j] = req[0][j] | req[1][j] | req[2][j] | req[3][j] | req[4][j];
+    assign sel[j] = req[0][j] ? (0 : 3)
+                  : (req[1][j] ? (1 : 3)
+                  : (req[2][j] ? (2 : 3)
+                  : (req[3][j] ? (3 : 3)
                   : (4 : 3))));
 
     -- The crossbar, feeding the output *register* rather than the port: what the input that owns

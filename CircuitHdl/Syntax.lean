@@ -1029,15 +1029,24 @@ where
     | `(circuit_expr| $x:ident) =>
         if (ctx.env.lookup x.getId).isSome then `(BindTarget.sig $(quote x.getId))
         else exprTarget ctx r
-    | `(circuit_expr| $x:ident [ $i:circuit_expr ]) => do
-        match ctx.arrays.lookup x.getId with
-        | some (dims, elemW) =>
-            match ← asStaticTerm? ctx i with
-            | some idx =>
-                `(BindTarget.elem $(quote x.getId) $elemW [$(dims.toArray),*] [$idx])
-            -- A dynamic index is a mux rather than a place, so it takes the expression path.
-            | none => exprTarget ctx r
+    | `(circuit_expr| $_:circuit_expr [ $_:circuit_expr ]) => do
+        -- The whole chain, so `mx[x][y]` binds to the *place* it names. Matching one index only
+        -- sent a multi-dimensional element down the expression path, where it still worked --
+        -- the port kept a wire and a connection drove it -- and cost a statement per binding
+        -- rather than none. Silent, and visible only as `settleOrder.steps` growing.
+        match indexChain? r with
         | none => exprTarget ctx r
+        | some (x, idxs) =>
+            match ctx.arrays.lookup x.getId with
+            | some (dims, elemW) =>
+                if idxs.size ≠ dims.length then exprTarget ctx r
+                else
+                  match ← allStatic ctx idxs with
+                  | some ts =>
+                      `(BindTarget.elem $(quote x.getId) $elemW [$(dims.toArray),*] [$ts,*])
+                  -- A dynamic index is a mux rather than a place, so it takes the expression path.
+                  | none => exprTarget ctx r
+            | none => exprTarget ctx r
     -- An element of an array port on *this* module's boundary -- `inj[k].valid` in the mesh --
     -- which is an element of an array like any other.
     | `(circuit_expr| $x:ident [ $i:circuit_expr ] . $f:ident) =>

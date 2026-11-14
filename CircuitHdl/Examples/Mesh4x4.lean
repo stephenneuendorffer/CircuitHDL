@@ -93,12 +93,17 @@ module! mesh4x4 #[(fw : Nat)]
   wire lready[128] : 1;
   wire ldata[128] : fw;
 
-  -- Each switch's own coordinates, as constants it can compare against.
-  wire mx[16] : 2;
-  wire my[16] : 2;
-  for n < 16 {
-    assign mx[n] = n / 4;
-    assign my[n] = n % 4;
+  -- Each switch's own coordinates, as constants it can compare against. Indexed by the
+  -- coordinates themselves, so there is no arithmetic left to get wrong: `mx[n] = n / 4` over a
+  -- flat sixteen was the node index being taken apart again, one statement after `nodeIdx` put
+  -- it together.
+  wire mx[4][4] : 2;
+  wire my[4][4] : 2;
+  for x < 4 {
+    for y < 4 {
+      assign mx[x][y] = x;
+      assign my[x][y] = y;
+    }
   }
 
   for x < 4 {
@@ -115,7 +120,7 @@ module! mesh4x4 #[(fw : Nat)]
 
       (meshSwitch fw) sw[nodeIdx(x, y)] (
         .clk(clk), .rst(rst),
-        .myX(mx[nodeIdx(x, y)]), .myY(my[nodeIdx(x, y)]),
+        .myX(mx[x][y]), .myY(my[x][y]),
         -- The four sides: each input reads the neighbour's opposite output, each output drives
         -- this node's own link.
         .i[0].valid(lvalid[srcIdx(x, y, 0)]), .i[0].ready(lready[srcIdx(x, y, 0)]),
