@@ -102,6 +102,24 @@ def symbol : ShiftOp → String
 
 end ShiftOp
 
+/-- An array as a **place**: a declaration, narrowed by a static prefix of indices. `r` itself is
+the empty prefix, `r[1]` is one row of a `[4][4]`.
+
+Static because a computed prefix would be a mux per element, and a mux is not a place -- it could
+not be written to, or bound to an output port. That is the same line `BindTarget` already draws
+between `.elem` and `.expr`, one level up.
+
+Row-major is what makes this useful: a prefix names a *contiguous run* of the flat cell, starting
+at `rowMajorOffset dims idx` and `count` long, so copying a row is copying a run. -/
+structure ArrRef where
+  name : Name
+  elemW : Nat
+  /-- The array's full declared shape, carried for the same reason `Expr.elem` carries it. -/
+  dims : List Nat
+  /-- A prefix of the indices, possibly empty. Never longer than `dims`. -/
+  idx : List Nat
+  deriving Repr, DecidableEq, Inhabited
+
 /-- Expressions in the typed circuit core. -/
 inductive Expr where
   | var : Name → Expr
@@ -151,6 +169,12 @@ inductive Stmt where
   | setElem : Name → (elemW : Nat) → (dims : List Nat) → (idx : List Nat) → Expr → Stmt
   /-- A dynamic write to an array, `a[i] = data`: a decoder, where `store` is a write port. -/
   | setDyn : Name → (elemW : Nat) → (dims : List Nat) → (idx : List Expr) → Expr → Stmt
+  /-- An array copied into an array, `assign s = r[1];`.
+
+  Both sides are *places*, so this is a move of `count` values and not an expression: there is no
+  array arithmetic to evaluate. Row-major makes each side a contiguous run, so it is one slice
+  written over another, and the two must have the same shape -- `Module.check` says so. -/
+  | assignArr : ArrRef → ArrRef → Stmt
   | if_ : Expr → List Stmt → List Stmt → Stmt
   deriving Repr
 
@@ -225,6 +249,23 @@ def rowMajorIndex : List Nat → Nat → List Nat
 @[simp] theorem rowMajorOffset_singleton (n i : Nat) : rowMajorOffset [n] [i] = i := by
   simp [rowMajorOffset, rowMajorStrides]
 
+namespace ArrRef
+
+/-- The shape of what is left after the prefix: `[4]` for one row of a `[4][4]`. -/
+def shape (r : ArrRef) : List Nat := r.dims.drop r.idx.length
+
+/-- How many elements it names. -/
+def count (r : ArrRef) : Nat := cellSize r.shape
+
+/-- Where its run starts in the flat cell. -/
+def base (r : ArrRef) : Nat := rowMajorOffset r.dims r.idx
+
+/-- The place it names, for the dependency graph: a prefix, which is what `Signal` is. -/
+def signal (r : ArrRef) : Signal := .elem r.name r.idx
+
+end ArrRef
+
+
 /-- Every index of a `dims`-shaped array, in flat order. -/
 def allIndices (dims : List Nat) : List (List Nat) :=
   (List.range (cellSize dims)).map (rowMajorIndex dims)
@@ -297,13 +338,25 @@ inductive BindTarget where
   this is the one that matters -- whether it is an *input*. Driving an output this way would leave
   the wire with two drivers and no complaint; `InstInfo.check` refuses it instead. -/
   | expr : Expr → BindTarget
+  /-- A whole array, or a sub-array of one. The only binding that is not a single wire, and the
+  only one that can be **renamed** through rather than materialised: a prefix composes, so a
+  submodule's `i.valid[k]` becomes the parent's `r[2][k]`. -/
+  | arr : ArrRef → BindTarget
   deriving Repr
+
+/-- How wide an index into a dimension of `d` elements has to be. Used only where a *static*
+prefix has to become index expressions, which is renaming a dynamic access through an array
+binding; `Circt.flatAddr` widens everything again, so this only has to be big enough. -/
+def indexWidth (d : Nat) : Nat := Nat.log2 (max 1 d) + 1
 
 /-- The value a target denotes, for driving an *input* from whatever it was tied to. -/
 def BindTarget.asExpr : BindTarget → Expr
   | .sig x => .var x
   | .elem a w ds i => .elem a w ds i
   | .expr e => e
+  -- An array is not a value. `InstInfo.check` rejects binding one to a scalar port, which is the
+  -- only way this could be asked for.
+  | .arr r => .var r.name
 
 /-- The statement that drives a target with `e`, for an **output**, which runs the other way: the
 submodule computes the value and the binding says where it lands. `none` for an expression, which
@@ -314,15 +367,39 @@ def BindTarget.drive (t : BindTarget) (e : Expr) : Option Stmt :=
   | .sig x => some (.assign x e)
   | .elem a w ds i => some (.setElem a w ds i e)
   | .expr _ => none
+  -- Likewise: one value does not drive a whole array.
+  | .arr _ => none
 
 /-- The declaration a target names. Used where an element cannot arise -- a memory, an array, or a
 clock -- because only *ports* are bound and a port is always a scalar. -/
 def BindTarget.nameOf : BindTarget → Name
   | .sig x => x
   | .elem a _ _ _ => a
+  | .arr r => r.name
   -- Unreachable: `instRenaming` maps an expression-bound port to its own local name, so the
   -- renaming never sees this constructor.
   | .expr _ => .anonymous
+
+/-- Rewrite an array access through a binding.
+
+A bound array **composes its prefix** onto the access, so a submodule's `g[k]` reads the parent's
+`r[2][k]` -- which is what lets a whole-array binding be a renaming where an element-by-element
+one has to be materialised. Everything else keeps the access it had, under a new name. -/
+def BindTarget.reindex (t : BindTarget) (w : Nat) (ds : List Nat) (i : List Nat) :
+    Name × Nat × List Nat × List Nat :=
+  match t with
+  | .arr r => (r.name, r.elemW, r.dims, r.idx ++ i)
+  | t => (t.nameOf, w, ds, i)
+
+/-- The same for a *dynamic* access, where the prefix has to arrive as index expressions. -/
+def BindTarget.reindexDyn (t : BindTarget) (w : Nat) (ds : List Nat) (idx : List Expr) :
+    Name × Nat × List Nat × List Expr :=
+  match t with
+  | .arr r =>
+      let lits := (r.idx.zip r.dims).map fun (k, d) => Expr.lit (indexWidth d) k
+      (r.name, r.elemW, r.dims, lits ++ idx)
+  | t => (t.nameOf, w, ds, idx)
+
 
 /-- One port of a module.
 
@@ -539,6 +616,9 @@ def Expr.rename (f : Name → BindTarget) : Expr → Expr
       -- `instRenaming` does not produce this case -- an expression-bound port keeps a wire and is
       -- renamed to it -- but the rule is the one this constructor would want.
       | .expr e => e
+      -- A scalar port tied to a whole array: rejected by `InstInfo.check`, which compares the
+      -- shapes, so this names the array and goes no further.
+      | .arr r => .var r.name
   | .lit w n => .lit w n
   | .bin op w a b => .bin op w (a.rename f) (b.rename f)
   | .cmp op w a b => .cmp op w (a.rename f) (b.rename f)
@@ -548,8 +628,22 @@ def Expr.rename (f : Name → BindTarget) : Expr → Expr
   | .concat a b => .concat (a.rename f) (b.rename f)
   | .slice e hi lo => .slice (e.rename f) hi lo
   | .index m w a => .index (f m).nameOf w (a.rename f)
-  | .elem a w ds i => .elem (f a).nameOf w ds i
-  | .select a w ds addr => .select (f a).nameOf w ds (addr.map (Expr.rename f))
+  -- An array binding composes its prefix, which is what makes it a renaming rather than a
+  -- connection: the submodule's `g[k]` becomes the parent's `r[2][k]`.
+  | .elem a w ds i =>
+      let (n, w', ds', i') := (f a).reindex w ds i
+      .elem n w' ds' i'
+  | .select a w ds idx =>
+      let (n, w', ds', idx') := (f a).reindexDyn w ds (idx.map (Expr.rename f))
+      .select n w' ds' idx'
+
+/-- Rename an array *place*, composing a bound array's prefix onto it the way `reindex` does for
+an access. An array bound to anything that is not an array keeps its own shape under the new
+name, which `InstInfo.check` has already refused. -/
+def renameRef (f : Name → BindTarget) (r : ArrRef) : ArrRef :=
+  match f r.name with
+  | .arr p => { p with idx := p.idx ++ r.idx }
+  | t => { r with name := t.nameOf }
 
 mutual
 
@@ -560,13 +654,20 @@ def Stmt.rename (f : Name → BindTarget) : Stmt → Stmt
       match f x with
       | .sig y => .assign y (e.rename f)
       | .elem a w ds i => .setElem a w ds i (e.rename f)
+      | .arr r => .assign r.name (e.rename f)
       -- There is no writing *to* an expression. Unreachable for the same reason as above, and
       -- written to fail loudly rather than quietly if it ever stopped being: `Module.check`
       -- rejects an assignment to `.anonymous` as unbound.
       | .expr _ => .assign .anonymous (e.rename f)
   | .store m w a d => .store (f m).nameOf w (a.rename f) (d.rename f)
-  | .setElem a w ds i d => .setElem (f a).nameOf w ds i (d.rename f)
-  | .setDyn a w ds addr d => .setDyn (f a).nameOf w ds (addr.map (Expr.rename f)) (d.rename f)
+  | .setElem a w ds i d =>
+      let (n, w', ds', i') := (f a).reindex w ds i
+      .setElem n w' ds' i' (d.rename f)
+  -- Both sides are places, so both compose whatever prefix they were bound through.
+  | .assignArr dst src => .assignArr (renameRef f dst) (renameRef f src)
+  | .setDyn a w ds idx d =>
+      let (n, w', ds', idx') := (f a).reindexDyn w ds (idx.map (Expr.rename f))
+      .setDyn n w' ds' idx' (d.rename f)
   | .if_ c t e => .if_ (c.rename f) (Stmt.renameList f t) (Stmt.renameList f e)
 
 def Stmt.renameList (f : Name → BindTarget) : List Stmt → List Stmt
@@ -707,8 +808,14 @@ two different arrays. So the array is materialised here instead, as a prefixed l
 This is the copy a design used to write by hand (`meshSwitch`'s `idata`), moved to the one place
 that can always do it. It costs nothing in the lowering: a combinational `setElem` is a scope
 rebinding, not an operation. -/
-def instArrays (instName : Name) (m : Module) : List (Name × List Nat × Nat) :=
-  m.allArrays.map fun (x, c, w) => (instName ++ x, c, w)
+def instArrays (instName : Name) (bindings : List (PortRef × BindTarget)) (m : Module) :
+    List (Name × List Nat × Nat) :=
+  m.allArrays.filterMap fun (x, c, w) =>
+    -- …except an array port bound to an array of the parent's, which is *renamed* onto it: the
+    -- prefix composes, so there is nothing to materialise and nothing to connect.
+    match bindings.lookup (.sig x) with
+    | some (.arr _) => none
+    | _ => some (instName ++ x, c, w)
 
 /-! The pieces of assembly are top-level rather than `let rec` inside `ofItems`, so that `simp` has
 equation lemmas for them -- which is what makes a parameterized module's well-formedness provable. -/
@@ -758,7 +865,7 @@ def memories : List Item → List (Name × Nat × Nat)
 def arrays : List Item → List (Name × List Nat × Nat)
   | [] => []
   | .array n ds w :: rest => (n, ds, w) :: arrays rest
-  | .inst iname sub _ :: rest => instArrays iname sub ++ arrays rest
+  | .inst iname sub bs :: rest => instArrays iname bs sub ++ arrays rest
   | _ :: rest => arrays rest
 
 /-- What survives of each instance, for checking its bindings once the logic has been inlined. -/

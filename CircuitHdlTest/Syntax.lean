@@ -807,6 +807,40 @@ module! chainRule #[] (x : 8) -> (one : 1, two : 8, three : 1, clear : 1) {
       return (← σ.valueOf? `one, ← σ.valueOf? `two, ← σ.valueOf? `three, ← σ.valueOf? `clear))
   = some (1, 15, 1, 0)
 
+/-- A three-element array port, to bind rows to. -/
+module! take3 #[] (d[3] : 8, sel : 2) -> (o : 8) { assign o = d[sel]; }
+
+-- A row bound to a port of the same shape is fine…
+#guard (Module.check (module! rightRow (clk : 1, sel : 2) -> (o : 8) {
+  reg narrow[2][3] : 8;
+  take3 u (.d(narrow[1]), .sel(sel), .o(o));
+})).isOk
+
+-- …and one of the wrong shape is not. `take3` wants three elements and a row of a `[2][5]` has
+-- five, which is a check only the submodule's declaration can make.
+/-- info: Except.error (CircuitHdl.CheckError.shapeMismatch `d [3] [5]) -/
+#guard_msgs in
+#eval Module.check (module! wrongRow (clk : 1, sel : 2) -> (o : 8) {
+  reg wide[2][5] : 8;
+  take3 u (.d(wide[1]), .sel(sel), .o(o));
+})
+
+-- A *dynamic* prefix is not a place, and says so rather than falling through to the scalar rule
+-- and reporting the array's name as an unknown signal -- which is what it did before the message
+-- was split out.
+/--
+error: this has to be fixed before the design runs, and it is not: the right-hand side of an
+  array assignment, which has to name an array narrowed by indices fixed before the design runs
+  -- a computed one would be a mux per element, and a mux is not a place
+-/
+#guard_msgs(error, whitespace := lax) in
+module! dynPrefix #[] (k : 1) -> (o : 8) {
+  reg g[2][3] : 8;
+  wire s[3] : 8;
+  assign s = g[k];
+  assign o = s[0];
+}
+
 /-! ### The static conditional
 
 `if c { .. }` on a signal is a mux. `if #(cond) { .. }` on a `Bool` is elaboration time: one arm

@@ -92,6 +92,9 @@ def Stmt.uses : Stmt → List Signal
   -- ones it does not write -- which is a latch, and why a combinational `setDyn` is refused by
   -- the lowering rather than ordered here.
   | .setDyn _ _ _ idx data => idx.flatMap Expr.uses ++ data.uses
+  -- An array copy reads the whole source place and writes the whole destination one, both at
+  -- prefix granularity, so neither has to be expanded element by element.
+  | .assignArr _ src => [src.signal]
   | .if_ c t f => c.uses ++ Stmt.usesList t ++ Stmt.usesList f
 
 def Stmt.usesList : List Stmt → List Signal

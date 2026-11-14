@@ -100,4 +100,84 @@ reducing by `rfl`, so the four well-formedness theorems in `CircuitHdlTest/Async
 -- Not vacuous: in range the two agree at that very square.
 #guard readAt (lowered grid) 1 1 = some 0x77
 
+/-! ### A partial index is an array
+
+`g[1]` on a `[4][4]` is not a value -- a value in this language is a `BitVec` -- it is the row,
+an array of the remaining shape. Being a *place* and not an expression, it can be copied into
+another array and bound to an array port, and both are what row-major buys: a prefix names a
+contiguous run of the flat cell.
+
+Static, deliberately: `g[sel]` would be a mux per element, and a mux cannot be written to or
+bound to an output. That is the same line `BindTarget` draws between `.elem` and `.expr`.
+-/
+
+module! rowCopy #[] (clk : 1, x : 8) -> (first : 8, last : 8, mid : 8) {
+  reg g[2][3] : 8;
+  wire s[3] : 8;
+  wire t[3] : 8;
+  always @(posedge clk) {
+    for i < 2 { for j < 3 { assign g[i][j] = x + (i * 3 + j); } }
+  }
+  -- A row out of the grid, then a whole array into another.
+  assign s = g[1];
+  assign t = s;
+  assign first = s[0];
+  assign last = t[2];
+  assign mid = g[0][1];
+}
+
+#guard (Module.check rowCopy).isOk
+-- `s` and `t` are their own arrays, not aliases of `g`.
+#guard rowCopy.arrays = [(`g, [2, 3], 8), (`s, [3], 8), (`t, [3], 8)]
+
+-- `g[i][j] = 10 + 3i + j`, so row 1 is `[13, 14, 15]` and `g[0][1]` is 11. Copying the *second*
+-- row rather than the first, or the wrong run of it, moves `first` and `last` together.
+#guard (do
+    let ins : State := [(`x, Cell.sig (Value.ofNat 8 10))]
+    let σ ← (rowCopy.stepClock `clk (rowCopy.initState.apply ins) ins).toOption
+    let σ' ← (rowCopy.settle (σ.apply ins)).toOption
+    return (← σ'.valueOf? `first, ← σ'.valueOf? `last, ← σ'.valueOf? `mid))
+  = some (13, 15, 11)
+
+/-! ### Binding a row to an array port, which is a *renaming*
+
+An element-by-element binding cannot be renamed through -- `Expr.rename` maps an array by name,
+and a mesh switch's five inputs come from scattered slots -- so `instArrays` materialises a local
+array and connects each element. A **whole-array** binding can: the prefix composes, so the
+submodule's `d[sel]` is the parent's `g[1][sel]` and there is nothing to materialise.
+
+That is the one thing this representation can express and the earlier array-port work could not.
+-/
+
+/-- Reads its port both ways on purpose: a *dynamic* select and a *static* element go through
+different halves of the renaming (`reindexDyn` and `reindex`), and only exercising one leaves the
+other free to drop the prefix unnoticed. Measured -- it did. -/
+module! pick3 #[] (d[3] : 8, sel : 2) -> (o : 8, firstOfRow : 8) {
+  assign o = d[sel];
+  assign firstOfRow = d[0];
+}
+
+module! useRow #[] (clk : 1, x : 8, sel : 2) -> (o : 8, f : 8) {
+  reg g[2][3] : 8;
+  always @(posedge clk) {
+    for i < 2 { for j < 3 { assign g[i][j] = x + (i * 3 + j); } }
+  }
+  pick3 u (.d(g[1]), .sel(sel), .o(o), .firstOfRow(f));
+}
+
+#guard (Module.check useRow).isOk
+-- **No `u.d`.** The port was renamed onto `g` with the prefix `[1]`, so the flattener had
+-- nothing to create. A binding that fell back to the expression path would show up right here.
+#guard useRow.arrays = [(`g, [2, 3], 8)]
+
+-- And both of the submodule's reads reach the right row: 13, 14, 15 and not 10, 11, 12. `f` is
+-- its *static* `d[0]`, which is the half a dynamic-only test leaves uncovered.
+#guard ([0, 1, 2].map fun sv => do
+    let ins : State :=
+      [(`x, Cell.sig (Value.ofNat 8 10)), (`sel, Cell.sig (Value.ofNat 2 sv))]
+    let σ ← (useRow.stepClock `clk (useRow.initState.apply ins) ins).toOption
+    let σ' ← (useRow.settle (σ.apply ins)).toOption
+    return (← σ'.valueOf? `o, ← σ'.valueOf? `f))
+  = [some (13, 13), some (14, 13), some (15, 13)]
+
 end CircuitHdl

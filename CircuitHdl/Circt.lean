@@ -507,6 +507,13 @@ private def lowerStmt (σ : Scope) : Stmt → M Scope
       let v ← lowerExpr σ e
       return σ.set (.elem a i) v
   | .setDyn a _ _ _ _ => throw (.combinationalArrayWrite a)
+  -- A run of elements rebound to a run of values: no operations, the same way one `setElem` is
+  -- no operation. Read every source first, so a copy within one array is still a copy.
+  | .assignArr dst src => do
+      let vals ← (List.range src.count).mapM fun k =>
+        lookupVal σ (.elem src.name (src.idx ++ rowMajorIndex src.shape k))
+      return (vals.zipIdx).foldl
+        (fun σ (v, k) => σ.set (.elem dst.name (dst.idx ++ rowMajorIndex dst.shape k)) v) σ
   | .if_ c t f => do
       let cv ← lowerExpr σ c
       let σt ← lowerStmtList σ t
@@ -591,6 +598,11 @@ private def lowerSeqStmt (σ₀ : Scope) (guards : Guards) (pending : Scope) : S
           let old ← lookupVal (out ++ σ₀) key
           out := out.set key (← emit (.comb .mux) () elemW #[eq, data, old])
       return out
+  | .assignArr dst src => do
+      let vals ← (List.range src.count).mapM fun k =>
+        lookupVal (pending ++ σ₀) (.elem src.name (src.idx ++ rowMajorIndex src.shape k))
+      return (vals.zipIdx).foldl
+        (fun p (v, k) => p.set (.elem dst.name (dst.idx ++ rowMajorIndex dst.shape k)) v) pending
   | .if_ c t f => do
       let cv ← lowerExpr σ₀ c
       let pt ← lowerSeqStmtList σ₀ ((cv, true) :: guards) pending t

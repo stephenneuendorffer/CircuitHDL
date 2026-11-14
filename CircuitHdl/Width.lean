@@ -214,6 +214,30 @@ def Ctx.arrayOf (ctx : Ctx) (x : Name) : Except CheckError (List Nat × Nat) :=
       if (ctx.env.lookup x).isSome || (ctx.mems.lookup x).isSome then .error (.notAnArray x)
       else .error (.unboundArray x)
 
+/-- Every dimension, not just the flat total. `r[0][7]` on a 5x5 is offset 7, which is in range
+for the twenty-five elements and is element `[1][2]` -- a wrong value, silently, which is the
+failure this whole shape exists to make reportable.
+
+A *shorter* index list than `dims` is a prefix and simply stops early, which is what makes it
+serve a partial index as well as a full one. -/
+def indicesInRange (a : Name) (d : Nat) : List Nat → List Nat → Except CheckError Unit
+  | _, [] => .ok ()
+  | [], _ => .ok ()
+  | ext :: ds, v :: vs =>
+      if v < ext then indicesInRange a (d + 1) ds vs else .error (.elemRange a d v ext)
+
+/-- Check an array *place* against its declaration: it names a real array, with the shape it
+records, narrowed by a prefix that is in range and no longer than the shape. -/
+def Ctx.refShape (ctx : Ctx) (r : ArrRef) : Except CheckError (List Nat) := do
+  let (declaredDims, declaredW) ← ctx.arrayOf r.name
+  expectWidth s!"element of array '{r.name}'" declaredW r.elemW
+  if r.dims ≠ declaredDims then .error (.shapeMismatch r.name declaredDims r.dims)
+  -- A prefix, so longer than the rank is not a narrowing of anything.
+  if r.idx.length > r.dims.length then
+    .error (.rank r.name r.dims.length r.idx.length)
+  let _ ← indicesInRange r.name 0 r.dims r.idx
+  .ok r.shape
+
 /-- The element width an array access must have, that the access agrees with the declaration
 about the array's *shape*, and that a static index is in range in every dimension. Shared by the
 expression and statement rules so the two cannot drift.
@@ -231,17 +255,8 @@ def Ctx.elemWidth (ctx : Ctx) (a : Name) (elemW : Nat) (dims : List Nat) (idx : 
   | some i =>
       if i.length ≠ dims.length then .error (.rank a dims.length i.length)
       else do
-        let _ ← inRange 0 dims i
+        let _ ← indicesInRange a 0 dims i
         .ok elemW
-where
-  /-- Every dimension, not just the flat total. `r[0][7]` on a 5x5 is offset 7, which is in range
-  for the twenty-five elements and is element `[1][2]` -- a wrong value, silently, which is the
-  failure this whole shape exists to make reportable. -/
-  inRange (d : Nat) : List Nat → List Nat → Except CheckError Unit
-    | _, [] => .ok ()
-    | [], _ => .ok ()
-    | ext :: ds, v :: vs =>
-        if v < ext then inRange (d + 1) ds vs else .error (.elemRange a d v ext)
 
 mutual
 
@@ -342,6 +357,15 @@ def Stmt.check (ctx : Ctx) : Stmt → Except CheckError Unit
       if idx.length ≠ ds.length then .error (.rank a ds.length idx.length)
       let _ ← Expr.widthList? ctx idx
       expectWidth s!"write to array '{a}'" elemW (← Expr.width? ctx data)
+  -- An array copied into an array. Both sides are places, so there is no width to synthesise:
+  -- what has to agree is the **shape of what is left after the prefix**, and the element width.
+  | .assignArr dst src => do
+      if ctx.inputs.contains dst.name then .error (.assignToInput dst.name)
+      let _ ← ctx.refShape dst
+      let _ ← ctx.refShape src
+      expectWidth s!"array assignment to '{dst.name}'" dst.elemW src.elemW
+      if dst.shape ≠ src.shape then
+        .error (.shapeMismatch dst.name dst.shape src.shape)
   | .if_ c t f => do
       expectWidth "if condition" 1 (← Expr.width? ctx c)
       Stmt.checkList ctx t
@@ -396,6 +420,17 @@ the real port unbound -- silently disconnecting a signal -- and a width mismatch
 against an inlined operand rather than against the port. -/
 def InstInfo.check (ctx : Ctx) (i : InstInfo) : Except CheckError Unit :=
   i.bindings.forM fun (port, target) => do
+    -- An array binding is checked against the port's *declaration* rather than against a width:
+    -- what has to agree is the shape, and only `Port.count` knows it.
+    if let BindTarget.arr r := target then
+      let _ ← ctx.refShape r
+      match i.ports.find? (·.name == port.name) with
+      | some { count := some n, width := w, .. } =>
+          expectWidth s!"port '{port.render}' of instance '{i.name}'" w r.elemW
+          if r.shape ≠ [n] then .error (.shapeMismatch port.name [n] r.shape)
+          return
+      | some _ => .error (.notAnArray port.name)
+      | none => .error (.noSuchPort i.name port.name)
     let pw ← portWidth port
     let where_ := s!"port '{port.render}' of instance '{i.name}'"
     -- A port tied to an array element is checked against that array's declaration, including
@@ -412,6 +447,8 @@ def InstInfo.check (ctx : Ctx) (i : InstInfo) : Except CheckError Unit :=
         if !(i.inputs.contains port.name) then .error (.exprBoundOutput i.name port.name)
         let w ← Expr.width? ctx e
         expectWidth where_ pw w
+    -- Handled above, before a width is asked for.
+    | BindTarget.arr _ => .ok ()
 where
   /-- The width of the port a binding names, against the submodule's own declarations.
 

@@ -125,6 +125,15 @@ end State
 
 /-! ### Expressions -/
 
+/-- Copy `count` values from one run of a cell to another, which is what an array assignment is:
+row-major makes each place a contiguous run, so there is nothing cleverer to do than move them.
+
+Both runs may be in the *same* cell -- `assign r[0] = r[1];` -- so every value is read before any
+is written. -/
+def State.copyRun (σ : State) (dst src : ArrRef) : Except EvalError State := do
+  let vals ← (List.range src.count).mapM fun k => σ.getMem? src.name (src.base + k)
+  (vals.zipIdx).foldlM (fun σ (v, k) => σ.setMem dst.name (dst.base + k) v) σ
+
 /-- Fold a dynamic access's evaluated indices row-major, **checking each against its own
 extent**.
 
@@ -260,6 +269,7 @@ def Stmt.execBlocking (σ : State) : Stmt → Except EvalError State
       if v.width != elemW then
         .error (.check (.widthMismatch s!"write to array '{a}'" elemW v.width))
       else σ.setMem a off v
+  | .assignArr dst src => σ.copyRun dst src
   | .if_ c t f => do
       let cb ← (← Expr.eval σ c).atWidth 1 "if condition"
       if cb = 1#1 then Stmt.execBlockingList σ t else Stmt.execBlockingList σ f
@@ -313,6 +323,12 @@ def Stmt.execNonBlocking (σ₀ : State) (pending : State) : Stmt → Except Eva
       if v.width != elemW then
         .error (.check (.widthMismatch s!"write to array '{a}'" elemW v.width))
       else pendingWord σ₀ pending a off v
+  -- Every value read from the state at the edge, then written one at a time into `pending`,
+  -- which is what makes a clocked `assign s = r;` a copy of the *old* `r` even when `s` is `r`.
+  | .assignArr dst src => do
+      let vals ← (List.range src.count).mapM fun k => σ₀.getMem? src.name (src.base + k)
+      (vals.zipIdx).foldlM
+        (fun pending (v, k) => pendingWord σ₀ pending dst.name (dst.base + k) v) pending
   | .if_ c t f => do
       let cb ← (← Expr.eval σ₀ c).atWidth 1 "if condition"
       if cb = 1#1 then Stmt.execNonBlockingList σ₀ pending t

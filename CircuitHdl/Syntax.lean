@@ -353,6 +353,15 @@ structure SymCtx where
   same name -- the inner scope wins, as it does anywhere else. -/
   genvars : List Name := []
 
+/-- What the right-hand side of an array assignment has to be. Said once, because the two
+assignment rules both need it and the failure is easy to misread: without it a `wire s[3]` on the
+left comes back as "unknown signal 's'", which is true of the scalar rule it fell through to and
+says nothing about what went wrong. -/
+private def arrSourceError : CheckError :=
+  .notStatic "the right-hand side of an array assignment, which has to name an array narrowed by \
+     indices fixed before the design runs -- a computed one would be a mux per element, and a \
+     mux is not a place"
+
 /-- Report a `CheckError` against a piece of syntax, so the message lands on the offending token. -/
 private def throwWidth {α} (ref : Syntax) (e : CheckError) : MacroM α :=
   Macro.throwErrorAt ref e.render
@@ -663,6 +672,30 @@ private partial def checkLogical (ctx : SymCtx) (expected : SymWidth) (ref : Syn
   expectSym ref "result of a logical operator" expected (← ofNat 1)
   `(Expr.bin $ctor 1 $(← nonzero ctx a) $(← nonzero ctx b))
 
+/-- An array *place*, if this is one: a declared array narrowed by a static prefix.
+
+`none` for anything else, so the caller falls through to whatever it would have done -- a scalar
+assignment, or an expression binding. A dynamic prefix is `none` too and for a reason worth
+keeping: `r[sel]` would be a mux per element, and a mux is not a place, so it could be neither
+written to nor bound to an output. -/
+private partial def arrRef? (ctx : SymCtx) (e : TSyntax `circuit_expr) :
+    MacroM (Option (TSyntax `term)) := do
+  let some (x, idxs) := indexChain? e | return none
+  let some (dims, elemW) := ctx.arrays.lookup x.getId | return none
+  if idxs.size ≥ dims.length then return none
+  let some ts ← allStatic ctx idxs | return none
+  return some (← `({ name := $(quote x.getId), elemW := $elemW,
+                     dims := [$(dims.toArray),*], idx := [$ts,*] : ArrRef }))
+
+/-- The same, for an assignment target, whose indices arrive already separated from the name. -/
+private partial def arrRefChain? (ctx : SymCtx) (x : Ident)
+    (idxs : Array (TSyntax `circuit_expr)) : MacroM (Option (TSyntax `term)) := do
+  let some (dims, elemW) := ctx.arrays.lookup x.getId | return none
+  if idxs.size ≥ dims.length then return none
+  let some ts ← allStatic ctx idxs | return none
+  return some (← `({ name := $(quote x.getId), elemW := $elemW,
+                     dims := [$(dims.toArray),*], idx := [$ts,*] : ArrRef }))
+
 /-- An array access, if this index chain is one.
 
 `none` means "not an array access, try the next rule" and covers two cases: the base is not a
@@ -890,6 +923,14 @@ mutual
 /-- Lower a statement against the declarations in `ctx`. -/
 private partial def elabStmt (ctx : SymCtx) : TSyntax `circuit_stmt → MacroM (TSyntax `term)
   | `(circuit_stmt| assign $x:ident = $e:circuit_expr ;) => do
+      -- A bare name on the left is an array when the declarations say so, and then this is an
+      -- array copy rather than a scalar assignment -- the same dispatch-by-declaration `a[i]`
+      -- makes, one rule up.
+      if let some dst ← arrRefChain? ctx x #[] then
+        if ctx.inputs.contains x.getId then throwWidth x (.assignToInput x.getId)
+        match ← arrRef? ctx e with
+        | some src => return ← `(Stmt.assignArr $dst $src)
+        | none => throwWidth e arrSourceError
       let w ← assignTargetWidth ctx x
       `(Stmt.assign $(quote x.getId) $(← checkExpr ctx w e))
   | `(circuit_stmt| assign $x:ident : $w:term = $e:circuit_expr ;) => do
@@ -913,7 +954,15 @@ private partial def elabStmt (ctx : SymCtx) : TSyntax `circuit_stmt → MacroM (
               [$(← checkExpr ctx aw i)] $(← checkExpr ctx elemW e))
   -- `a[i] = e` is an array write or a memory write, and only the declarations say which -- the
   -- same dispatch `a[i]` gets when it is read.
+  -- An array copied into an array. Recognised before the element rules, because `assign s = r;`
+  -- names two arrays where `assign x = y;` names two signals, and only the declarations say
+  -- which. A partial index on either side narrows it: `assign s = r[1];`.
   | `(circuit_stmt| assign $m:ident $[[$addrs:circuit_expr]]* = $e:circuit_expr ;) => do
+      if let some dst ← arrRefChain? ctx m addrs then
+        if ctx.inputs.contains m.getId then throwWidth m (.assignToInput m.getId)
+        match ← arrRef? ctx e with
+        | some src => return ← `(Stmt.assignArr $dst $src)
+        | none => throwWidth e arrSourceError
       match ctx.arrays.lookup m.getId with
       | some (dims, elemW) => do
           if ctx.inputs.contains m.getId then throwWidth m (.assignToInput m.getId)
@@ -1026,7 +1075,7 @@ where
     match r with
     | `(circuit_expr| $x:ident) =>
         if (ctx.env.lookup x.getId).isSome then `(BindTarget.sig $(quote x.getId))
-        else exprTarget ctx r
+        else arrOrExpr ctx r
     | `(circuit_expr| $_:circuit_expr [ $_:circuit_expr ]) => do
         -- The whole chain, so `mx[x][y]` binds to the *place* it names. Matching one index only
         -- sent a multi-dimensional element down the expression path, where it still worked --
@@ -1037,14 +1086,14 @@ where
         | some (x, idxs) =>
             match ctx.arrays.lookup x.getId with
             | some (dims, elemW) =>
-                if idxs.size ≠ dims.length then exprTarget ctx r
+                if idxs.size ≠ dims.length then arrOrExpr ctx r
                 else
                   match ← allStatic ctx idxs with
                   | some ts =>
                       `(BindTarget.elem $(quote x.getId) $elemW [$(dims.toArray),*] [$ts,*])
                   -- A dynamic index is a mux rather than a place, so it takes the expression path.
                   | none => exprTarget ctx r
-            | none => exprTarget ctx r
+            | none => arrOrExpr ctx r
     -- An element of an array port on *this* module's boundary -- `inj[k].valid` in the mesh --
     -- which is an element of an array like any other.
     | `(circuit_expr| $x:ident [ $i:circuit_expr ] . $f:ident) =>
@@ -1052,7 +1101,13 @@ where
         | some (dims, elemW), some idx =>
             `(BindTarget.elem $(quote (x.getId ++ f.getId)) $elemW [$(dims.toArray),*] [$idx])
         | _, _ => exprTarget ctx r
-    | _ => exprTarget ctx r
+    | _ => arrOrExpr ctx r
+  /-- A whole array or a row of one, where it is one, and otherwise an expression. Tried last
+  everywhere, so a scalar binding never reaches it. -/
+  arrOrExpr (ctx : SymCtx) (r : TSyntax `circuit_expr) : MacroM (TSyntax `term) := do
+    match ← arrRef? ctx r with
+    | some ref => `(BindTarget.arr $ref)
+    | none => exprTarget ctx r
   /-- An expression binding. Its width comes from the expression, because the macro cannot see the
   port's; `InstInfo.check` compares the two once the port list is in hand. -/
   exprTarget (ctx : SymCtx) (r : TSyntax `circuit_expr) : MacroM (TSyntax `term) := do

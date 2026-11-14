@@ -30,6 +30,8 @@ def Stmt.targets : Stmt → List Signal
   | .store m _ _ _ => [.sig m]
   | .setElem a _ _ i _ => [.elem a i]
   | .setDyn a _ _ _ _ => [.elem a []]
+  -- An array copy writes everything the destination prefix covers.
+  | .assignArr dst _ => [dst.signal]
   | .if_ _ t f => Stmt.targetsList t ++ Stmt.targetsList f
 
 def Stmt.targetsList : List Stmt → List Signal
