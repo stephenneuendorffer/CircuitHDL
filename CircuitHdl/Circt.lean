@@ -379,7 +379,11 @@ private def flatAddr (dims : List Nat) (idxs : List Val) : M Val := do
   -- instead of element 0. In range the two agree, so the width only shows up out of it.
   let needed := max 1 (Nat.log2 (max 1 (cellSize dims)) + 1)
   let w := idxs.foldl (fun acc v => max acc v.width) needed
-  let mut acc ← constant w 0
+  -- Accumulate from the *first* term rather than from a zero. Starting at `constant w 0` costs
+  -- a constant and an `add` that every one-dimensional access then carries for nothing -- 160
+  -- operations across the mesh, which is what it was until this was measured rather than
+  -- assumed. A stride of one costs no multiply for the same reason.
+  let mut acc : Option Val := none
   let mut rest := rowMajorStrides dims
   for v in idxs do
     let stride := rest.headD 1
@@ -388,8 +392,14 @@ private def flatAddr (dims : List Nat) (idxs : List Val) : M Val := do
     let term ← if stride == 1 then pure vw else do
       let sv ← constant w stride
       emit (.comb .mul) () w #[vw, sv]
-    acc ← emit (.comb .add) () w #[acc, term]
-  return acc
+    acc ← match acc with
+      | none => pure (some term)
+      | some a => do pure (some (← emit (.comb .add) () w #[a, term]))
+  match acc with
+  | some a => return a
+  -- No indices at all: an access to an array of no dimensions, which `Module.check` refuses
+  -- before this runs. Address zero is the only answer that is not a lie.
+  | none => constant w 0
 
 /-- Lower an expression to the value it computes, one case per rule in `Expr.width?`. -/
 private def lowerExpr (σ : Scope) : Expr → M Val

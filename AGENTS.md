@@ -622,8 +622,12 @@ instance names that index, and **bindings onto array elements** — a mesh is si
 wired to a different slice of the same link arrays, which name-to-name binding cannot express.
 `meshSwitch` is written over its five ports the same way, which took it from 287 lines to 234.
 
-`mesh4x4 13` is 1600 combinational statements and 320 registers, lowering to about 7200
-operations — against `asyncFifo`'s 55. A tick costs about **0.25s** on the
+`mesh4x4 13` is 1920 combinational statements and 320 registers, lowering to 7214
+operations -- and **those are pinned**, in the `size` line of the report rather than in prose
+here. They were prose, and drifted by 160 without anything noticing: `flatAddr` accumulated a
+flat address from a zero constant, so every one-dimensional dynamic select carried a redundant
+constant and `comb.add`. The register count alone does not catch that, measured -- the drift was
+entirely combinational. Both numbers are in the pin — against `asyncFifo`'s 55. A tick costs about **0.25s** on the
 netlist path and about **3.5s** on the association-list evaluator, so mesh tests are a handful of
 concrete traffic patterns rather than the schedule *families* the FIFOs get.
 

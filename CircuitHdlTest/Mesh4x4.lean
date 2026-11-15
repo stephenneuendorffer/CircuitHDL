@@ -200,7 +200,21 @@ private def runScenarios : Except EvalError String := do
         ((mesh4x4 meshW).singleClocked,
          ((mesh4x4 meshW).clockDomains.flatMap Prod.snd).eraseDups) (true, [`clk])
     , line "lowers"
-        ((mesh4x4 8).check.toOption.isSome && (mesh4x4 8).toVeir.toOption.isSome) true ]
+        ((mesh4x4 8).check.toOption.isSome && (mesh4x4 8).toVeir.toOption.isSome) true
+      -- The size, as a *check* rather than as prose. It was prose -- in this file's header and in
+      -- AGENTS.md -- and it drifted by 160 operations without anything noticing: `flatAddr`
+      -- accumulated a flat address from a zero constant, so every one-dimensional dynamic select
+      -- carried a redundant constant and `comb.add`, ten per switch across sixteen switches.
+      --
+      -- **The register count alone does not catch that**, which is why both numbers are here:
+      -- the drift was entirely combinational and 320 never moved. Measured by re-running the
+      -- mutation against a register-only pin.
+      --
+      -- The numbers are allowed to move. What they are not allowed to do is move *silently*: a
+      -- change here means the backend emits different hardware for the same design, and that is
+      -- worth a sentence in whatever commit does it.
+    , line "size" ((VeirBridge.of (mesh4x4 meshW)).map (fun b => (b.info.regs.size, b.info.ops.size)))
+        (some (320, 7214)) ]
 
 /-- Every scenario, in one evaluation, so the IR is built once.
 
@@ -223,6 +237,7 @@ agree: ok
 agree-delivered: ok
 one-clock: ok
 lowers: ok
+size: ok
 -/
 #guard_msgs in
 #eval IO.println meshReport

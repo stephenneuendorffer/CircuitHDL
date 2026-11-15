@@ -68,12 +68,20 @@ def neighbour (x y d : Nat) : Option (Nat × Nat) :=
 def opposite : Nat → Nat
   | 0 => 1 | 1 => 0 | 2 => 3 | 3 => 2 | d => d
 
+/-- The dead stub for direction `d` of `(x, y)`: the same slot in the second half of the link
+space, which is why `meshLinks` is where the halves meet.
+
+Named rather than spelled out because it is wanted in two places -- here, so an edge input has
+something to read, and in the design, so the stub can be tied off -- and the two have to agree.
+`meshLinks + lnkIdx x y d` written twice is the same fact stated twice. -/
+def stubIdx (x y d : Nat) : Nat := meshLinks + lnkIdx x y d
+
 /-- The slot input `d` of `(x, y)` reads: the neighbour's opposite output, or -- at the boundary --
 a dead stub of its own, so that every input binds the same way and only the index differs. -/
 def srcIdx (x y d : Nat) : Nat :=
   match neighbour x y d with
   | some (nx, ny) => lnkIdx nx ny (opposite d)
-  | none => meshLinks + lnkIdx x y d
+  | none => stubIdx x y d
 
 /-- Does direction `d` leave the mesh at `(x, y)`? -/
 def isEdge (x y d : Nat) : Bool := (neighbour x y d).isNone
@@ -112,8 +120,8 @@ module! mesh4x4 #[(fw : Nat)]
       -- holds `ready` high, because no neighbour is there to drive it.
       for d < 4 {
         if isEdge(x, y, d) {
-          assign lvalid[meshLinks() + lnkIdx(x, y, d)] = 0;
-          assign ldata[meshLinks() + lnkIdx(x, y, d)] = 0;
+          assign lvalid[stubIdx(x, y, d)] = 0;
+          assign ldata[stubIdx(x, y, d)] = 0;
           assign lready[lnkIdx(x, y, d)] = 1;
         } else { }
       }
