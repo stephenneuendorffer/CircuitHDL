@@ -612,8 +612,8 @@ Three files, three different kinds of claim, and they are not interchangeable:
 
 | File | Claim | Trust |
 |---|---|---|
-| `CircuitHdl/Examples/MeshRoutingModel.lean` | XY routing has an acyclic channel dependency graph, so it cannot deadlock — at any mesh size | **kernel** (`propext`, `Quot.sound`) |
-| `CircuitHdlTest/MeshSwitch.lean` | the hardware computes that policy, and offers no turn it forbids — all 256 (position, destination) pairs | interpreter |
+| `CircuitHdl/Examples/Mesh/RoutingModel.lean` | XY routing has an acyclic channel dependency graph, so it cannot deadlock — at any mesh size | **kernel** (`propext`, `Quot.sound`) |
+| `CircuitHdlTest/Mesh/Switch.lean` | the hardware computes that policy, and offers no turn it forbids — all 256 (position, destination) pairs | interpreter |
 | `CircuitHdlTest/Mesh.lean` | packets are delivered, to the right node, without interleaving | `native_decide` via VeIR, a handful of traffic patterns at three extents |
 
 Both files are written in `module!` now. `mesh` generates its `n * n` instances from a `for`
@@ -652,7 +652,7 @@ have been a `native_decide` over a list the kernel cannot reduce.
 
 **One step is prose.** Relating the mesh's actual wait-for graph — which packet holds which channel
 at which instant — to the model's `Depends` relation is an argument, written out at the end of
-`CircuitHdlTest/MeshSwitch.lean` and not formalised. What *is* mechanical is the part where a bug
+`CircuitHdlTest/Mesh/Switch.lean` and not formalised. What *is* mechanical is the part where a bug
 would be: the policy the hardware computes.
 
 ### Design-level mutations, measured
@@ -661,7 +661,7 @@ All of these were re-run after the two mesh files were rewritten in `module!`, b
 that quietly stopped a mutation from biting would look exactly like a rewrite that worked.
 
 - **YX instead of XY** (swap the two pairs of tests in `meshRouteUnit`): reddens six checks in
-  `CircuitHdlTest/MeshSwitch.lean`, including the no-forbidden-turn obligation, and leaves
+  `CircuitHdlTest/Mesh/Switch.lean`, including the no-forbidden-turn obligation, and leaves
   `CircuitHdlTest/Mesh.lean` **entirely green** — both halves run, not assumed. That asymmetry
   is the whole argument for the turn check: a YX switch in an XY mesh is the deadlock-introducing
   bug, it delivers every packet, and no amount of end-to-end testing would find it.
@@ -682,7 +682,14 @@ that quietly stopped a mutation from biting would look exactly like a rewrite th
 
 - **A filename matches the primary data structure in it.** `AbstractFifoModel.lean` defines
   `AbstractFifoModel`. Renaming one means renaming the other.
-- **One test module per source module.** `CircuitHdlTest/Foo.lean` tests `CircuitHdl/…/Foo.lean`.
+
+  **A directory supplies part of the name.** The mesh is three files under `Examples/Mesh/`, so
+  `Switch.lean` defines `meshSwitch` and `RoutingModel.lean` defines `MeshRoutingModel` -- the
+  path and the structure still read the same, with the directory carrying the prefix the filename
+  would otherwise repeat. `Mesh.lean` beside the directory is the design the parts assemble into,
+  the same arrangement `CircuitHdl.lean` has beside `CircuitHdl/`.
+- **One test module per source module**, and the test tree mirrors the source tree.
+  `CircuitHdlTest/Mesh/Switch.lean` tests `CircuitHdl/Examples/Mesh/Switch.lean`.
 - Roughly 100 columns.
 - Conventional commits with a scope (`feat(fifo):`, `fix(hw):`, `chore:`), matching `../veir`.
 - Doc comments carry the *reasoning*, not a restatement of the signature. Where something is

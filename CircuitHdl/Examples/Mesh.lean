@@ -1,6 +1,6 @@
 import CircuitHdl.Core
 import CircuitHdl.Syntax
-import CircuitHdl.Examples.MeshSwitch
+import CircuitHdl.Examples.Mesh.Switch
 
 /-!
 An `n` by `n` mesh: `n * n` `meshSwitch` instances and the links between them.

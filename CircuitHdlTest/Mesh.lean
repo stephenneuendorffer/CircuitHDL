@@ -3,7 +3,7 @@ import CircuitHdlTest.FifoHarness
 /-!
 End-to-end tests for the mesh, at three extents.
 
-`CircuitHdlTest.MeshRoutingModel` proves the policy cannot deadlock and `CircuitHdlTest.MeshSwitch`
+`CircuitHdlTest.Mesh.RoutingModel` proves the policy cannot deadlock and `CircuitHdlTest.Mesh.Switch`
 proves the hardware computes that policy. Neither says a packet ever arrives: a switch that routed
 correctly and dropped every flit would pass both. This file is the delivery evidence, and it is
 also where the *wormhole* property is checked, which the model deliberately says nothing about --
@@ -45,7 +45,7 @@ open Lean
 
 `{ payload, tail, dstY, dstX }`, destination in the low bits and the tail marker above it. Each
 coordinate occupies `cw` bits, so the layout follows the mesh extent exactly as `meshSwitch`'s
-header slices do. Every flit of a packet repeats the destination; see `MeshSwitch` for why the
+header slices do. Every flit of a packet repeats the destination; see `Mesh/Switch` for why the
 allocator depends on that.
 -/
 

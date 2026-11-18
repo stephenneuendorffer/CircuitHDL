@@ -3,7 +3,7 @@ import CircuitHdl
 /-!
 Tests for the mesh switch, and the refinement that connects it to the deadlock theorem.
 
-`CircuitHdlTest.MeshRoutingModel` proves that a network routed by `xyRoute` cannot deadlock. That
+`CircuitHdlTest.Mesh.RoutingModel` proves that a network routed by `xyRoute` cannot deadlock. That
 proof is about a policy, not about hardware, and it is worth exactly as much as the evidence that
 the hardware implements that policy. This file is that evidence.
 

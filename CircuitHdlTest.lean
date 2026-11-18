@@ -12,8 +12,8 @@ import CircuitHdlTest.PipeFifo
 import CircuitHdlTest.Grid
 import CircuitHdlTest.RegFile
 import CircuitHdlTest.SelectChain
-import CircuitHdlTest.MeshRoutingModel
-import CircuitHdlTest.MeshSwitch
+import CircuitHdlTest.Mesh.RoutingModel
+import CircuitHdlTest.Mesh.Switch
 import CircuitHdlTest.Mesh
 
 /-!
@@ -55,10 +55,10 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
 - `CircuitHdlTest.SettleOrder` -- that combinational statements are ordered by dependency rather
                                 than by source, that an already-ordered module is left alone, and
                                 that a real combinational loop is reported instead of miscompiled
-- `CircuitHdlTest.MeshRoutingModel` -- the routing theory: that `xyRoute` delivers, that the
+- `CircuitHdlTest.Mesh.RoutingModel` -- the routing theory: that `xyRoute` delivers, that the
                                 dependency relation it is quantified over is inhabited, and that
                                 deadlock freedom is kernel-proved
-- `CircuitHdlTest.MeshSwitch` -- that the switch computes `xyRoute` over all 256 (position,
+- `CircuitHdlTest.Mesh.Switch` -- that the switch computes `xyRoute` over all 256 (position,
                                 destination) pairs, and never offers a turn the policy forbids
 - `CircuitHdlTest.Mesh`   -- that the assembled mesh delivers: corner to corner in each
                                 direction, under contention, and without interleaving two packets

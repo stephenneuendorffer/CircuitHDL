@@ -1,6 +1,6 @@
 import CircuitHdl.Core
 import CircuitHdl.Syntax
-import CircuitHdl.Examples.MeshRoutingModel
+import CircuitHdl.Examples.Mesh.RoutingModel
 -- For the `axis` interface, which is declared by a `macro_rules` in `AsyncFifo.lean` rather than
 -- in `Syntax.lean` -- so any design with an AXI-Stream port depends on that example.
 import CircuitHdl.Examples.AsyncFifo
@@ -8,7 +8,7 @@ import CircuitHdl.Examples.AsyncFifo
 /-!
 A wormhole switch for the 4x4 mesh, and the routing unit it is built around.
 
-`CircuitHdl.Examples.MeshRoutingModel` says what dimension-order routing *is* and proves that a
+`CircuitHdl.Examples.Mesh.RoutingModel` says what dimension-order routing *is* and proves that a
 network using it cannot deadlock. This file is the hardware that implements it. The division of
 labour is deliberate and worth stating plainly:
 
