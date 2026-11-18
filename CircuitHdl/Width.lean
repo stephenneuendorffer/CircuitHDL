@@ -314,7 +314,7 @@ termination_by structural e => e
 /-- The widths of a dynamic access's indices, spelled out rather than `List.mapM`.
 
 `Expr.select` nests `List Expr`, and `mapM` over a nested inductive makes the recursion
-**well-founded** -- which no longer reduces under `rfl`. `CircuitHdlTest/AsyncFifo.lean` proves
+**well-founded** -- which no longer reduces under `rfl`. `CircuitHdlTest/Fifo/Async.lean` proves
 `(asyncFifo 4 8).check = .ok ()` by kernel computation, and it stops being provable the moment
 this is a `mapM`: measured, not guessed. The same shape `Stmt.checkList` already has, for the
 same reason one level up. -/
@@ -327,7 +327,7 @@ end
 
 -- **Structural, and asserted rather than hoped for.** Left to itself Lean compiles this pair by
 -- well-founded recursion, which does not reduce far enough for `rfl`: `check_4_8` in
--- `CircuitHdlTest/AsyncFifo.lean` stops being provable, while small expressions still reduce, so
+-- `CircuitHdlTest/Fifo/Async.lean` stops being provable, while small expressions still reduce, so
 -- the failure looks like a size limit rather than a recursion-kind change. Measured both ways.
 
 mutual
@@ -377,7 +377,7 @@ termination_by structural s => s
 
 **The annotation is load-bearing, not decoration.** Left to infer, Lean compiles this pair by
 well-founded recursion, which stopped reducing the moment `Expr` gained a nested `List Expr` --
-`check_4_8` in `CircuitHdlTest/AsyncFifo.lean` is `rfl` over a whole module and simply failed,
+`check_4_8` in `CircuitHdlTest/Fifo/Async.lean` is `rfl` over a whole module and simply failed,
 while every small expression still reduced, so it read as a size limit rather than a change of
 recursion kind. -/
 def Stmt.checkList (ctx : Ctx) : List Stmt → Except CheckError Unit

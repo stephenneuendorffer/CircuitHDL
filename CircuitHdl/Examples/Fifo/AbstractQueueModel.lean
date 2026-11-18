@@ -1,10 +1,10 @@
-import CircuitHdl.Examples.AbstractFifoModel
+import CircuitHdl.Examples.Fifo.AbstractFifoModel
 
 /-!
 The contents model: what a FIFO is, if you ask which words it holds and in what order.
 
 An `AbstractQueueModel` is a depth and a list. This is what a user of a FIFO actually cares
-about, and what `CircuitHdl.Examples.AbstractFifoModel` cannot even state -- `popAll_pushAll`
+about, and what `CircuitHdl.Examples.Fifo.AbstractFifoModel` cannot even state -- `popAll_pushAll`
 below is the first-in-first-out property, and it is not expressible about a counter.
 
 ### How the two models relate
@@ -16,7 +16,7 @@ about occupancy alone is reasoning about the same FIFO.
 
 The map runs one way only. A design can track occupancy perfectly and still put words in the
 wrong order, which is why both models are kept and checked separately -- see
-`CircuitHdlTest.ShiftFifo`, where a one-expression bug passes the counting model and fails this
+`CircuitHdlTest.Fifo.Shift`, where a one-expression bug passes the counting model and fails this
 one.
 
 As with the counting model, nothing here imports the HDL, everything holds for every depth, and

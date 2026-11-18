@@ -7,7 +7,7 @@ Generate the `arcilator` cross-check: the emitted MLIR with a driver appended, a
 
 ### Why this exists
 
-`CircuitHdlTest.ShiftFifo` and `CircuitHdlTest.AsyncFifo` re-run their refinement checks against
+`CircuitHdlTest.Fifo.Shift` and `CircuitHdlTest.Fifo.Async` re-run their refinement checks against
 the lowered netlist, under `Veir.Netlist`. Those are real theorems, but they
 compare two things written in this repository: a lowering, and a reading of the dialects the
 lowering targets. A misunderstanding of `comb.concat`'s operand order, or of what `ruw = old`

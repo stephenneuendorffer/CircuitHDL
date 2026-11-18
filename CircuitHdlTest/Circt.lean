@@ -290,7 +290,7 @@ wide, so the address is truncated to fit and the write lands somewhere in range.
 So `Module.toVeir` is **not** behaviour-preserving for out-of-range addresses -- the source
 semantics is strictly stricter than what would be built. No design in `CircuitHdl.Examples`
 reaches it: `asyncFifo` slices its pointers to exactly `addrW` first, which is why every
-refinement theorem in `CircuitHdlTest.AsyncFifo` holds under both. These pin the divergence so it
+refinement theorem in `CircuitHdlTest.Fifo.Async` holds under both. These pin the divergence so it
 cannot change quietly.
 -/
 

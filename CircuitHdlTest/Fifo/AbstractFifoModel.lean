@@ -1,11 +1,11 @@
-import CircuitHdl.Examples.AbstractFifoModel
+import CircuitHdl.Examples.Fifo.AbstractFifoModel
 
 /-!
 Unit tests for the counting model.
 
 The model carries its own theorems, and they turn out to be the stronger net: mutating `push` to
 wrap instead of saturate, or to work on the wrong end, breaks the proofs in
-`CircuitHdl.Examples.AbstractFifoModel` before it reaches anything here. These tests are not the
+`CircuitHdl.Examples.Fifo.AbstractFifoModel` before it reaches anything here. These tests are not the
 primary guarantee and are not trying to be.
 
 What they are for:
@@ -73,7 +73,7 @@ what keeps these cases from arising; the model has to do *something* regardless,
 A FIFO that can hold nothing is both full and empty, and pushing does not change that. Worth
 pinning because it is the one case where the two flags are true at once -- a design whose flags
 came from comparing pointers would have to get this right separately, and
-`CircuitHdlTest.AsyncFifo`'s `full_ne_empty_3` says a three-bit pointer pair never does.
+`CircuitHdlTest.Fifo.Async`'s `full_ne_empty_3` says a three-bit pointer pair never does.
 -/
 
 #guard (empty 0).isFull

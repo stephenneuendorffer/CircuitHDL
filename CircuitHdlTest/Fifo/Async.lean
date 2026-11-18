@@ -322,7 +322,7 @@ this file, so it is left for a later pass.
 
 /-! ## Refinement against the abstract models
 
-`CircuitHdl.Examples.AbstractFifoModel` says what a FIFO is; this section says that `asyncFifo` is
+`CircuitHdl.Examples.Fifo.AbstractFifoModel` says what a FIFO is; this section says that `asyncFifo` is
 one. The harness is `CircuitHdlTest.FifoHarness`, shared with the shift-register FIFO.
 
 Two layers, proved in different senses. The flag logic below is proved by `bv_decide`: complete
@@ -716,7 +716,7 @@ The results above hold of `CircuitHdl.Semantics`. What would be built is what `C
 emits, and until now nothing checked that the two agree. These restate the depth-4 results against
 `lowered fifo4` -- the same design after `Module.toNetlist`, under
 `CircuitHdl.NetlistSemantics` -- with the same harness, schedules and abstraction functions.
-`CircuitHdlTest.ShiftFifo` does the same and explains the arrangement.
+`CircuitHdlTest.Fifo.Shift` does the same and explains the arrangement.
 
 This design is the one that makes the netlist checks worth their cost, because it is the one whose
 lowering has parts `shiftFifo4` does not reach:
@@ -799,12 +799,12 @@ theorem net_resetEmptyLow_rejected_by_queue :
   the two families above, are not covered. They are `native_decide`, so the Lean compiler and this
   code are trusted alongside the kernel. The `bv_decide` flag theorems share that trust but not
   the bound -- they cover every input at their width. Only
-  `CircuitHdl.Examples.AbstractFifoModel` rests on the kernel alone.
+  `CircuitHdl.Examples.Fifo.AbstractFifoModel` rests on the kernel alone.
 - `gray`, `fullTest3` and `emptyTest` are **transcriptions** of the design's expressions, not
   extracted from it, and nothing here checks the transcription. `fullTest3_correct` proves the
   gray-coded comparison is right; it does not prove that is the comparison `asyncFifo` computes.
   The `#guard` above on `grayOfW 3` closes that gap for the encoder and nothing closes it for the
-  flags. Reading `wfullnext` in `CircuitHdl.Examples.AsyncFifo` against `fullTest3` is still a
+  flags. Reading `wfullnext` in `CircuitHdl.Examples.Fifo.Async` against `fullTest3` is still a
   human step.
 - The contents results are weaker again: `AbstractQueueModel` is related to this design only by
   simulation. There is no analogue of `fullTest3_correct` for data.

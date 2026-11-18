@@ -80,7 +80,7 @@ address the macro could have folded. A bound on the array as a whole accepts off
 back a neighbour's data; asking each index against its own extent refuses it.
 
 It cost something real: `Expr` nesting `List Expr` is what stopped `(asyncFifo d w).check`
-reducing by `rfl`, so the four well-formedness theorems in `CircuitHdlTest/AsyncFifo.lean` are
+reducing by `rfl`, so the four well-formedness theorems in `CircuitHdlTest/Fifo/Async.lean` are
 `native_decide` now. The trade is recorded there.
 -/
 

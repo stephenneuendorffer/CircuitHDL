@@ -62,7 +62,7 @@ private def pipeShortSchedules : List Schedule := allSingleClockSchedules 5
 
 /-! ### The results
 
-Same statements as `CircuitHdlTest.ShiftFifo`, against a design that reaches a strictly larger
+Same statements as `CircuitHdlTest.Fifo.Shift`, against a design that reaches a strictly larger
 set of concrete states -- every occupancy is reachable in several stage patterns rather than one.
 -/
 

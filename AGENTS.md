@@ -138,7 +138,7 @@ Things the surface syntax does *not* have, each of which has bitten:
   so the submodule's `d[sel]` is the parent's `r[1][sel]` and `instArrays` creates nothing.
 
   Carrying one index per dimension makes `Expr` a *nested* inductive, and that is what stopped
-  `(asyncFifo d w).check` reducing by `rfl` -- the four theorems in `CircuitHdlTest/AsyncFifo.lean`
+  `(asyncFifo d w).check` reducing by `rfl` -- the four theorems in `CircuitHdlTest/Fifo/Async.lean`
   are `native_decide` now. The search not to repeat is written up beside them.
 
 - **`for` exists, and the index rule is semantic.** `memory m[depth] : dw;` is one `seq.firmem`,
@@ -341,7 +341,7 @@ what keeps `iK.ready` free of any `oJ.ready` term. Bypassing reintroduces the ba
 ## Known blocker
 
 `∀ depth dw h, (asyncFifo depth dw h).check = .ok ()` is **not** provable with current tactics,
-and the reason is written up at the end of `CircuitHdlTest/AsyncFifo.lean`: `rfl` sticks on
+and the reason is written up at the end of `CircuitHdlTest/Fifo/Async.lean`: `rfl` sticks on
 `expectWidth` at a symbolic `Nat`, and `simp` will not evaluate `Name` equality inside a `match`
 scrutinee. The fix is to make `Module.check` take an environment rather than compute one. Any
 ambition to prove things about designs *for all sizes* runs into this first.
@@ -383,7 +383,7 @@ nothing that would be built. Three things close that gap, and they overlap less 
 
 | Where | What it compares | Trust |
 |---|---|---|
-| `CircuitHdlTest/{ShiftFifo,AsyncFifo}.lean`, final sections | the same refinement checks re-run on `lowered design` | `native_decide`, bounded by schedule |
+| `CircuitHdlTest/Fifo/{Shift,Async}.lean`, final sections | the same refinement checks re-run on `lowered design` | `native_decide`, bounded by schedule |
 | `CircuitHdlTest/RegFile.lean` | one scenario on both semantics, compared directly | `native_decide`, one scenario |
 | `#guard_msgs` in `CircuitHdlTest/Circt.lean` | what `Veir.Printer` makes of the built IR | kernel |
 | `scripts/arccheck.sh` | the **emitted MLIR** under `arcilator` vs `Veir.Netlist` | external, not a theorem |
@@ -440,7 +440,7 @@ lower `comb.and` as `comb.or` (11 in `ShiftFifo`). If you change the lowering, r
 Two **design**-level mutations cover the array work, and the first is the more informative:
 
 - `r[i + 1]` → `r[i]` in `shiftFifo`'s shift reddens **ten** theorems in
-  `CircuitHdlTest/ShiftFifo.lean` — the five `shiftQueueAbstractionOf` ones and their five netlist
+  `CircuitHdlTest/Fifo/Shift.lean` — the five `shiftQueueAbstractionOf` ones and their five netlist
   counterparts — and leaves the two counting-model theorems green, because `count` is still
   updated correctly and only the data lands in the wrong slot. That is the `shiftFifoOffByOne`
   signature, reached this time through the loop, and it is the evidence that parameterising the
@@ -513,7 +513,7 @@ from 9.0s to 5.5s against 2.6s for the old in-repo semantics -- about 2.1x. **Do
 `VariableState` in that loop**: it is a hash map carrying proof fields with a `Conforms` check on
 every write, which is right for a rewriter and wrong for a `native_decide`.
 
-Whole-file costs: `CircuitHdlTest/ShiftFifo.lean` 41s → 65s, `AsyncFifo.lean` 85s → 101s.
+Whole-file costs: `CircuitHdlTest/Fifo/Shift.lean` 41s → 65s, `AsyncFifo.lean` 85s → 101s.
 
 #### Trust, checked rather than assumed
 
@@ -683,11 +683,22 @@ that quietly stopped a mutation from biting would look exactly like a rewrite th
 - **A filename matches the primary data structure in it.** `AbstractFifoModel.lean` defines
   `AbstractFifoModel`. Renaming one means renaming the other.
 
-  **A directory supplies part of the name.** The mesh is three files under `Examples/Mesh/`, so
-  `Switch.lean` defines `meshSwitch` and `RoutingModel.lean` defines `MeshRoutingModel` -- the
-  path and the structure still read the same, with the directory carrying the prefix the filename
-  would otherwise repeat. `Mesh.lean` beside the directory is the design the parts assemble into,
-  the same arrangement `CircuitHdl.lean` has beside `CircuitHdl/`.
+  **A directory supplies part of the name, where the part is redundant.** The mesh is three
+  files under `Examples/Mesh/`, so `Switch.lean` defines `meshSwitch` and `RoutingModel.lean`
+  defines `MeshRoutingModel` -- the path and the structure still read the same, with the
+  directory carrying the prefix the filename would otherwise repeat. `Mesh.lean` beside the
+  directory is the design the parts assemble into, the same arrangement `CircuitHdl.lean` has
+  beside `CircuitHdl/`.
+
+  **Where the prefix discriminates, it stays.** `Examples/Fifo/` holds `Async.lean`, `Shift.lean`
+  and `Pipe.lean` -- three designs of one category, the category supplied by the directory -- and
+  also `AbstractFifoModel.lean` and `AbstractQueueModel.lean`, where `Fifo` and `Queue` say which
+  of the two abstract models a file carries. Dropping `Fifo` from the first would leave
+  `AbstractModel.lean` opposite `AbstractQueueModel.lean` and destroy the contrast.
+
+  The FIFO directory has no file beside it: there are three independent designs and two models
+  rather than parts of one design, so nothing assembles them and there is nothing for a
+  `Fifo.lean` to contain.
 - **One test module per source module**, and the test tree mirrors the source tree.
   `CircuitHdlTest/Mesh/Switch.lean` tests `CircuitHdl/Examples/Mesh/Switch.lean`.
 - Roughly 100 columns.

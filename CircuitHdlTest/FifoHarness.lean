@@ -1,7 +1,7 @@
 import CircuitHdl
 import Veir.Interpreter.Netlist
-import CircuitHdl.Examples.AbstractFifoModel
-import CircuitHdl.Examples.AbstractQueueModel
+import CircuitHdl.Examples.Fifo.AbstractFifoModel
+import CircuitHdl.Examples.Fifo.AbstractQueueModel
 
 /-!
 A harness for checking a design against the abstract FIFO models.
@@ -37,7 +37,7 @@ release into two unrelated clocks is itself a crossing, and a design whose write
 cleared while its read pointer has not is in a state no single-count model can describe. So a
 reset tick here is a whole-FIFO event -- it asserts both domains' resets and takes an edge in each
 -- and the asymmetric case is a negative control rather than a supported mode. See
-`CircuitHdlTest.AsyncFifo`'s `oneSidedReset_rejected`.
+`CircuitHdlTest.Fifo.Async`'s `oneSidedReset_rejected`.
 
 `AbstractFifoModel.reset` and `AbstractQueueModel.reset` are unconditional where `push` and `pop`
 are guarded, so a schedule may assert reset from any state at all and still have something to
@@ -48,7 +48,7 @@ compare against. `push_reset`, `pop_reset` and `counting_reset` are what say tha
 Discharged by `native_decide`, so the Lean compiler and this code are trusted alongside the
 kernel, and **bounded**: each theorem enumerates a chosen finite set of schedules rather than
 covering all of them. A refinement result here is weaker than anything in
-`CircuitHdl.Examples.AbstractFifoModel`, which holds for every depth on the kernel alone.
+`CircuitHdl.Examples.Fifo.AbstractFifoModel`, which holds for every depth on the kernel alone.
 
 Checks that cannot fail are worthless, so each test file pairs its results with controls that
 perturb one thing and pin that the check rejects it.

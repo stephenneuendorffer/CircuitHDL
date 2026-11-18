@@ -3,7 +3,7 @@ import CircuitHdl.Syntax
 import CircuitHdl.Examples.Mesh.RoutingModel
 -- For the `axis` interface, which is declared by a `macro_rules` in `AsyncFifo.lean` rather than
 -- in `Syntax.lean` -- so any design with an AXI-Stream port depends on that example.
-import CircuitHdl.Examples.AsyncFifo
+import CircuitHdl.Examples.Fifo.Async
 
 /-!
 A wormhole switch for the 4x4 mesh, and the routing unit it is built around.

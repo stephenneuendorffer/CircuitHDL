@@ -1,9 +1,9 @@
-import CircuitHdl.Examples.AbstractQueueModel
+import CircuitHdl.Examples.Fifo.AbstractQueueModel
 
 /-!
 Unit tests for the contents model.
 
-As with the counting model, the theorems in `CircuitHdl.Examples.AbstractQueueModel` are the
+As with the counting model, the theorems in `CircuitHdl.Examples.Fifo.AbstractQueueModel` are the
 stronger net -- a `push` that prepended, or that dropped the oldest word to make room, fails those
 proofs before it fails anything here. These tests sit underneath them.
 

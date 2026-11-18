@@ -1,14 +1,14 @@
-import CircuitHdlTest.AbstractFifoModel
-import CircuitHdlTest.AbstractQueueModel
+import CircuitHdlTest.Fifo.AbstractFifoModel
+import CircuitHdlTest.Fifo.AbstractQueueModel
 import CircuitHdlTest.Syntax
 import CircuitHdlTest.Semantics
 import CircuitHdlTest.Clocks
 import CircuitHdlTest.SettleOrder
-import CircuitHdlTest.AsyncFifo
+import CircuitHdlTest.Fifo.Async
 import CircuitHdlTest.Circt
 import CircuitHdlTest.FifoHarness
-import CircuitHdlTest.ShiftFifo
-import CircuitHdlTest.PipeFifo
+import CircuitHdlTest.Fifo.Shift
+import CircuitHdlTest.Fifo.Pipe
 import CircuitHdlTest.Grid
 import CircuitHdlTest.RegFile
 import CircuitHdlTest.SelectChain
@@ -23,9 +23,9 @@ Every test here is checked by the compiler rather than by a runner, so a green b
 passing run: `example … := rfl` asserts the parser produces the reference modules, `#guard_msgs`
 pins the width-error messages, and `#guard` forces evaluation of the simulations.
 
-- `CircuitHdlTest.AbstractFifoModel`  -- the counting model at its edges: saturation, the
+- `CircuitHdlTest.Fifo.AbstractFifoModel`  -- the counting model at its edges: saturation, the
                                 full and empty boundaries, degenerate depths
-- `CircuitHdlTest.AbstractQueueModel` -- the contents model: which end each operation works on,
+- `CircuitHdlTest.Fifo.AbstractQueueModel` -- the contents model: which end each operation works on,
                                 which word overflow loses, and agreement with the counting model
 - `CircuitHdlTest.Syntax`    -- expression lowering, precedence, and round-trips against
                                 hand-written reference modules
@@ -33,17 +33,17 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 blocking versus non-blocking assignment
 - `CircuitHdlTest.Clocks`    -- clock-domain analysis: what it accepts, rejects, and where the
                                 boundary sits
-- `CircuitHdlTest.AsyncFifo` -- the FIFO at three clock ratios and with intermittent handshakes,
+- `CircuitHdlTest.Fifo.Async` -- the FIFO at three clock ratios and with intermittent handshakes,
                                 plus gray-code and synchronizer unit tests
 - `CircuitHdlTest.Circt`     -- the lowering to `hw`/`comb`/`seq`: the text it emits for the
                                 smallest designs, and VeIR's verdict on every example
 - `CircuitHdlTest.FifoHarness` -- shared machinery for checking a design against the abstract
-                                FIFO models in `CircuitHdl.Examples.AbstractFifoModel`, including
+                                FIFO models in `CircuitHdl.Examples.Fifo.AbstractFifoModel`, including
                                 driving a design through reset and checking the data bus on every
                                 tick where `valid` is asserted rather than only at a transfer
-- `CircuitHdlTest.ShiftFifo` -- the shift-register FIFO: that it carries traffic, and that it
+- `CircuitHdlTest.Fifo.Shift` -- the shift-register FIFO: that it carries traffic, and that it
                                 refines the same two models by entirely different means
-- `CircuitHdlTest.PipeFifo`  -- the pipeline FIFO: a valid bit per stage, so the queue is not a
+- `CircuitHdlTest.Fifo.Pipe`  -- the pipeline FIFO: a valid bit per stage, so the queue is not a
                                 dense prefix and the gaps between words are permanent
 - `CircuitHdlTest.Grid`      -- the 4x4 grid: that a dynamic index in two dimensions lands where
                              --   it should, and that one outside its dimension is caught

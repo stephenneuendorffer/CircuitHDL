@@ -1,6 +1,6 @@
 import CircuitHdl.Core
 import CircuitHdl.Syntax
-import CircuitHdl.Examples.ShiftFifo
+import CircuitHdl.Examples.Fifo.Shift
 
 /-!
 A pipeline FIFO: the same interface again, and the opposite trade from `shiftFifo`.

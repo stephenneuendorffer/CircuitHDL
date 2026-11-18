@@ -1,6 +1,6 @@
 import CircuitHdl.Core
 import CircuitHdl.Syntax
-import CircuitHdl.Examples.AsyncFifo
+import CircuitHdl.Examples.Fifo.Async
 
 /-!
 A shift-register FIFO: the same interface as `asyncFifo`, built the opposite way.

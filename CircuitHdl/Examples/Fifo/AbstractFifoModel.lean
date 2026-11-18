@@ -7,9 +7,9 @@ design like `asyncFifo` all exist to answer "how many are outstanding", and a qu
 occupancy is a question about two bitvectors -- small enough for a SAT call to settle. The same
 question about contents drags in a memory array and is not.
 
-`CircuitHdl.Examples.AbstractQueueModel` is the companion model that does track contents, and
+`CircuitHdl.Examples.Fifo.AbstractQueueModel` is the companion model that does track contents, and
 carries the map between the two. Neither subsumes the other, and that is exhibited rather than
-assumed: `CircuitHdlTest.ShiftFifo` has a design that satisfies this model and violates that one.
+assumed: `CircuitHdlTest.Fifo.Shift` has a design that satisfies this model and violates that one.
 
 Nothing here imports the HDL. These are statements about counters, provable without mentioning
 `Module`, `State` or a clock, which is what lets the same model be reused against implementations

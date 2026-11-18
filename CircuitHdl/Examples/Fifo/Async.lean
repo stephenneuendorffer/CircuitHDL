@@ -32,7 +32,7 @@ into their own domains, and so does this one.
 
 Worth knowing how little the existing analysis would say about getting that wrong: `singleClocked`
 inspects *registers*, and a reset is an input, so one shared `rst` read from both `always` blocks
-would leave it green. `CircuitHdlTest.AsyncFifo`'s `oneSidedReset_rejected` is what actually
+would leave it green. `CircuitHdlTest.Fifo.Async`'s `oneSidedReset_rejected` is what actually
 catches it, by resetting one domain and watching the occupancy check fail.
 
 Power-up is still unreset: every register starts at zero, and `rempty` is a register, so before

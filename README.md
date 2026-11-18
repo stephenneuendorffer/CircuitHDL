@@ -44,8 +44,8 @@ design would be — there are no hand-built `Module` literals here:
 | `Examples/Alu.lean` | Add / and / or / compare, selected by a mux chain. The example that needs the whole expression language. |
 | `Examples/Shifter.lean` | Nibble selection and rotation: slices and concatenation. |
 | `Examples/Swap.lean` | `swapSeq` and `swapComb` — identical statements, clocked and unclocked. |
-| `Examples/AsyncFifo.lean` | An asynchronous FIFO with AXI valid/ready ports: two clocks, gray-coded pointers, two-flop synchronizers. |
-| `Examples/ShiftFifo.lean` | The same interface built the opposite way: one clock, no memory, data moves instead of pointers. Its depth is a parameter, over an array of registers. |
+| `Examples/Fifo/Async.lean` | An asynchronous FIFO with AXI valid/ready ports: two clocks, gray-coded pointers, two-flop synchronizers. |
+| `Examples/Fifo/Shift.lean` | The same interface built the opposite way: one clock, no memory, data moves instead of pointers. Its depth is a parameter, over an array of registers. |
 | `Examples/RegFile.lean` | Storage addressed by a value: two read ports as mux chains over an array, one write port as a decoder. |
 
 Alongside the designs, two *specifications* — what a FIFO is, with no reference to any
@@ -54,8 +54,8 @@ the same models:
 
 | File | Contents |
 |---|---|
-| `Examples/AbstractFifoModel.lean` | A depth and a count. Forgetting the data is what makes the flag logic provable. |
-| `Examples/AbstractQueueModel.lean` | A depth and a list, plus `counting`, the map down to the model above. Says the first-in-first-out property, which a counter cannot. |
+| `Examples/Fifo/AbstractFifoModel.lean` | A depth and a count. Forgetting the data is what makes the flag logic provable. |
+| `Examples/Fifo/AbstractQueueModel.lean` | A depth and a list, plus `counting`, the map down to the model above. Says the first-in-first-out property, which a counter cannot. |
 
 Tests live in their own library under `CircuitHdlTest/`, so they can be built and run on their
 own with `lake test`. Small modules that probe one rule each live with the tests that use them,
@@ -66,9 +66,9 @@ since they are assertions rather than designs:
 | `CircuitHdlTest/Syntax.lean` | Expression lowering and precedence, plus round-trips asserting the example designs lower to the hand-written reference structures (`and2Example`, `counterExample`) kept here. |
 | `CircuitHdlTest/Semantics.lean` | Executable tests: the counter counts, the and2 truth table, non-blocking assignment. |
 | `CircuitHdlTest/Clocks.lean` | Clock-domain analysis on small modules: what it accepts, rejects, and where the boundary sits. |
-| `CircuitHdlTest/AsyncFifo.lean` | The FIFO simulated at three clock ratios and with intermittent handshakes, gray-code and synchronizer unit tests, and its refinement of the abstract models — including `bv_decide` proofs that the gray-coded full and empty flags fire at exactly the right occupancy. |
-| `CircuitHdlTest/ShiftFifo.lean` | The shift-register FIFO: that it carries the same traffic, and that it refines the same models by entirely different means. |
-| `CircuitHdlTest/AbstractFifoModel.lean`, `AbstractQueueModel.lean` | The two specifications at their edges: saturation, overflow, degenerate depths. |
+| `CircuitHdlTest/Fifo/Async.lean` | The FIFO simulated at three clock ratios and with intermittent handshakes, gray-code and synchronizer unit tests, and its refinement of the abstract models — including `bv_decide` proofs that the gray-coded full and empty flags fire at exactly the right occupancy. |
+| `CircuitHdlTest/Fifo/Shift.lean` | The shift-register FIFO: that it carries the same traffic, and that it refines the same models by entirely different means. |
+| `CircuitHdlTest/Fifo/AbstractFifoModel.lean`, `AbstractQueueModel.lean` | The two specifications at their edges: saturation, overflow, degenerate depths. |
 | `CircuitHdlTest/FifoHarness.lean` | Shared machinery for checking any design against the models. |
 | `CircuitHdlTest/Circt.lean` | The CIRCT lowering: the text it emits for the smallest designs, and VeIR's verdict on every example. |
 
@@ -271,7 +271,7 @@ widths are ordinary `Nat`s.
 
 So parameterizing does not weaken checking so much as move it. `(m n).check = .ok ()` is a
 proposition about *every* size, which is a stronger thing to know than a macro checking one — see
-the well-formedness section of `CircuitHdlTest/AsyncFifo.lean` for how far that currently goes.
+the well-formedness section of `CircuitHdlTest/Fifo/Async.lean` for how far that currently goes.
 
 Two grammar positions had to be tightened when widths became terms, because `term` is greedy:
 `assign x : w = e;` would have parsed `w = e` as an equation, and `a << 1 < b` would have parsed
@@ -594,7 +594,7 @@ comparison out to eight with a concatenation.
 
 ## Example 4: an asynchronous FIFO with AXI handshakes
 
-`Examples/AsyncFifo.lean` is the design that motivated memories and independent clocks: two clocks that
+`Examples/Fifo/Async.lean` is the design that motivated memories and independent clocks: two clocks that
 share nothing but a memory and a pair of gray-coded pointers. It is **parameterized by size** —
 `asyncFifo depth dataWidth`, where the depth must be a power of two and at least 4, and that is
 *enforced* rather than assumed. The ports are
@@ -745,7 +745,7 @@ What is left is mostly about reach rather than new layers:
   for all depths at once: `rfl` sticks on `expectWidth` at a symbolic `Nat`, and `simp` will not
   evaluate `Name` equality inside a `match` scrutinee. The fix is for `Module.check` to take an
   environment rather than compute one. The obstacle is written up at the end of
-  `CircuitHdlTest/AsyncFifo.lean`.
+  `CircuitHdlTest/Fifo/Async.lean`.
 - **Unbounded refinement.** The FIFO refinement results are bounded enumerations over schedules,
   because symbolically evaluating `Module.settle` runs into the same wall. The models' own
   properties, and the gray-coded flag logic, *are* proved outright.

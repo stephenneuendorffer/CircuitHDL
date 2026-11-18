@@ -12,11 +12,11 @@ import CircuitHdl.Examples.Counter
 import CircuitHdl.Examples.Alu
 import CircuitHdl.Examples.Shifter
 import CircuitHdl.Examples.Swap
-import CircuitHdl.Examples.AbstractFifoModel
-import CircuitHdl.Examples.AbstractQueueModel
-import CircuitHdl.Examples.AsyncFifo
-import CircuitHdl.Examples.ShiftFifo
-import CircuitHdl.Examples.PipeFifo
+import CircuitHdl.Examples.Fifo.AbstractFifoModel
+import CircuitHdl.Examples.Fifo.AbstractQueueModel
+import CircuitHdl.Examples.Fifo.Async
+import CircuitHdl.Examples.Fifo.Shift
+import CircuitHdl.Examples.Fifo.Pipe
 import CircuitHdl.Examples.RegFile
 import CircuitHdl.Examples.Grid
 import CircuitHdl.Examples.Mesh.RoutingModel
@@ -52,16 +52,16 @@ language they need:
 - `CircuitHdl.Examples.Alu`       -- the expression language: mux chain, comparison, bitwise
 - `CircuitHdl.Examples.Shifter`   -- slices and concatenation
 - `CircuitHdl.Examples.Swap`      -- non-blocking versus blocking assignment
-- `CircuitHdl.Examples.AbstractFifoModel`  -- what a FIFO is if you only ask how full it is: a
+- `CircuitHdl.Examples.Fifo.AbstractFifoModel`  -- what a FIFO is if you only ask how full it is: a
                                       bounded counter. No HDL, no implementation
-- `CircuitHdl.Examples.AbstractQueueModel` -- what it is if you ask which words, in what order,
+- `CircuitHdl.Examples.Fifo.AbstractQueueModel` -- what it is if you ask which words, in what order,
                                       plus the map down to the counting model
-- `CircuitHdl.Examples.AsyncFifo` -- the real design: two clock domains, gray-coded pointers, and
+- `CircuitHdl.Examples.Fifo.Async` -- the real design: two clock domains, gray-coded pointers, and
                                       a reset per domain because releasing one into two clocks is
                                       itself a crossing
-- `CircuitHdl.Examples.ShiftFifo`  -- the same interface built the opposite way: data moves,
+- `CircuitHdl.Examples.Fifo.Shift`  -- the same interface built the opposite way: data moves,
                                       pointers do not, and one clock means one reset
-- `CircuitHdl.Examples.PipeFifo`   -- a valid bit per stage and writes entering at the far end,
+- `CircuitHdl.Examples.Fifo.Pipe`   -- a valid bit per stage and writes entering at the far end,
                                       so latency is the depth and bubbles are permanent
 - `CircuitHdl.Examples.Grid`       -- a 4x4 grid: the one design indexed by a value in *two*
                                   --   dimensions, so the only one that builds a flat address
