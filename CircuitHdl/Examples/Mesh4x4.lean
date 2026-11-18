@@ -126,7 +126,7 @@ module! mesh4x4 #[(fw : Nat)]
         } else { }
       }
 
-      (meshSwitch fw) sw[nodeIdx(x, y)] (
+      (meshSwitch 2 fw) sw[nodeIdx(x, y)] (
         .clk(clk), .rst(rst),
         .myX(mx[x][y]), .myY(my[x][y]),
         -- The four sides: each input reads the neighbour's opposite output, each output drives

@@ -44,9 +44,9 @@ forbids while still looking locally sensible.
 Verilog equivalent:
 
 ```verilog
-module meshRouteUnit (
-  input [1:0] myX, input [1:0] myY,
-  input [1:0] dstX, input [1:0] dstY,
+module #(parameter CW = 2) meshRouteUnit (
+  input [CW-1:0] myX, input [CW-1:0] myY,
+  input [CW-1:0] dstX, input [CW-1:0] dstY,
   output [2:0] dir
 );
   assign dir = (myX < dstX) ? 3'd0        // east
@@ -61,7 +61,8 @@ The order of the tests *is* the policy: X is closed before Y is considered, whic
 the dependency graph acyclic. Swapping the two pairs gives YX routing, which is equally
 deadlock-free on its own but deadlocks when mixed with XY -- so the ordering is load-bearing in a
 way no single switch can detect. -/
-module! meshRouteUnit #[] (myX : 2, myY : 2, dstX : 2, dstY : 2) -> (dir : 3) {
+module! meshRouteUnit #[(cw : Nat)]
+    (myX : cw, myY : cw, dstX : cw, dstY : cw) -> (dir : 3) {
   assign dir = (myX < dstX) ? (0 : 3)
              : ((dstX < myX) ? (1 : 3)
              : ((myY < dstY) ? (2 : 3)
@@ -142,8 +143,8 @@ array port is an array, so this is the same mux chain a `wire a[5]` would give. 
 from; the copy still exists, but it is now made by the flattener, which has to materialise an
 array port of a submodule anyway. The design says what it means and the copy is nobody's
 business. -/
-module! meshSwitch #[(fw : Nat)]
-    (clk : 1, rst : 1, myX : 2, myY : 2, slave i[5] : axis fw) -> (master o[5] : axis fw) {
+module! meshSwitch #[(cw fw : Nat)]
+    (clk : 1, rst : 1, myX : cw, myY : cw, slave i[5] : axis fw) -> (master o[5] : axis fw) {
   -- Which output each input wants. One routing unit per input, so the policy is stated once and
   -- instantiated, rather than copied five times.
   wire rq[5] : 3;
@@ -151,8 +152,9 @@ module! meshSwitch #[(fw : Nat)]
   for k < 5 {
     -- The destination slices go straight into the ports: an input bound to an expression keeps a
     -- wire of its own and the expression drives it, so the slices need no array apiece.
-    meshRouteUnit r[k]
-      (.myX(myX), .myY(myY), .dstX(i[k].data[1:0]), .dstY(i[k].data[3:2]), .dir(rq[k]));
+    (meshRouteUnit cw) r[k]
+      (.myX(myX), .myY(myY),
+       .dstX(i[k].data[(cw - 1):0]), .dstY(i[k].data[(2 * cw - 1):cw]), .dir(rq[k]));
   }
 
   -- Output ownership, and the one-flit output register that makes the port boundary a register.
@@ -202,7 +204,7 @@ module! meshSwitch #[(fw : Nat)]
 
     -- The channel is released when the tail flit is taken *in*; see the header for why not when
     -- it leaves. Bit 4 of the flit is the tail marker.
-    assign rel[j] = take[j] & od[j][4:4];
+    assign rel[j] = take[j] & od[j][(2 * cw):(2 * cw)];
   }
 
   -- An input is ready exactly when the output that owns it has room. Registers only.

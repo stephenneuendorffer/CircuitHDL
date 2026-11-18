@@ -38,7 +38,7 @@ def dirCode : Option Dir → Nat
 
 /-- Run the routing unit on one set of coordinates. -/
 private def routeUnit (mx my dx dy : Nat) : Option Nat :=
-  let sim := meshRouteUnit.sim
+  let sim := (meshRouteUnit 2).sim
   match sim.settle (sim.init.apply
       [ (`myX, Value.ofNat 2 mx), (`myY, Value.ofNat 2 my),
         (`dstX, Value.ofNat 2 dx), (`dstY, Value.ofNat 2 dy) ]) with

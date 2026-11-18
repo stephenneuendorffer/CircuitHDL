@@ -259,7 +259,7 @@ guards, and it is not visible from any end-to-end test: the old switch delivered
 `Module.settle` perfectly well.
 -/
 
-#guard (meshSwitch 13).settleOrder.unresolved = []
+#guard (meshSwitch 2 13).settleOrder.unresolved = []
 #guard (mesh4x4 13).settleOrder.unresolved = []
 
 -- Not vacuous: the mesh really does have logic to order, and a good deal of it.
@@ -281,6 +281,6 @@ guards, and it is not visible from any end-to-end test: the old switch delivered
 -- making `bindTarget` match a single index again after `mx` became two-dimensional, which
 -- reddens these two lines and leaves the mesh delivery report entirely green.
 #guard (mesh4x4 13).settleOrder.steps.length = 1920
-#guard (meshSwitch 13).settleOrder.steps.length = 85
+#guard (meshSwitch 2 13).settleOrder.steps.length = 85
 
 end CircuitHdl
