@@ -419,7 +419,7 @@ private def decode (b : VeirBridge) (σ : State) : Option (Array Veir.RuntimeVal
 
 /-- Write the simulator's state and settled outputs back into the harness's `State`. -/
 private def encode (b : VeirBridge) (st : Veir.Netlist.State)
-    (vals : Array Veir.RuntimeValue) (σ : State) : Option State := do
+    (args vals : Array Veir.RuntimeValue) (defined : Array Bool) (σ : State) : Option State := do
   let mut out := σ
   -- Each array is rebuilt whole, because `State` holds it as one cell: an element written on its
   -- own would need the other `count - 1` to be read back out and put in beside it.
@@ -446,7 +446,7 @@ private def encode (b : VeirBridge) (st : Veir.Netlist.State)
     let some words := st.mems[op.id]? | none
     let some ns := words.mapM toNat? | none
     out := out.setCell nm (.mem (ns.toList.map (Value.ofNat memType.width)))
-  let some outs := Veir.Netlist.outputs b.ctx b.info vals | none
+  let some outs := Veir.Netlist.outputs b.ctx b.info args vals defined | none
   for (port, i) in b.outputs.zipIdx do
     let (x, w) := port
     let some v := outs[i]? | none
@@ -482,16 +482,16 @@ def VeirBridge.sim (b : VeirBridge) : Sim :=
               | none => []))))
     settle := fun σ => do
       let some (args, st) := decode b σ | .error fail
-      let some (vals, _) := Veir.Netlist.settle b.ctx b.info args st | .error fail
-      let some σ' := encode b st vals σ | .error fail
+      let some (vals, defined, _) := Veir.Netlist.settle b.ctx b.info args st | .error fail
+      let some σ' := encode b st args vals defined σ | .error fail
       return σ'
     stepClock := fun clk σ inputs => do
       let σ := σ.apply inputs
       let some (args, st) := decode b σ | .error fail
       let some clkIdx := b.inputs.findIdx? (·.1 == Signal.sig clk) | .error fail
       let some st' := Veir.Netlist.stepClock b.ctx b.info clkIdx args st | .error fail
-      let some (vals, _) := Veir.Netlist.settle b.ctx b.info args st' | .error fail
-      let some σ' := encode b st' vals σ | .error fail
+      let some (vals, defined, _) := Veir.Netlist.settle b.ctx b.info args st' | .error fail
+      let some σ' := encode b st' args vals defined σ | .error fail
       return σ' }
 
 /-- The design as `CircuitHdl.Circt` lowers it, as something the two checks above can drive.
