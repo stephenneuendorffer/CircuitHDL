@@ -94,7 +94,7 @@ simulated correctly in isolation. **Wired into a mesh it is a combinational loop
 - *backwards*, because `iK.ready` reads all five `oJ.ready`, and `oJ.ready` is the neighbour's
   `iK'.ready`, which reads back this way.
 
-`Module.settleOrder` reported 672 signals it could not order in `mesh4x4`, which is what the loop
+`Module.settleOrder` reported 672 signals it could not order in `mesh`, which is what the loop
 looks like from the outside. The evaluator had been hiding it -- an unordered read returns the
 previous value, so the mesh "worked" with everything a tick late -- while the lowering turned the
 backward path into a hard-wired zero and no flit was ever acknowledged.

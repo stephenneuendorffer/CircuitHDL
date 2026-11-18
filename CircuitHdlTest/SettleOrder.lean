@@ -254,13 +254,13 @@ each other. So the switch proves nothing here and the mesh is the test.
 
 **These two numbers are load-bearing.** Removing the output register from `meshSwitch` -- making
 `oJ.valid`/`oJ.data` combinational in the inputs again, or putting an `oJ.ready` term back into
-`iK.ready` -- sends `mesh4x4`'s `unresolved` from zero to the hundreds. That is the regression this
+`iK.ready` -- sends `mesh`'s `unresolved` from zero to the hundreds. That is the regression this
 guards, and it is not visible from any end-to-end test: the old switch delivered flits under
 `Module.settle` perfectly well.
 -/
 
 #guard (meshSwitch 2 13).settleOrder.unresolved = []
-#guard (mesh4x4 13).settleOrder.unresolved = []
+#guard (mesh 4 13).settleOrder.unresolved = []
 
 -- Not vacuous: the mesh really does have logic to order, and a good deal of it.
 --
@@ -272,7 +272,7 @@ guards, and it is not visible from any end-to-end test: the old switch delivered
 -- delete the two copy arrays it used to need (-10 statements apiece).
 --
 -- The connections cost nothing in the IR: a combinational `setElem` lowers to a scope rebinding,
--- so the mesh is still 320 `seq.firreg`s and 7221 lines, the figures in `CircuitHdlTest/Mesh4x4`,
+-- so the mesh is still 320 `seq.firreg`s and 7221 lines, the figures in `CircuitHdlTest/Mesh`,
 -- unmoved across the whole change. What they cost is here, in the length of what gets sorted.
 --
 -- **This count is a check, not a sanity number.** A binding that quietly takes the *expression*
@@ -280,7 +280,7 @@ guards, and it is not visible from any end-to-end test: the old switch delivered
 -- -- and costs one statement per binding. Nothing else in the suite can see that: measured, by
 -- making `bindTarget` match a single index again after `mx` became two-dimensional, which
 -- reddens these two lines and leaves the mesh delivery report entirely green.
-#guard (mesh4x4 13).settleOrder.steps.length = 1920
+#guard (mesh 4 13).settleOrder.steps.length = 1920
 #guard (meshSwitch 2 13).settleOrder.steps.length = 85
 
 end CircuitHdl

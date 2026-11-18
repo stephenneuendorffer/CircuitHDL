@@ -14,7 +14,7 @@ import CircuitHdlTest.RegFile
 import CircuitHdlTest.SelectChain
 import CircuitHdlTest.MeshRoutingModel
 import CircuitHdlTest.MeshSwitch
-import CircuitHdlTest.Mesh4x4
+import CircuitHdlTest.Mesh
 
 /-!
 Umbrella module for the test suite.
@@ -60,7 +60,7 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 deadlock freedom is kernel-proved
 - `CircuitHdlTest.MeshSwitch` -- that the switch computes `xyRoute` over all 256 (position,
                                 destination) pairs, and never offers a turn the policy forbids
-- `CircuitHdlTest.Mesh4x4`   -- that the assembled mesh delivers: corner to corner in each
+- `CircuitHdlTest.Mesh`   -- that the assembled mesh delivers: corner to corner in each
                                 direction, under contention, and without interleaving two packets
                                 sharing an output. One `#eval` rather than many `#guard`s, because
                                 each command would re-lower the whole mesh

@@ -70,9 +70,9 @@ alone means kernel-only; anything named `_native.*` means the compiler is truste
 ### One `#eval` beats twenty `#guard`s on a big design
 
 **Every `#guard` is a separate evaluation, and a top-level `def` is not cached across commands.**
-Measured on `mesh4x4`: five `#guard`s touching one `lowered` definition cost 30s against 11s for
+Measured on the 4x4 mesh: five `#guard`s touching one `lowered` definition cost 30s against 11s for
 one, so each command pays the whole lowering again — about **4.8s**, against 0.25s for a simulated
-tick. The first `CircuitHdlTest/Mesh4x4.lean` was twenty assertions and took 204s, most of it
+tick. The first `CircuitHdlTest/Mesh.lean` was twenty assertions and took 204s, most of it
 rebuilding the same IR.
 
 So for anything expensive to construct, run the scenarios once inside a single `#eval` and pin a
@@ -261,7 +261,7 @@ Instances are flattened by `Module.ofItems`, so the width rules and the semantic
 existed, source order *was* the order, which is right exactly when the designer happened to write
 the datapath front to back. Every design here did, so nothing noticed for a long time.
 
-`mesh4x4` is the first design for which **no source order exists**, and the reason generalises: a
+`mesh` is the first design for which **no source order exists**, and the reason generalises: a
 switch drives `oJ.valid` downstream and reads `oJ.ready` back upstream, so for any two adjacent
 switches each must come before the other. The unit of ordering was the *process*, and a flattened
 instance is one process. Sorting at statement granularity fixes it.
@@ -332,9 +332,9 @@ is deliberate — no design has a loop, so the rule would be added without a cas
 first `meshSwitch` was combinational end to end: `oJ.data` a mux over the input flits, `iK.ready`
 an OR over the output readies. Both are reasonable in isolation and the switch simulated
 correctly on its own. In a mesh it closed a cycle in *both* directions at once —
-`mesh4x4.settleOrder.unresolved` had **672** signals. The fix is the one real routers use: each
+`(mesh 4 13).settleOrder.unresolved` had **672** signals. The fix is the one real routers use: each
 output carries a one-flit register, so every path between two switches is register to register.
-That took `mesh4x4 13` from 160 to **320 `seq.firreg`s** and about 7200 lowered operations.
+That took `mesh 4 13` from 160 to **320 `seq.firreg`s** and about 7200 lowered operations.
 The buffer deliberately does not bypass, which caps a link at one flit every two cycles and is
 what keeps `iK.ready` free of any `oJ.ready` term. Bypassing reintroduces the backward loop.
 
@@ -393,7 +393,7 @@ lets one check serve both semantics. `Module` coerces to `Sim`; `lowered m` buil
 wraps `Veir.Netlist` around it.
 
 **The first layer has now paid for itself twice over, on the mesh.** The `agree` line of
-`CircuitHdlTest/Mesh4x4.lean` runs one scenario on both and is the only check in the package that
+`CircuitHdlTest/Mesh.lean` runs one scenario on both and is the only check in the package that
 compares them directly rather than running the same assertion against each. It is worth keeping
 for a design of this size: the two semantics' failure modes for an unordered combinational read
 are a stale value and a constant zero, and neither side can tell on its own which it is doing.
@@ -475,7 +475,7 @@ with it by construction whatever it says. Measured both ways.
 
 Two mesh mutations cover the flattener's per-element connections, which replaced a renaming:
 skewing one binding (`.i[0].valid(lvalid[srcIdx(x, y, 0)])` to `srcIdx(x, y, 1)`) and making
-`instConnections` ignore direction each redden `CircuitHdlTest/Mesh4x4.lean`.
+`instConnections` ignore direction each redden `CircuitHdlTest/Mesh.lean`.
 
 **The two halves of a renaming are two code paths.** A submodule reading a bound array
 *statically* goes through `BindTarget.reindex` and one selecting from it *dynamically* through
@@ -614,15 +614,29 @@ Three files, three different kinds of claim, and they are not interchangeable:
 |---|---|---|
 | `CircuitHdl/Examples/MeshRoutingModel.lean` | XY routing has an acyclic channel dependency graph, so it cannot deadlock — at any mesh size | **kernel** (`propext`, `Quot.sound`) |
 | `CircuitHdlTest/MeshSwitch.lean` | the hardware computes that policy, and offers no turn it forbids — all 256 (position, destination) pairs | interpreter |
-| `CircuitHdlTest/Mesh4x4.lean` | packets are delivered, to the right node, without interleaving | `native_decide` via VeIR, a handful of traffic patterns |
+| `CircuitHdlTest/Mesh.lean` | packets are delivered, to the right node, without interleaving | `native_decide` via VeIR, a handful of traffic patterns at three extents |
 
-Both files are written in `module!` now. `mesh4x4` generates its sixteen instances from a `for`
+Both files are written in `module!` now. `mesh` generates its `n * n` instances from a `for`
 over the coordinates, which needed three things the loop did not have: bodies that carry items,
-instance names that index, and **bindings onto array elements** — a mesh is sixteen instances each
+instance names that index, and **bindings onto array elements** — a mesh is `n * n` instances each
 wired to a different slice of the same link arrays, which name-to-name binding cannot express.
 `meshSwitch` is written over its five ports the same way, which took it from 287 lines to 234.
 
-`mesh4x4 13` is 1920 combinational statements and 320 registers, lowering to 7214
+**The mesh is parameterized by extent, and the extent reaches the switch as a coordinate width.**
+`coordW n` is `Nat.log2 (n - 1) + 1`, not `Nat.log2 n + 1`, which would spend a bit at every
+power of two; `meshSwitch cw fw` locates the flit header around `cw` and never takes `n`, a
+switch comparing coordinates and never counting nodes. Five ports, four compass directions and
+the 25-element request matrix are properties of a switch rather than of a mesh and stay fixed.
+
+**A non-power-of-two extent makes "in bounds" a precondition rather than a consequence.** At a
+power of two, `coordW n` addresses exactly `0 .. n-1`, so every destination a header can express
+is a real node. At 3x3 it does not: a destination of 3 is expressible, `xyRoute` sends the flit
+east past the boundary into a dead stub, and the flit is lost. `validMesh` admits such an extent
+deliberately and `CircuitHdlTest/Mesh.lean` pins the loss, so the consequence cannot change
+unnoticed. Extents 2, 3 and 4 are exercised; 8 elaborates and is 64 switches, too slow for the
+suite.
+
+`mesh 4 13` is 1920 combinational statements and 320 registers, lowering to 7214
 operations -- and **those are pinned**, in the `size` line of the report rather than in prose
 here. They were prose, and drifted by 160 without anything noticing: `flatAddr` accumulated a
 flat address from a zero constant, so every one-dimensional dynamic select carried a redundant
@@ -648,7 +662,7 @@ that quietly stopped a mutation from biting would look exactly like a rewrite th
 
 - **YX instead of XY** (swap the two pairs of tests in `meshRouteUnit`): reddens six checks in
   `CircuitHdlTest/MeshSwitch.lean`, including the no-forbidden-turn obligation, and leaves
-  `CircuitHdlTest/Mesh4x4.lean` **entirely green** — both halves run, not assumed. That asymmetry
+  `CircuitHdlTest/Mesh.lean` **entirely green** — both halves run, not assumed. That asymmetry
   is the whole argument for the turn check: a YX switch in an XY mesh is the deadlock-introducing
   bug, it delivers every packet, and no amount of end-to-end testing would find it.
 - **`rel4 = take4`** — every flit releases the ejection channel instead of only the tail, so the

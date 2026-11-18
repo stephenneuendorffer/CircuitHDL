@@ -104,7 +104,7 @@ private def filled : Option State :=
 
 `Expr.select` becomes a chain of `comb.mux`, `Stmt.setDyn` a mux per element, and the array four
 `seq.firreg`s. None of that is visible from the evaluator, so this runs the scenario on both and
-compares them *directly* -- the `agree` check `CircuitHdlTest/Mesh4x4.lean` has, for the same
+compares them *directly* -- the `agree` check `CircuitHdlTest/Mesh.lean` has, for the same
 reason: the two semantics fail differently on an array, and neither can tell on its own which one
 it is doing.
 -/

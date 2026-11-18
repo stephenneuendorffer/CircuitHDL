@@ -3,12 +3,15 @@ import CircuitHdl.Syntax
 import CircuitHdl.Examples.MeshSwitch
 
 /-!
-The 4x4 mesh: sixteen `meshSwitch` instances and the links between them.
+An `n` by `n` mesh: `n * n` `meshSwitch` instances and the links between them.
 
 Written in `module!`, over a `for` that generates the instances. That was not possible until the
 loop could carry items rather than only statements, and until a port could be tied to an element
-of an array -- a mesh is sixteen instances each wired to a different slice of the same link
+of an array -- a mesh is `n * n` instances each wired to a different slice of the same link
 arrays, which is exactly what name-to-name binding cannot express.
+
+The extent reaches the switch as a coordinate width: a mesh of extent `n` addresses its
+coordinates in `coordW n` bits, and `meshSwitch` locates the flit header around that width.
 
 ### How it is wired
 
@@ -37,30 +40,55 @@ would wait forever on a port it never uses.
 Nothing is ever *sent* that way. `xyRoute` only names a direction when the destination is strictly
 beyond the current node in it, so an in-bounds destination never routes off the edge -- which is a
 property of the policy, proved in `MeshRoutingModel`, and not something the wiring enforces.
+
+### Where "in bounds" stops being automatic
+
+At a power-of-two extent, `coordW n` addresses exactly `0 .. n-1`, so every destination a header
+can express is a real node and the paragraph above needs no qualification.
+
+At any other extent it does. A 3x3 mesh uses two coordinate bits, so a destination of 3 is
+expressible and names nothing: `xyRoute` reports east while `x < dstX`, node `(2, y)` sends the
+flit past the boundary into a stub, the stub never acknowledges, and the flit is lost. `validMesh`
+admits such an extent deliberately -- a 3x3 mesh is useful and the loss requires traffic that no
+correct source generates -- and `CircuitHdlTest/Mesh.lean` pins the loss so the consequence of
+admitting it cannot change unnoticed.
 -/
 
 namespace CircuitHdl
 
 open Lean
 
-/-- The mesh is 4x4, matching `mesh4x4Model`. -/
-def meshSize : Nat := 4
+/-- Bits enough to address `0 .. n-1`.
+
+`Nat.log2 (n - 1) + 1` rather than `Nat.log2 n + 1`, which would spend a bit at every power of
+two: `coordW 4 = 2`, addressing exactly the four coordinates a 4-wide mesh has. -/
+def coordW (n : Nat) : Nat := if n ≤ 1 then 1 else Nat.log2 (n - 1) + 1
+
+/-- What a mesh of extent `n` with `fw`-bit flits requires: two coordinates and a tail marker
+have to fit in the header. Checked by the `by decide` parameter on `mesh`, so an undersized flit
+fails to elaborate rather than failing `Module.check`. -/
+def validMesh (n fw : Nat) : Bool := 2 ≤ n && 2 * coordW n + 1 ≤ fw
+
+example : validMesh 4 13 = true := rfl
+example : validMesh 2 5 = true := rfl
+example : validMesh 4 4 = false := rfl
+example : validMesh 1 8 = false := rfl
 
 /-- Nodes are numbered x-major, so `(x, y)` is one index wherever a per-node array is wanted. -/
-def nodeIdx (x y : Nat) : Nat := x * meshSize + y
+def nodeIdx (n x y : Nat) : Nat := x * n + y
 
 /-- The link out of `(x, y)` in direction `d`, as a slot in the link arrays. -/
-def lnkIdx (x y d : Nat) : Nat := nodeIdx x y * 4 + d
+def lnkIdx (n x y d : Nat) : Nat := nodeIdx n x y * 4 + d
 
 /-- How many real links there are, and so where the dead stubs begin. -/
-def meshLinks : Nat := meshSize * meshSize * 4
+def meshLinks (n : Nat) : Nat := n * n * 4
 
 /-- Where direction `d` leads from `(x, y)`, when it stays inside the mesh. -/
-def neighbour (x y d : Nat) : Option (Nat × Nat) :=
+def neighbour (n x y d : Nat) : Option (Nat × Nat) :=
   match d with
-  | 0 => if x + 1 < meshSize then some (x + 1, y) else none
+  | 0 => if x + 1 < n then some (x + 1, y) else none
   | 1 => if 0 < x then some (x - 1, y) else none
-  | 2 => if y + 1 < meshSize then some (x, y + 1) else none
+  | 2 => if y + 1 < n then some (x, y + 1) else none
   | 3 => if 0 < y then some (x, y - 1) else none
   | _ => none
 
@@ -74,19 +102,20 @@ space, which is why `meshLinks` is where the halves meet.
 Named rather than spelled out because it is wanted in two places -- here, so an edge input has
 something to read, and in the design, so the stub can be tied off -- and the two have to agree.
 `meshLinks + lnkIdx x y d` written twice is the same fact stated twice. -/
-def stubIdx (x y d : Nat) : Nat := meshLinks + lnkIdx x y d
+def stubIdx (n x y d : Nat) : Nat := meshLinks n + lnkIdx n x y d
 
 /-- The slot input `d` of `(x, y)` reads: the neighbour's opposite output, or -- at the boundary --
 a dead stub of its own, so that every input binds the same way and only the index differs. -/
-def srcIdx (x y d : Nat) : Nat :=
-  match neighbour x y d with
-  | some (nx, ny) => lnkIdx nx ny (opposite d)
-  | none => stubIdx x y d
+def srcIdx (n x y d : Nat) : Nat :=
+  match neighbour n x y d with
+  | some (nx, ny) => lnkIdx n nx ny (opposite d)
+  | none => stubIdx n x y d
 
 /-- Does direction `d` leave the mesh at `(x, y)`? -/
-def isEdge (x y d : Nat) : Bool := (neighbour x y d).isNone
+def isEdge (n x y d : Nat) : Bool := (neighbour n x y d).isNone
 
-/-- The 4x4 mesh of wormhole switches. `fw` is the flit width; bits 0 to 4 are the header.
+/-- An `n` by `n` mesh of wormhole switches. `fw` is the flit width; the low `2 * coordW n + 1`
+bits are the header, which is what `validMesh` requires room for.
 
 Injection and ejection are array ports, one element per node, indexed by `nodeIdx`.
 
@@ -94,64 +123,65 @@ Thirty bindings per instance are written out rather than generated, and that is 
 reads worse than the Lean function it replaces: a binding list is a list in the *syntax*, where a
 loop generates items. Everything else -- the link arrays, the sixteen instances, the coordinates,
 the edge tie-offs -- is a loop over an index. -/
-module! mesh4x4 #[(fw : Nat)]
-    (clk : 1, rst : 1, slave inj[16] : axis fw) -> (master ej[16] : axis fw) {
+module! mesh #[(n fw : Nat) (_h : validMesh n fw = true := by decide)]
+    (clk : 1, rst : 1, slave inj[n * n] : axis fw) -> (master ej[n * n] : axis fw) {
+  let cw := coordW n;
   -- Every link, and a dead stub for every direction that leaves the mesh.
-  wire lvalid[128] : 1;
-  wire lready[128] : 1;
-  wire ldata[128] : fw;
+  wire lvalid[2 * meshLinks n] : 1;
+  wire lready[2 * meshLinks n] : 1;
+  wire ldata[2 * meshLinks n] : fw;
 
   -- Each switch's own coordinates, as constants it can compare against. Indexed by the
   -- coordinates themselves, so there is no arithmetic left to get wrong: `mx[n] = n / 4` over a
   -- flat sixteen was the node index being taken apart again, one statement after `nodeIdx` put
   -- it together.
-  wire mx[4][4] : 2;
-  wire my[4][4] : 2;
-  for x < 4 {
-    for y < 4 {
+  wire mx[n][n] : cw;
+  wire my[n][n] : cw;
+  for x < n {
+    for y < n {
       assign mx[x][y] = x;
       assign my[x][y] = y;
     }
   }
 
-  for x < 4 {
-    for y < 4 {
+  for x < n {
+    for y < n {
       -- A direction that leaves the mesh: its stub offers nothing, and the real link out of it
       -- holds `ready` high, because no neighbour is there to drive it.
       for d < 4 {
-        if isEdge(x, y, d) {
-          assign lvalid[stubIdx(x, y, d)] = 0;
-          assign ldata[stubIdx(x, y, d)] = 0;
-          assign lready[lnkIdx(x, y, d)] = 1;
+        if isEdge(n, x, y, d) {
+          assign lvalid[stubIdx(n, x, y, d)] = 0;
+          assign ldata[stubIdx(n, x, y, d)] = 0;
+          assign lready[lnkIdx(n, x, y, d)] = 1;
         } else { }
       }
 
-      (meshSwitch 2 fw) sw[nodeIdx(x, y)] (
+      (meshSwitch cw fw) sw[nodeIdx(n, x, y)] (
         .clk(clk), .rst(rst),
         .myX(mx[x][y]), .myY(my[x][y]),
         -- The four sides: each input reads the neighbour's opposite output, each output drives
         -- this node's own link.
-        .i[0].valid(lvalid[srcIdx(x, y, 0)]), .i[0].ready(lready[srcIdx(x, y, 0)]),
-        .i[0].data(ldata[srcIdx(x, y, 0)]),
-        .i[1].valid(lvalid[srcIdx(x, y, 1)]), .i[1].ready(lready[srcIdx(x, y, 1)]),
-        .i[1].data(ldata[srcIdx(x, y, 1)]),
-        .i[2].valid(lvalid[srcIdx(x, y, 2)]), .i[2].ready(lready[srcIdx(x, y, 2)]),
-        .i[2].data(ldata[srcIdx(x, y, 2)]),
-        .i[3].valid(lvalid[srcIdx(x, y, 3)]), .i[3].ready(lready[srcIdx(x, y, 3)]),
-        .i[3].data(ldata[srcIdx(x, y, 3)]),
-        .o[0].valid(lvalid[lnkIdx(x, y, 0)]), .o[0].ready(lready[lnkIdx(x, y, 0)]),
-        .o[0].data(ldata[lnkIdx(x, y, 0)]),
-        .o[1].valid(lvalid[lnkIdx(x, y, 1)]), .o[1].ready(lready[lnkIdx(x, y, 1)]),
-        .o[1].data(ldata[lnkIdx(x, y, 1)]),
-        .o[2].valid(lvalid[lnkIdx(x, y, 2)]), .o[2].ready(lready[lnkIdx(x, y, 2)]),
-        .o[2].data(ldata[lnkIdx(x, y, 2)]),
-        .o[3].valid(lvalid[lnkIdx(x, y, 3)]), .o[3].ready(lready[lnkIdx(x, y, 3)]),
-        .o[3].data(ldata[lnkIdx(x, y, 3)]),
+        .i[0].valid(lvalid[srcIdx(n, x, y, 0)]), .i[0].ready(lready[srcIdx(n, x, y, 0)]),
+        .i[0].data(ldata[srcIdx(n, x, y, 0)]),
+        .i[1].valid(lvalid[srcIdx(n, x, y, 1)]), .i[1].ready(lready[srcIdx(n, x, y, 1)]),
+        .i[1].data(ldata[srcIdx(n, x, y, 1)]),
+        .i[2].valid(lvalid[srcIdx(n, x, y, 2)]), .i[2].ready(lready[srcIdx(n, x, y, 2)]),
+        .i[2].data(ldata[srcIdx(n, x, y, 2)]),
+        .i[3].valid(lvalid[srcIdx(n, x, y, 3)]), .i[3].ready(lready[srcIdx(n, x, y, 3)]),
+        .i[3].data(ldata[srcIdx(n, x, y, 3)]),
+        .o[0].valid(lvalid[lnkIdx(n, x, y, 0)]), .o[0].ready(lready[lnkIdx(n, x, y, 0)]),
+        .o[0].data(ldata[lnkIdx(n, x, y, 0)]),
+        .o[1].valid(lvalid[lnkIdx(n, x, y, 1)]), .o[1].ready(lready[lnkIdx(n, x, y, 1)]),
+        .o[1].data(ldata[lnkIdx(n, x, y, 1)]),
+        .o[2].valid(lvalid[lnkIdx(n, x, y, 2)]), .o[2].ready(lready[lnkIdx(n, x, y, 2)]),
+        .o[2].data(ldata[lnkIdx(n, x, y, 2)]),
+        .o[3].valid(lvalid[lnkIdx(n, x, y, 3)]), .o[3].ready(lready[lnkIdx(n, x, y, 3)]),
+        .o[3].data(ldata[lnkIdx(n, x, y, 3)]),
         -- Local injection and ejection.
-        .i[4].valid(inj[nodeIdx(x, y)].valid), .i[4].ready(inj[nodeIdx(x, y)].ready),
-        .i[4].data(inj[nodeIdx(x, y)].data),
-        .o[4].valid(ej[nodeIdx(x, y)].valid), .o[4].ready(ej[nodeIdx(x, y)].ready),
-        .o[4].data(ej[nodeIdx(x, y)].data));
+        .i[4].valid(inj[nodeIdx(n, x, y)].valid), .i[4].ready(inj[nodeIdx(n, x, y)].ready),
+        .i[4].data(inj[nodeIdx(n, x, y)].data),
+        .o[4].valid(ej[nodeIdx(n, x, y)].valid), .o[4].ready(ej[nodeIdx(n, x, y)].ready),
+        .o[4].data(ej[nodeIdx(n, x, y)].data));
     }
   }
 }

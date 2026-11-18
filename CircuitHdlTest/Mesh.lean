@@ -1,7 +1,7 @@
 import CircuitHdlTest.FifoHarness
 
 /-!
-End-to-end tests for the 4x4 mesh.
+End-to-end tests for the mesh, at three extents.
 
 `CircuitHdlTest.MeshRoutingModel` proves the policy cannot deadlock and `CircuitHdlTest.MeshSwitch`
 proves the hardware computes that policy. Neither says a packet ever arrives: a switch that routed
@@ -10,7 +10,7 @@ also where the *wormhole* property is checked, which the model deliberately says
 the model is a theory of which channels a packet may request, not of how a packet is cut into
 flits.
 
-Everything here runs on `lowered (mesh4x4 13)`, the netlist built by `CircuitHdl.Circt` and
+Everything here runs on `lowered (mesh 4 13)`, the netlist built by `CircuitHdl.Circt` and
 simulated by VeIR, rather than on `Module.sim`. That is the more expensive of the two and it is
 the right default for this design: the mesh is the first thing in the package whose two semantics
 ever *disagreed*, and the netlist is the side that was right. The `agree` line of the report
@@ -43,20 +43,27 @@ open Lean
 
 /-! ### Flits
 
-`{ payload, tail, dstY, dstX }`, destination in the low bits, tail at bit 4. Every flit of a
-packet repeats the destination; see `MeshSwitch` for why the allocator depends on that.
+`{ payload, tail, dstY, dstX }`, destination in the low bits and the tail marker above it. Each
+coordinate occupies `cw` bits, so the layout follows the mesh extent exactly as `meshSwitch`'s
+header slices do. Every flit of a packet repeats the destination; see `MeshSwitch` for why the
+allocator depends on that.
 -/
 
 /-- One flit for `(dx, dy)`, carrying `payload`, marked as a tail or not. -/
-def flitTo (dx dy payload : Nat) (tail : Bool) : Nat :=
-  payload * 32 + (if tail then 16 else 0) + dy * 4 + dx
+def flitTo (cw dx dy payload : Nat) (tail : Bool) : Nat :=
+  payload * 2 ^ (2 * cw + 1) + (if tail then 2 ^ (2 * cw) else 0) + dy * 2 ^ cw + dx
 
 /-- A single-flit packet is its own head and tail. -/
-def soloFlit (dx dy payload : Nat) : Nat := flitTo dx dy payload true
+def soloFlit (cw dx dy payload : Nat) : Nat := flitTo cw dx dy payload true
+
+-- The 4x4 layout the scenarios below use, unchanged: `payload * 32 + tail * 16 + dy * 4 + dx`.
+example : flitTo 2 1 2 3 true = 3 * 32 + 16 + 2 * 4 + 1 := rfl
 
 private def meshW : Nat := 13
-private def meshNodes : List (Nat × Nat) :=
-  (List.range 4).flatMap fun x => (List.range 4).map fun y => (x, y)
+
+/-- Every node of an `n` by `n` mesh, x-major, which is the order `nodeIdx` numbers them in. -/
+private def meshNodes (n : Nat) : List (Nat × Nat) :=
+  (List.range n).flatMap fun x => (List.range n).map fun y => (x, y)
 
 -- Injection and ejection are *array ports*: one array per field, one element per node, indexed by
 -- `nodeIdx`. A port of node `(x, y)` is therefore a place inside a cell and not a name of its own,
@@ -64,16 +71,14 @@ private def meshNodes : List (Nat × Nat) :=
 -- reads results with `valueAt?` rather than `valueOf?`.
 -- The shapes, so an element can be read out of the flat cell it lives in. A `Sim` does not
 -- carry them -- it is just init/settle/step -- so the driver takes them from the design.
-private def meshArrays : List (Name × List Nat × Nat) := (mesh4x4 meshW).allArrays
+private def ejValidAt (n x y : Nat) : Signal := .elem `ej.valid [nodeIdx n x y]
+private def ejDataAt (n x y : Nat) : Signal := .elem `ej.data [nodeIdx n x y]
+private def injReadyAt (n x y : Nat) : Signal := .elem `inj.ready [nodeIdx n x y]
 
-private def ejValidAt (x y : Nat) : Signal := .elem `ej.valid [nodeIdx x y]
-private def ejDataAt (x y : Nat) : Signal := .elem `ej.data [nodeIdx x y]
-private def injReadyAt (x y : Nat) : Signal := .elem `inj.ready [nodeIdx x y]
-
-/-- One array port's worth of values, in `nodeIdx` order. `meshNodes` is x-major and `nodeIdx` is
-`x * 4 + y`, so the list is already in element order. -/
-private def perNode (w : Nat) (f : Nat → Nat → Nat) : Cell :=
-  .mem (meshNodes.map fun (x, y) => Value.ofNat w (f x y))
+/-- One array port's worth of values, in `nodeIdx` order. `meshNodes` is x-major and `nodeIdx n`
+is `x * n + y`, so the list is already in element order. -/
+private def perNode (n w : Nat) (f : Nat → Nat → Nat) : Cell :=
+  .mem ((meshNodes n).map fun (x, y) => Value.ofNat w (f x y))
 
 /-! ### The driver
 
@@ -92,28 +97,37 @@ abbrev SourceQueue := (Nat × Nat) × List Nat
 private def pendingAt (qs : List SourceQueue) (x y : Nat) : Option Nat :=
   (qs.lookup (x, y)).bind List.head?
 
-/-- Drive `qs` into the mesh for `ticks` cycles, collecting every ejection. -/
-def runMesh (s : Sim) (qs : List SourceQueue) (ticks : Nat) :
-    Except EvalError (List (Nat × Nat × Nat)) := do
+/-- Drive `qs` into an `n` by `n` mesh of `fw`-bit flits for `ticks` cycles, collecting every
+ejection. `arrs` are the design's array shapes, which a `Sim` does not carry -- a `Sim` is
+init/settle/step and nothing else -- so the caller takes them from the design. -/
+def runMesh (n fw : Nat) (arrs : List (Name × List Nat × Nat)) (s : Sim) (qs : List SourceQueue)
+    (ticks : Nat) : Except EvalError (List (Nat × Nat × Nat)) := do
   let mut σ := s.init
   let mut queues := qs
   let mut out : List (Nat × Nat × Nat) := []
   for _ in List.range ticks do
     let ins : State :=
       [ (`rst, Cell.sig (Value.ofNat 1 0)),
-        (`inj.valid, perNode 1 fun x y => if (pendingAt queues x y).isSome then 1 else 0),
-        (`inj.data, perNode meshW fun x y => (pendingAt queues x y).getD 0),
-        (`ej.ready, perNode 1 fun _ _ => 1) ]
+        (`inj.valid, perNode n 1 fun x y => if (pendingAt queues x y).isSome then 1 else 0),
+        (`inj.data, perNode n fw fun x y => (pendingAt queues x y).getD 0),
+        (`ej.ready, perNode n 1 fun _ _ => 1) ]
     let σs ← s.settle (σ.apply ins)
     -- Ejections this cycle. `ready` is held high, so a raised `valid` *is* a transfer.
-    for (x, y) in meshNodes do
-      if σs.valueAt? meshArrays (ejValidAt x y) == some 1 then
-        out := out ++ [(x, y, (σs.valueAt? meshArrays (ejDataAt x y)).getD 0)]
+    for (x, y) in meshNodes n do
+      if σs.valueAt? arrs (ejValidAt n x y) == some 1 then
+        out := out ++ [(x, y, (σs.valueAt? arrs (ejDataAt n x y)).getD 0)]
     -- Retire an injected flit the switch accepted.
     queues := queues.map fun (node, fs) =>
-      if σs.valueAt? meshArrays (injReadyAt node.1 node.2) == some 1 then (node, fs.drop 1) else (node, fs)
+      if σs.valueAt? arrs (injReadyAt n node.1 node.2) == some 1 then (node, fs.drop 1)
+      else (node, fs)
     σ ← s.stepClock `clk σ ins
   return out
+
+/-- The 4x4 mesh every scenario below drives, and its shapes. -/
+private def mesh4 : Module := mesh 4 meshW
+private def run4 (s : Sim) (qs : List SourceQueue) (ticks : Nat) :
+    Except EvalError (List (Nat × Nat × Nat)) :=
+  runMesh 4 meshW mesh4.allArrays s qs ticks
 
 /-! ### The scenarios
 
@@ -158,7 +172,7 @@ Each is named, and each line of the report is one of them.
 
 /-- Three flits for `(dx, dy)`, all tagged `tag`, the last one marked tail. -/
 private def packet (dx dy tag : Nat) : List Nat :=
-  [flitTo dx dy tag false, flitTo dx dy tag false, flitTo dx dy tag true]
+  [flitTo 2 dx dy tag false, flitTo 2 dx dy tag false, flitTo 2 dx dy tag true]
 
 /-- `name: ok`, or `name: <what actually happened>`. Reporting the value rather than `false` is
 what makes a mutation identify itself rather than merely reddening the file. -/
@@ -175,18 +189,18 @@ private def tagsOf (es : List (Nat × Nat × Nat)) : List Nat :=
 /-- Run every scenario against one `lowered` mesh. Split from `meshReport` only so the lowering
 is shared across all of them; `meshReport` is what the `#eval` sees. -/
 private def runScenarios : Except EvalError String := do
-  let net := lowered (mesh4x4 meshW)
-  let ne ← runMesh net [((0, 0), [soloFlit 3 3 9])] 24
-  let sw ← runMesh net [((3, 3), [soloFlit 0 0 5])] 24
-  let selfEject ← runMesh net [((1, 2), [soloFlit 1 2 4])] 12
-  let contend ← runMesh net [((0, 0), [soloFlit 2 0 1]), ((0, 1), [soloFlit 2 0 2])] 20
-  let worm ← runMesh net [((0, 0), packet 2 0 1), ((0, 1), packet 2 0 2)] 28
-  let agreeNet ← runMesh net [((0, 0), [soloFlit 1 1 6])] 10
-  let agreeMod ← runMesh (mesh4x4 meshW) [((0, 0), [soloFlit 1 1 6])] 10
+  let net := lowered mesh4
+  let ne ← run4 net [((0, 0), [soloFlit 2 3 3 9])] 24
+  let sw ← run4 net [((3, 3), [soloFlit 2 0 0 5])] 24
+  let selfEject ← run4 net [((1, 2), [soloFlit 2 1 2 4])] 12
+  let contend ← run4 net [((0, 0), [soloFlit 2 2 0 1]), ((0, 1), [soloFlit 2 2 0 2])] 20
+  let worm ← run4 net [((0, 0), packet 2 0 1), ((0, 1), packet 2 0 2)] 28
+  let agreeNet ← run4 net [((0, 0), [soloFlit 2 1 1 6])] 10
+  let agreeMod ← run4 mesh4 [((0, 0), [soloFlit 2 1 1 6])] 10
   return String.intercalate "\n"
-    [ line "corner-NE" ne [(3, 3, soloFlit 3 3 9)]
-    , line "corner-SW" sw [(0, 0, soloFlit 0 0 5)]
-    , line "self-eject" selfEject [(1, 2, soloFlit 1 2 4)]
+    [ line "corner-NE" ne [(3, 3, soloFlit 2 3 3 9)]
+    , line "corner-SW" sw [(0, 0, soloFlit 2 0 0 5)]
+    , line "self-eject" selfEject [(1, 2, soloFlit 2 1 2 4)]
     , line "one-destination" (nodesOf ne) [(3, 3)]
     , line "contend-arrive" ((tagsOf contend).mergeSort (· ≤ ·)) [1, 2]
     , line "contend-place" (nodesOf contend) [(2, 0), (2, 0)]
@@ -195,12 +209,12 @@ private def runScenarios : Except EvalError String := do
     , line "wormhole-order" (tagsOf worm) [1, 1, 1, 2, 2, 2]
     , line "agree" agreeMod agreeNet
       -- …and not vacuously equal on two empty traces.
-    , line "agree-delivered" agreeNet [(1, 1, soloFlit 1 1 6)]
+    , line "agree-delivered" agreeNet [(1, 1, soloFlit 2 1 1 6)]
     , line "one-clock"
-        ((mesh4x4 meshW).singleClocked,
-         ((mesh4x4 meshW).clockDomains.flatMap Prod.snd).eraseDups) (true, [`clk])
+        (mesh4.singleClocked,
+         (mesh4.clockDomains.flatMap Prod.snd).eraseDups) (true, [`clk])
     , line "lowers"
-        ((mesh4x4 8).check.toOption.isSome && (mesh4x4 8).toVeir.toOption.isSome) true
+        ((mesh 4 8).check.toOption.isSome && (mesh 4 8).toVeir.toOption.isSome) true
       -- The size, as a *check* rather than as prose. It was prose -- in this file's header and in
       -- AGENTS.md -- and it drifted by 160 operations without anything noticing: `flatAddr`
       -- accumulated a flat address from a zero constant, so every one-dimensional dynamic select
@@ -213,8 +227,59 @@ private def runScenarios : Except EvalError String := do
       -- The numbers are allowed to move. What they are not allowed to do is move *silently*: a
       -- change here means the backend emits different hardware for the same design, and that is
       -- worth a sentence in whatever commit does it.
-    , line "size" ((VeirBridge.of (mesh4x4 meshW)).map (fun b => (b.info.regs.size, b.info.ops.size)))
+    , line "size" ((VeirBridge.of mesh4).map (fun b => (b.info.regs.size, b.info.ops.size)))
         (some (320, 7214)) ]
+
+/-! ### Other extents
+
+The 4x4 above is the design's working size. Two more extents cover what varies with `n`, each in
+its own evaluation because each builds a different netlist.
+
+A 2x2 is the only extent with `cw = 1`, where a coordinate is a single bit and the header
+occupies three. A 3x3 is the smallest extent where `cw` over-addresses: two bits express a
+destination of 3, which names nothing on a 3-wide mesh.
+-/
+
+private def run2 (s : Sim) (qs : List SourceQueue) (ticks : Nat) :
+    Except EvalError (List (Nat × Nat × Nat)) :=
+  runMesh 2 5 (mesh 2 5).allArrays s qs ticks
+
+private def run3 (s : Sim) (qs : List SourceQueue) (ticks : Nat) :
+    Except EvalError (List (Nat × Nat × Nat)) :=
+  runMesh 3 meshW (mesh 3 meshW).allArrays s qs ticks
+
+/-- Corner to corner on a 2x2, which turns once: X to `(1, 0)`, then Y to `(1, 1)`. -/
+private def report2 : String :=
+  match run2 (lowered (mesh 2 5)) [((0, 0), [soloFlit 1 1 1 3])] 12 with
+  | .ok r => if r == [(1, 1, soloFlit 1 1 1 3)] then "2x2 corner: ok" else s!"2x2 corner: {r}"
+  | .error _ => "2x2 corner: the mesh did not settle"
+
+/-- info: 2x2 corner: ok -/
+#guard_msgs in #eval IO.println report2
+
+/-- Corner to corner on a 3x3, and then the flit a two-bit coordinate can express and a 3-wide
+mesh cannot deliver.
+
+The second line is the **consequence of admitting a non-power-of-two extent**, pinned rather
+than relied upon: `xyRoute` reports east while `x < dstX`, so node `(2, y)` sends the flit past
+the boundary into a dead stub, which never acknowledges. The flit is lost, and the trace is
+empty. `validMesh` admits the extent anyway, since a 3x3 mesh is useful and the loss requires
+traffic no correct source generates -- but a change making such a flit arrive, or making it
+deadlock the mesh instead of vanishing, should fail here and be explained. -/
+private def report3 : String :=
+  let net := lowered (mesh 3 meshW)
+  match run3 net [((0, 0), [soloFlit 2 2 2 7])] 16, run3 net [((0, 0), [soloFlit 2 3 0 9])] 16 with
+  | .ok inRange, .ok offMesh =>
+      String.intercalate "\n"
+        [ if inRange == [(2, 2, soloFlit 2 2 2 7)] then "3x3 corner: ok" else s!"3x3 corner: {inRange}",
+          if offMesh == [] then "3x3 off-mesh destination: lost" else s!"3x3 off-mesh: {offMesh}" ]
+  | _, _ => "3x3: the mesh did not settle"
+
+/--
+info: 3x3 corner: ok
+3x3 off-mesh destination: lost
+-/
+#guard_msgs in #eval IO.println report3
 
 /-- Every scenario, in one evaluation, so the IR is built once.
 

@@ -404,7 +404,7 @@ An instance in a loop needs an indexed name, since two iterations sharing one wo
 every local the submodule has. A binding may name an **element** of an array, which is not a name
 at all — flattening maps it so that a read of the bound port becomes an element read and a write
 an element write. That is what makes a mesh expressible: sixteen instances each wired to a
-different slice of the same link arrays. `Examples/Mesh4x4.lean` is written this way.
+different slice of the same link arrays. `Examples/Mesh.lean` is written this way.
 
 An array **port** is `n` wires per field at the boundary and one **array** inside. `i[k].valid`
 is element `k` — the index between the port and the field, because an array of interface ports is
