@@ -16,6 +16,7 @@ import CircuitHdlTest.Fifo.ShiftNetlist
 import CircuitHdlTest.Fifo.Pipe
 import CircuitHdlTest.Fifo.Imported
 import CircuitHdlTest.Fifo.Firrtl
+import CircuitHdlTest.Fifo.Verilog
 import CircuitHdlTest.Grid
 import CircuitHdlTest.RegFile
 import CircuitHdlTest.SelectChain
@@ -54,12 +55,13 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 dense prefix and the gaps between words are permanent
 - `CircuitHdlTest.Fifo.Imported` -- driving a `hw.module` this package did not build: the
                                 boundary, the bridge to `Veir.Netlist`, and the abstraction
-                                functions a compiled design needs
-- `CircuitHdlTest.Fifo.Firrtl` -- a shift FIFO written in FIRRTL and compiled by `firtool`,
-                                refining the same two models. The only design in the suite that
-                                neither `module!` elaborated nor `CircuitHdl.Circt` lowered, and
-                                so the only evidence that the two models describe FIFOs rather
-                                than this language's FIFOs
+                                functions the two files below share
+- `CircuitHdlTest.Fifo.Firrtl` -- a shift FIFO written in FIRRTL and compiled by `firtool`
+- `CircuitHdlTest.Fifo.Verilog` -- the same FIFO in SystemVerilog, compiled by `circt-verilog`.
+                                Between them the only designs in the suite that neither `module!`
+                                elaborated nor `CircuitHdl.Circt` lowered, and so the only
+                                evidence that the two models describe FIFOs rather than this
+                                language's FIFOs
 - `CircuitHdlTest.Grid`      -- the 4x4 grid: that a dynamic index in two dimensions lands where
                              --   it should, and that one outside its dimension is caught
 - `CircuitHdlTest.RegFile`   -- the register file: that a dynamic index reads and writes where it
@@ -86,10 +88,11 @@ functions, a different semantics underneath, and one written in another reposito
 proofs to something that would be synthesised. `scripts/arccheck.sh` is the layer below them, and
 is not run by `lake test`; `AGENTS.md` says why.
 
-`Fifo.Firrtl` moves the same checks one step further out, to a design this package did not write:
-the harness, the schedules and both models are the same expressions, and the circuit under them
-was compiled from FIRRTL by `firtool`. `scripts/firrtl.sh` regenerates its committed MLIR and is
-likewise not run by `lake test`.
+`Fifo.Firrtl` and `Fifo.Verilog` move the same checks one step further out, to designs this
+package did not write: the harness, the schedules and both models are the same expressions, and
+the circuits under them were compiled by `firtool` and by `circt-verilog`. `scripts/firrtl.sh` and
+`scripts/verilog.sh` regenerate their committed MLIR and are likewise not run by `lake test` --
+the second needs the devcontainer, since no CIRCT that runs on this host can read Verilog.
 
 The FIFO results are split across sibling modules (`Fifo.{Shift, ShiftNetlist}` and
 `Fifo.{Async, AsyncRefinement, AsyncNetlist}`, over a shared `Fifo.*Designs`) so they elaborate

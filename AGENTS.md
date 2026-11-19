@@ -57,7 +57,6 @@ result that reads as success:
   up-to-date modules, so the log looks plausible. Delete the test build directories explicitly and
   check the job count.
 
-
 ## Tests are compile-time, and a test is not a proof
 
 A green build *is* a passing run. There is no runner. But the forms differ in what they buy:
@@ -519,9 +518,25 @@ the chain's shape, not a behaviour that was chosen and could be chosen different
 
 `ruw` other than `old`, `wuw` other than `port_order`, a non-zero read latency or a write latency
 other than one, `seq.firmem.read_write_port`, an asynchronous reset, a `preset`, a clock that is
-not a `seq.to_clock` of a block argument, a wrong number of arguments, and any operand used before
-it is defined. Each is a real CIRCT behaviour it does not model, and it returns `none` rather than
+not a `seq.to_clock` of a block argument, a wrong number of arguments, and a **combinational
+cycle**. Each is a real CIRCT behaviour it does not model, and it returns `none` rather than
 simulating something else.
+
+**An operand used before it is defined used to be on that list and is not any more.** `hw.module`
+is a graph region, so a forward reference is legal and frontends emit them -- `circt-verilog` puts
+`comb.and %s_valid, %6` six lines above `%6`. `Veir.Netlist.Info.of` now sorts the operations into
+dependency order once, and `settle` walks that rather than program order, so a well-formed module
+is simulated whatever order it was written in and only a genuine cycle -- which has no dependency
+order at all -- is refused. A module already written front to back takes a linear check and keeps
+its order untouched, which is every module `Circt.lean` and `firtool` produce, so nothing about
+how an existing design is simulated moved.
+
+Two details of that sort are load-bearing and easy to undo by accident. Consecutive
+`seq.firmem.write_port`s are chained so the sort cannot reorder them relative to each other:
+`settle` collects pending writes in the order it walks and `stepClock` applies them in that order,
+which *is* `wuw = port_order`. And `seq.firreg`/`seq.firmem` results are deliberately **not**
+dependencies -- a register's result is seeded from `State` before the pass -- which is exactly what
+leaves register feedback acyclic and keeps one forward pass sufficient.
 
 **`isAsync` and `preset` were listed in that paragraph before they were implemented.** The header
 said they were refused; the code did not check, so a `seq.firreg` with an asynchronous reset would
@@ -632,7 +647,7 @@ design that reaches an operation none of the current entries do.
 agree over 171 observations. Worth knowing before anyone decides the name attribute needs
 sanitising.
 
-### A FIFO the package did not write
+### Two FIFOs the package did not write
 
 Every other design in the suite was elaborated by `module!` and lowered by `Circt.lean`, including
 the netlist theorems -- which is a ceiling on what they can establish. They say the lowering
@@ -641,9 +656,24 @@ describe FIFOs or describe what this lowering produces. `CircuitHdlTest/Fifo/Fir
 same harness, schedules, depth and models over a shift FIFO written in FIRRTL and compiled by
 `firtool`, with nothing of this package on the path from source to circuit.
 
-The design follows the Verilog in `Examples/Fifo/Shift.lean`'s docstring rather than the
-`module!` source -- four separately named registers rather than an array -- which is why its
-abstraction function is its own, in `CircuitHdlTest/Fifo/Imported.lean`.
+**Verilog needs the devcontainer, and that is why `.devcontainer/` exists.** `circt-verilog`
+is built on slang and appears only in CIRCT releases from 1.123.0 on, which want glibc 2.36
+(`GLIBC_ABI_DT_RELR`) and libstdc++ from GCC 13 (`GLIBCXX_3.4.31`); this host is Ubuntu 22.04 with
+2.35 and 3.4.30. The releases old enough to run here were built *without* slang and contain no
+`circt-verilog` at all -- measured on the full distributions of 1.113.0 and 1.122.0, which carry
+only the `ImportVerilog.h` header. So no prebuilt CIRCT both runs here and reads Verilog, and
+`scripts/verilog.sh` runs the compiler in the container instead. `scripts/firrtl.sh` needs no
+container: `firtool` reads FIRRTL and the installed 1.113.0 is fine.
+
+Both designs follow the Verilog in `Examples/Fifo/Shift.lean`'s docstring rather than the
+`module!` source -- four separately named registers rather than an array -- which is why they
+share an abstraction function of their own in `CircuitHdlTest/Fifo/Imported.lean`.
+
+**They cover different ground and neither subsumes the other.** firtool folds `mux(rst, 0, ..)`
+into a `seq.firreg` with a *synchronous reset operand*, a field `Circt.lean` never emits and
+nothing else here interprets. `circt-verilog` instead emits a module body in **no dependency
+order** -- `comb.and %s_valid, %6` six lines above `%6` -- which `Circt.lean` and `firtool` never
+do, and which is what the topological sort in `Veir.Netlist.Info.of` exists for.
 
 `scripts/firrtl.sh` compiles the `.fir` files and diffs against the committed `.mlir`. Those are
 build products, committed because `lake test` has to work against a bare toolchain, and therefore
