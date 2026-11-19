@@ -4,10 +4,15 @@ import CircuitHdlTest.Syntax
 import CircuitHdlTest.Semantics
 import CircuitHdlTest.Clocks
 import CircuitHdlTest.SettleOrder
+import CircuitHdlTest.Fifo.AsyncDesigns
 import CircuitHdlTest.Fifo.Async
+import CircuitHdlTest.Fifo.AsyncRefinement
+import CircuitHdlTest.Fifo.AsyncNetlist
 import CircuitHdlTest.Circt
 import CircuitHdlTest.FifoHarness
+import CircuitHdlTest.Fifo.ShiftDesigns
 import CircuitHdlTest.Fifo.Shift
+import CircuitHdlTest.Fifo.ShiftNetlist
 import CircuitHdlTest.Fifo.Pipe
 import CircuitHdlTest.Grid
 import CircuitHdlTest.RegFile
@@ -70,4 +75,9 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
 functions, a different semantics underneath, and one written in another repository. Those results are what connect the
 proofs to something that would be synthesised. `scripts/arccheck.sh` is the layer below them, and
 is not run by `lake test`; `AGENTS.md` says why.
+
+The FIFO results are split across sibling modules (`Fifo.{Shift, ShiftNetlist}` and
+`Fifo.{Async, AsyncRefinement, AsyncNetlist}`, over a shared `Fifo.*Designs`) so they elaborate
+concurrently rather than serially; `lake test` costs about what its slowest single module costs.
+`lake build CircuitHdlQuick` builds the subset that runs no schedule family.
 -/

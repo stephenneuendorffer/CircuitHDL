@@ -37,6 +37,27 @@ not exist; use `Nat.le_of_eq`.
 **VeIR is on the proving path.** The netlist refinement theorems execute `Veir.Netlist`, so a
 change in `../veir` can turn them red, and a rebuild there is ~2.5 minutes before you see it.
 
+### What `lake test` costs, and why the test tree is shaped the way it is
+
+`lake` elaborates modules concurrently but a single module serially, so `lake test` costs about
+what its slowest module costs. The refinement results for each FIFO therefore sit in **sibling**
+modules importing a cheap `*Designs` module rather than each other: two modules elaborate
+concurrently only if neither imports the other, so a two-way split where the netlist half imported
+the source-level half would have bought nothing. `lake build CircuitHdlQuick` is the subset that
+runs no schedule family, and is not a substitute -- `CircuitHdlQuick.lean` says what it omits.
+
+**Do not trust a single wall-clock measurement on this host.** It is shared, and unchanged modules
+were measured sevenfold apart between runs (`CircuitHdlTest.Mesh` at 688s then 98s,
+`CircuitHdlTest.Fifo.Shift` at 31s then 233s). Two traps cost time here, and each produces a
+result that reads as success:
+
+- `touch` invalidates nothing, since lake traces content hashes rather than mtimes.
+- `lake clean` leaves `.lake/build/lib/lean/CircuitHdlTest/` in place, so a "full rebuild" can
+  rebuild only the library. Lake writing to a pipe rather than a TTY prints nothing at all for the
+  up-to-date modules, so the log looks plausible. Delete the test build directories explicitly and
+  check the job count.
+
+
 ## Tests are compile-time, and a test is not a proof
 
 A green build *is* a passing run. There is no runner. But the forms differ in what they buy:
