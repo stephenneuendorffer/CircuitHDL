@@ -21,6 +21,14 @@ name = "CircuitHdl"
 [[lean_lib]]
 name = "CircuitHdlTest"
 
+# The quick subset, for iterating on the language rather than on a design: everything in the test
+# tree that does not run a bounded refinement family. `lake build CircuitHdlQuick` is about a
+# minute against roughly ten for `lake test`, and the header of `CircuitHdlQuick.lean` says which
+# modules it leaves out and why that makes it unsafe as a substitute. `testDriver` is deliberately
+# still `CircuitHdlTest`, so `lake test` means exactly what it meant before this target existed.
+[[lean_lib]]
+name = "CircuitHdlQuick"
+
 # The arcilator cross-check generator. Writes build/arc/*.{mlir,expected}; scripts/arccheck.sh
 # runs them through CIRCT's simulator and diffs. Deliberately *not* a test: it needs a CIRCT
 # install, and `lake test` has to keep working against a bare toolchain.

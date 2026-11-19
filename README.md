@@ -58,7 +58,9 @@ the same models:
 | `Examples/Fifo/AbstractQueueModel.lean` | A depth and a list, plus `counting`, the map down to the model above. Says the first-in-first-out property, which a counter cannot. |
 
 Tests live in their own library under `CircuitHdlTest/`, so they can be built and run on their
-own with `lake test`. Small modules that probe one rule each live with the tests that use them,
+own with `lake test`. `lake build CircuitHdlQuick` builds the subset that runs no bounded
+refinement family, which is quicker to iterate against but is not a substitute: `lake test` is the
+only complete check. Small modules that probe one rule each live with the tests that use them,
 since they are assertions rather than designs:
 
 | File | Contents |
