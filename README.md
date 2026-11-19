@@ -70,6 +70,8 @@ since they are assertions rather than designs:
 | `CircuitHdlTest/Clocks.lean` | Clock-domain analysis on small modules: what it accepts, rejects, and where the boundary sits. |
 | `CircuitHdlTest/Fifo/Async.lean` | The FIFO simulated at three clock ratios and with intermittent handshakes, gray-code and synchronizer unit tests, and its refinement of the abstract models — including `bv_decide` proofs that the gray-coded full and empty flags fire at exactly the right occupancy. |
 | `CircuitHdlTest/Fifo/Shift.lean` | The shift-register FIFO: that it carries the same traffic, and that it refines the same models by entirely different means. |
+| `CircuitHdlTest/Fifo/Firrtl.lean` | A shift FIFO written in FIRRTL and compiled by `firtool`, refining the same two models over the same schedules. The only design in the suite that this language neither elaborated nor lowered, so the only evidence that the models describe FIFOs rather than this language's FIFOs. |
+| `CircuitHdlTest/Fifo/Imported.lean` | Driving a `hw.module` this package did not build — the boundary, the bridge to `Veir.Netlist`, and the abstraction functions a compiled design needs. |
 | `CircuitHdlTest/Fifo/AbstractFifoModel.lean`, `AbstractQueueModel.lean` | The two specifications at their edges: saturation, overflow, degenerate depths. |
 | `CircuitHdlTest/FifoHarness.lean` | Shared machinery for checking any design against the models. |
 | `CircuitHdlTest/Circt.lean` | The CIRCT lowering: the text it emits for the smallest designs, and VeIR's verdict on every example. |

@@ -413,6 +413,11 @@ The harness in `CircuitHdlTest/FifoHarness.lean` drives a `Sim`, not a `Module`,
 lets one check serve both semantics. `Module` coerces to `Sim`; `lowered m` builds the IR and
 wraps `Veir.Netlist` around it.
 
+All four rows ask whether the lowering preserves the evaluator's behaviour. None asks whether the
+*models* say anything beyond what this language produces, since every design they compare was
+built by `Circt.lean`. `CircuitHdlTest/Fifo/Firrtl.lean` is where that question is put, and it is
+a different one -- see "A FIFO the package did not write".
+
 **The first layer has now paid for itself twice over, on the mesh.** The `agree` line of
 `CircuitHdlTest/Mesh.lean` runs one scenario on both and is the only check in the package that
 compares them directly rather than running the same assertion against each. It is worth keeping
@@ -626,6 +631,56 @@ design that reaches an operation none of the current entries do.
 `shiftFifo` is built from an array now. Real CIRCT accepts it: all three `shiftFifo4-*` cases
 agree over 171 observations. Worth knowing before anyone decides the name attribute needs
 sanitising.
+
+### A FIFO the package did not write
+
+Every other design in the suite was elaborated by `module!` and lowered by `Circt.lean`, including
+the netlist theorems -- which is a ceiling on what they can establish. They say the lowering
+agrees with the evaluator; they cannot say whether `AbstractFifoModel` and `AbstractQueueModel`
+describe FIFOs or describe what this lowering produces. `CircuitHdlTest/Fifo/Firrtl.lean` runs the
+same harness, schedules, depth and models over a shift FIFO written in FIRRTL and compiled by
+`firtool`, with nothing of this package on the path from source to circuit.
+
+The design follows the Verilog in `Examples/Fifo/Shift.lean`'s docstring rather than the
+`module!` source -- four separately named registers rather than an array -- which is why its
+abstraction function is its own, in `CircuitHdlTest/Fifo/Imported.lean`.
+
+`scripts/firrtl.sh` compiles the `.fir` files and diffs against the committed `.mlir`. Those are
+build products, committed because `lake test` has to work against a bare toolchain, and therefore
+capable of going stale -- editing a `.fir` without regenerating leaves Lean checking the previous
+circuit. Run it after touching one. Not part of `lake test`, same reason as `arccheck.sh`.
+
+Three normalisations stand between `firtool` and `Veir.Input.parseSourceString`, none of which
+touches a circuit: drop the `om.class` beside every module (object-model metadata in a dialect
+VeIR does not register), print generic (VeIR reads generic MLIR only), and strip `result_locs`
+with its `#loc` aliases plus the `twoState` unit attribute on `comb` operations. `twoState`
+asserts an operand is never X or Z, which constrains the environment rather than describing a
+computation, and `Veir.Netlist` has no X -- but VeIR's property tables reject unknown attributes
+outright rather than ignoring them, so it has to go rather than being tolerated.
+
+What this reaches that nothing else does: **`seq.firreg` with a synchronous reset operand.**
+firtool recognises `mux(rst, 0, ..)` and folds it into the register; `Circt.lean` reconciles reset
+into plain `comb.mux` and emits no reset operand at all, so that field had never been interpreted
+by any theorem here. Likewise `comb.icmp ne`, where `Circt.lean` emits `eq` under a `comb.xor`.
+
+**A mutation can be absorbed into a renaming, and this one was.** The off-by-one control first
+spelled its bug the way the Lean design does, `node widx = count`. That makes the two names alias,
+firtool resolved the alias by *renaming the register to `widx`*, and the compiled module had no
+`seq.firreg` named `count` -- so the abstraction function read nothing, every schedule errored,
+and **both** models rejected the design for a reason unrelated to the bug. The tell was
+`firrtl_offByOne_passes_counting` coming out `false` where the Lean counterpart is `true`; without
+that paired control the file would have looked like a working negative result. The bug is now
+`sub(count, wf3)` for `sub(count, rf3)`, which leaves `widx` a distinct value, and `firrtlRegs`
+pins the register names of both designs so a future absorption is reported as a changed pin.
+
+`circt-lec` would settle equivalence against `lowered sfifo` outright and cannot be used: it
+registers `arith`, `builtin`, `comb`, `emit`, `func`, `hw`, `llvm`, `om`, `smt` and `verif`, and
+not `seq`, so a `seq.to_clock` makes it exit with "Dialect `seq' not found". It does work on
+purely combinational modules -- checked both ways, two equivalent adders give `c1 == c2` and add
+against sub gives `c1 != c2` -- and needs `--shared-libs=/usr/lib/x86_64-linux-gnu/libz3.so`,
+without which the JIT cannot resolve Z3. `circt-bmc` *does* take `seq` and runs (`-b N`, not
+`--bound=N`), so a bounded sequential property is reachable; it compares against a `verif.assert`
+rather than against the Lean models, which is a different claim from the one this file makes.
 
 ## The mesh NoC, and what its tests actually catch
 
