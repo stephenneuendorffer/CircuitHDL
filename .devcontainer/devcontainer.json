@@ -1,0 +1,51 @@
+{
+  "name": "CircuitHdl",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+
+  // `lakefile.toml` takes a *path* dependency on the sibling checkout: `[[require]] name = "VeIR"
+  // path = "../veir"`. That path is relative to this repository's root, so the container has to
+  // place the two checkouts as siblings or the build cannot resolve VeIR at all -- and VeIR is on
+  // the proving path, not an optional extra. The arrangement below reproduces the host layout:
+  // CircuitHdl at /workspaces/CircuitHdl, veir at /workspaces/veir, so `../veir` resolves without
+  // anything in the repository being edited.
+  //
+  // The alternative -- bind the parent directory and treat CircuitHdl as a subfolder -- is
+  // rejected deliberately. The parent here is the user's scratch area: 131 entries, unrelated
+  // checkouts, and a private .pem key. Mounting one named sibling grants the container what the
+  // build needs and nothing else.
+  //
+  // This mount fails loudly if ../veir is absent, which is the right behaviour: a container that
+  // started without it would only fail later, in `lake build`, with a worse message.
+  "workspaceFolder": "/workspaces/CircuitHdl",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/CircuitHdl,type=bind,consistency=cached",
+  "mounts": [
+    "source=${localWorkspaceFolder}/../veir,target=/workspaces/veir,type=bind,consistency=cached"
+  ],
+
+  // The host account is uid 116366, gid 1000, and /proj is shared storage. Running as root would
+  // leave every file `lake` writes into .lake/ owned by uid 0 on the host, where the user could
+  // not then delete them. `updateRemoteUserUID` remaps the image's `vscode` user onto the host's
+  // uid/gid at container start, which is what keeps the bind-mounted tree writable *and* keeps
+  // ownership of new files correct on both sides. The Dockerfile removes noble's stock `ubuntu`
+  // account so gid 1000 is free for that remap.
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+
+  // CIRCT_BIN is set in the Dockerfile, derived from the version ARG, and deliberately not
+  // repeated here: two copies of a path that must agree is how they stop agreeing.
+  //
+  // The Lean toolchain is pinned by lean-toolchain, read here from the mounted workspace rather
+  // than hardcoded. elan is installed with no default toolchain precisely so that this is the one
+  // place the version comes from. The first run downloads a toolchain and is not quick.
+  "postCreateCommand": "elan toolchain install \"$(cat lean-toolchain)\" && lake --version && echo \"CIRCT_BIN=$CIRCT_BIN\"",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "leanprover.lean4"
+      ]
+    }
+  }
+}
