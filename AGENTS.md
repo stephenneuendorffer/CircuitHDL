@@ -70,6 +70,11 @@ Two further traps cost time here, and each produces a result that reads as succe
   two, which reads as a spectacular improvement if the only thing recorded is the clock. A
   measurement that does not check for "Build completed successfully" has measured nothing; this
   produced a reported 43x speedup that was six builds failing in 4.4s each.
+- **Deleting an olean does not force elaboration.** Lake replays the artifact and prints "Build
+  completed successfully" either way, so checking for that string is still insufficient: require
+  lake's own `✔ Built <module> (Ns)` line and reject `⚠ Replayed`. Measured, `Fifo/ShiftNetlist`
+  reads 39s replayed against 264s elaborated, and the 39s survived two rounds of checking before
+  the per-theorem costs summed to 204s and exposed it.
 - **`precompileModules` changes the build config without changing an olean**, so enabling it does
   not invalidate anything downstream. A module has to be deleted or edited to be re-elaborated,
   and a rebuild that reuses everything times as a win.
