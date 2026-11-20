@@ -21,6 +21,7 @@ precompileModules = true
 
 [[lean_lib]]
 name = "CircuitHdlTest"
+precompileModules = true
 
 # The quick subset, for iterating on the language rather than on a design: everything in the test
 # tree that does not run a bounded refinement family. `lake build CircuitHdlQuick` is about a

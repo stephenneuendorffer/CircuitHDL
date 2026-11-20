@@ -100,12 +100,19 @@ Measure a change like this with *one* method on both sides. Half the confusion i
 these numbers came from comparing a `lake` build against a bare `lean` invocation, which differ
 by the dynlibs, by lake's own startup, and by what counts as a dependency rebuild.
 
-- **The test library cannot have it.** Lake then builds a `.so` per test module and they fail to
-  load: `undefined symbol: initialize_VeIR_Veir_Interpreter_Netlist`. VeIR ships
-  `libVeIR_Veir.so` without setting `precompileModules` at all, and that library does not cover
-  `Veir.Interpreter.Netlist`. Until that is resolved upstream, everything in `CircuitHdlTest` --
-  the harness, the `VeirBridge` -- runs interpreted, which is why the four modules that lean on
-  the bridge are the ones still over budget.
+- **The test library has it too, and getting there found a bug in VeIR.** Precompiling
+  `CircuitHdlTest` first failed with `undefined symbol:
+  initialize_VeIR_Veir_Interpreter_Netlist`, and then with `initialize_VeIR_Veir_Input`. Neither
+  module was listed in any of VeIR's umbrellas, so neither belonged to the `Veir` library or
+  appeared in `libVeIR_Veir.so` -- `import Veir` supplied a VeIR without its netlist interpreter
+  or its MLIR parser. Inside VeIR only `UnitTest/Netlist.lean` imports `Veir.Interpreter.Netlist`
+  directly, which is why nothing upstream noticed; this package imports both directly. Two lines
+  in `../veir` fix it, and the symbol is checkable with `nm -D` on the shared object.
+
+  What it bought, each verified by lake's own `Built` line: `Fifo/AsyncNetlist.lean` 260s to 27s,
+  `Fifo/ShiftNetlist.lean` 264s to 25s, `Fifo/Verilog.lean` 236s to 23s, `Fifo/Firrtl.lean` 218s
+  to 4.4s, `Mesh.lean` 178s to 37s. A clean `lake test` went from 296s to **91s**, and every
+  module is inside the two-minute budget.
 - **Running `lean` directly no longer measures the truth.** Lake passes `--load-dynlib` for every
   precompiled dependency, leaves-first: Coinductive, lean-ctrees, VeIR, then CircuitHdl. Without
   those flags the module still builds, about 4x slower, with no indication anything is wrong.

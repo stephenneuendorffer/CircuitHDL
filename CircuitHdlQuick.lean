@@ -16,6 +16,7 @@ import CircuitHdlTest.RegFile
 import CircuitHdlTest.SelectChain
 import CircuitHdlTest.Mesh.RoutingModel
 import CircuitHdlTest.Mesh.Switch
+import CircuitHdlTest.Blur.AbstractBlurModel
 
 /-!
 The subset of the suite that does not run bounded refinement proofs, for iterating on the language
@@ -49,14 +50,14 @@ else goes quietly wrong when measuring one.
 The line drawn here predates two changes that took the suite from roughly ten minutes to about
 five: `Module.sim` now computes the settle order once rather than on every settle, and the
 `CircuitHdl` library is precompiled, without which `native_decide` runs interpreted. Both speed up
-the **evaluator**, so what they left behind is a suite whose cost is almost entirely the netlist
-path: `Fifo.AsyncRefinement` fell from 544s to 24s, while `Fifo.{ShiftNetlist, AsyncNetlist,
-Verilog, Firrtl}` stand at 264s, 260s, 236s and 218s, and between them account for most of what
-`lake test` costs. Each drives `Veir.Netlist` through `VeirBridge`, where a tick costs about 5ms
-whoever compiled the design -- `net_shift_refines_burst` and `verilog_refines_burst` run the same
-1176 ticks in 6.4s and 6.5s, one design lowered by `CircuitHdl.Circt` and one by `circt-verilog`.
+the **evaluator**, which left a suite costing almost entirely what the netlist path costs, and
+precompiling `CircuitHdlTest` then addressed that -- so `Fifo.{ShiftNetlist, AsyncNetlist,
+Verilog, Firrtl}` fell from 264s, 260s, 236s and 218s to 25s, 27s, 23s and 4.4s. A clean
+`lake test` is about 91s against roughly ten minutes before any of it.
 
-The membership rule is unchanged and still structural, and it still excludes every one of those.
+The membership rule is unchanged and still structural. What has changed is the stake: the half
+this target omits is no longer the expensive half by any margin worth the name, so prefer
+`lake test` unless iterating tightly on the language.
 
 The `*Designs` and `Imported` modules carry no theorems, so they are here for the compile check on
 the designs themselves -- a `module!` that stopped elaborating would otherwise show up only in the
