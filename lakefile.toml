@@ -17,6 +17,7 @@ path = "../veir"
 
 [[lean_lib]]
 name = "CircuitHdl"
+precompileModules = true
 
 [[lean_lib]]
 name = "CircuitHdlTest"
