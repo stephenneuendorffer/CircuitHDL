@@ -118,6 +118,28 @@ blocks behind the declarations ahead of it and its trace node **spans the wait**
 `native_decide` checks in `Fifo/Async.lean` each report 50.1s and each cost about 1s. Time a
 theorem in its own process instead.
 
+#### Benchmarking outside lake: two settings that are worth 36x between them
+
+A scratch benchmark linked against `.lake/build/lib/libCircuitHdl_CircuitHdl.a` measures the
+library correctly and the *driver* wrongly, because `leanc` defaults to neither optimisation nor
+`NDEBUG` while lake uses `LEANC_OPTS = -O3 -DNDEBUG` from `share/lean/lean.mk`. Without `-O3` a
+driver loop runs about 36x slow. Without `-DNDEBUG` every `lean_array_get_core` carries a live
+`assert` and `lean_to_array` a tag check -- three redundant header compares and a
+`lean_notify_assert` call per array read, visible in `objdump`. That one is worth 16% on a
+tree-walking interpreter and 36% on straight-line code, so it silently flatters whichever side
+has fewer array accesses.
+
+`lake env leanc` also resolves to the **default** elan toolchain rather than the pinned one, and a
+4.36 runtime against a 4.35 library fails at link time on a missing symbol rather than at run
+time. Use `$(dirname $(elan which lean))/leanc`, or the explicit toolchain path.
+
+**And pin the process.** The host is two sockets and two NUMA nodes (`0-83,168-251` and
+`84-167,252-335`) at 1500-3700 MHz. Unpinned, the *same binary* measured a `mesh 4 13` tick at
+123 ms, 13 ms and 123 ms on three consecutive runs, while `shiftFifo` in those same runs held
+7.85 us/stmt to three digits -- the swing tracks working-set size, which is what a NUMA miss looks
+like. Under `taskset -c 12` the mesh figure was 123.3-125.7 ms across five runs. This is a
+different effect from the queueing artifact above and needs a different remedy.
+
 ## Tests are compile-time, and a test is not a proof
 
 A green build *is* a passing run. There is no runner. But the forms differ in what they buy:
