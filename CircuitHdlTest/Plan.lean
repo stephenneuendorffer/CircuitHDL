@@ -14,8 +14,8 @@ Three claims, and they fail in different ways:
 
 | What | How | A mutation shows as |
 |---|---|---|
-| `compile` accepts what `check` accepts | both, on every example and on ill-formed modules | `check=true compile=false` |
-| the two semantics agree | one scenario on `Module.sim` and `Module.fastSim` | a named design, and two states |
+| `compile` accepts what `check` does | both, on every example and ill-formed ones | `check=true compile=false` |
+| the two semantics agree | one scenario on each of the two `Sim`s | a named design, two states |
 | the flat layout is what it says | the slots pinned directly | a changed pin |
 
 The third is there because of the rule `AGENTS.md` states and this file is a fresh instance of:
@@ -342,6 +342,34 @@ What `encode` and `writeBack` agree about, which comparing them cannot see.
 -- how many values there are.
 #guard (Layout.of grid).size
   = (grid.initState.map (fun (_, c) => match c with | .sig _ => 1 | .mem ws => ws.length)).sum
+
+/-! ### The operator layer is proved, and kernel-proved
+
+`CircuitHdl/Plan.lean` restates every arithmetic operation over `Nat`, and those restatements are
+theorems rather than scenarios: each `Nat` form computes the `toNat` of the `BitVec` one at
+**every** width. That is worth having separately from the agreement report above, because the one
+operator a test cannot be relied on to catch is exactly the one most likely to be wrong -- no
+design reaches `sub`'s wrapping case, so `planWrap` exists only because a mutation run said so,
+where `BinOp.applyNat_eq` would have refused to elaborate.
+
+`#print axioms` rather than a claim in prose: these sit with the mesh deadlock theorem and
+`CircuitHdl.SelectChain`, not with the `native_decide` results.
+-/
+
+/-- info: 'CircuitHdl.BinOp.applyNat_eq' depends on axioms:
+[propext, Classical.choice, Quot.sound] -/
+#guard_msgs(whitespace := lax) in #print axioms BinOp.applyNat_eq
+
+/-- info: 'CircuitHdl.CmpOp.applyNat_eq' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in #print axioms CmpOp.applyNat_eq
+
+/-- info: 'CircuitHdl.ShiftOp.applyNat_eq' depends on axioms:
+[propext, Classical.choice, Quot.sound] -/
+#guard_msgs(whitespace := lax) in #print axioms ShiftOp.applyNat_eq
+
+/-- info: 'CircuitHdl.slice_eq' depends on axioms:
+[propext, Classical.choice, Quot.sound] -/
+#guard_msgs(whitespace := lax) in #print axioms slice_eq
 
 /-! ### Controls
 

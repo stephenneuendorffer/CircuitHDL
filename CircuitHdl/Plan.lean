@@ -226,10 +226,27 @@ structure Plan where
 /-! ### The operators, over `Nat`
 
 Each of these is the specification's `BitVec` operator restated on the bits. They are separate
-definitions rather than inlined so that the equivalence proof has something to state: the lemma
-`BinOp.applyNat op mask a b` agrees with `BinOp.apply op` under `BitVec.toNat` is one lemma per
-operator and nothing else has to be unfolded.
+definitions rather than inlined so that there is something to prove about them, and the three
+`applyNat_eq` theorems below are that proof: at **every** width, each `Nat` form computes the
+`toNat` of the `BitVec` one. Together with `not_eq`, `concat_eq` and `slice_eq` further down,
+every arithmetic step `PExpr.eval` takes is covered. Those are the places this file was most
+likely to be quietly wrong -- the wrap in `sub`, the complement in `not`, the operand order in
+`concat`, and every mask -- and they are kernel results rather than scenarios, which is why they
+sit beside the definitions instead of in the test module.
+
+**What is still not proved is the step above them**: that `compile` assembles these operations
+into a plan computing what `Expr.eval` computes. See the note at the end of this file.
 -/
+
+/-- `2 ^ w - 1` is one below `2 ^ w`, which is what makes a mask the modulus. -/
+theorem mask_succ (w : Nat) : 2 ^ w - 1 + 1 = 2 ^ w :=
+  Nat.succ_pred_eq_of_pos (Nat.two_pow_pos w)
+
+/-- Masking by `2 ^ w - 1` *is* reduction modulo `2 ^ w`. Every width rule in this file is stated
+with the mask, because masking is a machine instruction where `%` is a division; this is the
+bridge to the `BitVec` lemmas, which are all stated with `%`. -/
+theorem and_mask (x w : Nat) : x &&& (2 ^ w - 1) = x % 2 ^ w :=
+  Nat.and_two_pow_sub_one_eq_mod x w
 
 namespace BinOp
 
@@ -250,6 +267,29 @@ def applyNat (op : BinOp) (mask a b : Nat) : Option Nat :=
   | .or => some (a ||| b)
   | .xor => some (a ^^^ b)
 
+/-- Every `Nat` form computes the `toNat` of the `BitVec` one, at every width.
+
+`sub` is the case this exists for. `Nat` subtraction truncates at zero where `BitVec` wraps, so
+`a - b` would make `0 - 1` equal `0` rather than all ones, and no design in `CircuitHdl/Examples`
+reaches the wrapping case -- `shiftFifo`'s `count - (rfire ? 1 : 0)` has `rfire` implying a
+non-zero count. A test therefore cannot be relied on to find a mistake here, and this does not
+depend on finding one. -/
+theorem applyNat_eq (op : BinOp) {w : Nat} (a b : BitVec w) :
+    op.applyNat (2 ^ w - 1) a.toNat b.toNat = (op.apply a b).map BitVec.toNat := by
+  cases op <;>
+    simp [BinOp.applyNat, BinOp.apply, and_mask, mask_succ, BitVec.toNat_add, BitVec.toNat_sub,
+      BitVec.toNat_mul, BitVec.toNat_and, BitVec.toNat_or, BitVec.toNat_xor,
+      BitVec.toNat_udiv, BitVec.toNat_umod]
+  · exact congrArg (· % 2 ^ w) (Nat.add_comm _ _)
+  · by_cases hb : b = 0#w
+    · subst hb; simp
+    · have hn : b.toNat ≠ 0 := fun h => hb (by rw [BitVec.toNat_eq]; simpa using h)
+      simp [hb, hn]
+  · by_cases hb : b = 0#w
+    · subst hb; simp
+    · have hn : b.toNat ≠ 0 := fun h => hb (by rw [BitVec.toNat_eq]; simpa using h)
+      simp [hb, hn]
+
 end BinOp
 
 namespace CmpOp
@@ -259,6 +299,13 @@ def applyNat : CmpOp → Nat → Nat → Bool
   | .eq, a, b => a == b
   | .lt, a, b => a < b
   | .le, a, b => a ≤ b
+
+/-- The `Nat` comparisons are the `BitVec` ones, at every width. -/
+theorem applyNat_eq (op : CmpOp) {w : Nat} (a b : BitVec w) :
+    op.applyNat a.toNat b.toNat = op.apply a b := by
+  cases op <;> simp [CmpOp.applyNat, CmpOp.apply, BitVec.ult_eq_decide, BitVec.ule_eq_decide]
+  rw [Bool.eq_iff_iff]
+  simp [BitVec.toNat_eq]
 
 end CmpOp
 
@@ -270,7 +317,41 @@ def applyNat : ShiftOp → (mask amount : Nat) → Nat → Nat
   | .shl, mask, s, a => (a <<< s) &&& mask
   | .shr, _, s, a => a >>> s
 
+/-- Each shift computes the `toNat` of the `BitVec` one, at every width and every amount.
+
+The asymmetry is the content: a left shift has to drop what it pushes past the width, where a
+right shift cannot produce anything out of range and so needs no mask. -/
+theorem applyNat_eq (op : ShiftOp) {w : Nat} (a : BitVec w) (s : Nat) :
+    op.applyNat (2 ^ w - 1) s a.toNat = (op.apply a s).toNat := by
+  cases op <;>
+    simp [ShiftOp.applyNat, ShiftOp.apply, and_mask, BitVec.toNat_shiftLeft,
+      BitVec.toNat_ushiftRight]
+
 end ShiftOp
+
+/-! ### The width-manipulating operations
+
+`not`, `concat` and `slice` are computed inline in `PExpr.eval` rather than through an `applyNat`,
+because each is one expression. They still need saying: `not` is the only one whose `Nat` form
+looks nothing like its `BitVec` form, and `concat` and `slice` are where a width is used as a
+shift amount rather than as a mask.
+-/
+
+/-- The complement at width `w` is `mask - x`, since every value is at most the mask. A
+subtraction that cannot truncate, unlike `BinOp.sub`'s. -/
+theorem not_eq {w : Nat} (a : BitVec w) : 2 ^ w - 1 - a.toNat = (~~~a).toNat :=
+  BitVec.toNat_not.symm
+
+/-- A concatenation shifts the left operand up by the **right** operand's width, which is the
+operand order `BitVec.append` fixes and the one thing a reader is likely to get backwards. -/
+theorem concat_eq {m n : Nat} (a : BitVec m) (b : BitVec n) :
+    (a.toNat <<< n) ||| b.toNat = (a ++ b).toNat :=
+  (BitVec.toNat_append a b).symm
+
+/-- A slice shifts down by its low bit and masks to its own width. -/
+theorem slice_eq {n : Nat} (x : BitVec n) (hi lo : Nat) :
+    (x.toNat >>> lo) &&& (2 ^ (hi - lo + 1) - 1) = (BitVec.extractLsb hi lo x).toNat := by
+  rw [and_mask, BitVec.extractLsb_toNat]
 
 /-! ### Evaluation -/
 
@@ -346,7 +427,7 @@ precaution is unreachable, and a mutation that writes as it goes is green across
 
 It stays because matching the specification statement for statement is worth more than removing
 an unreachable guard, and because the argument above is prose rather than a proof. -/
-private def copyValues (σ : Array Nat) (dst src count : Nat) : Array Nat :=
+def copyValues (σ : Array Nat) (dst src count : Nat) : Array Nat :=
   let vals := (List.range count).map (fun k => σ[src + k]!)
   (vals.zipIdx).foldl (fun σ (v, k) => σ.set! (dst + k) v) σ
 
@@ -499,7 +580,7 @@ declaration is the whole of the fix.
 The `%` is a no-op on any state this is called with, since a slot holds a value below its modulus
 by construction. It is here to make the function total without a hypothesis, exactly as
 `Value.ofNat` is. -/
-private def valueAt (w md : Nat) (h : md = 2 ^ w) (n : Nat) : Value :=
+def valueAt (w md : Nat) (h : md = 2 ^ w) (n : Nat) : Value :=
   ⟨w, BitVec.ofNatLT (n % md) (by subst h; exact Nat.mod_lt n (Nat.two_pow_pos w))⟩
 
 /-- Write the flat array back over the state it came from.
@@ -543,14 +624,19 @@ the deliberately ill-formed modules, so a rule that is weakened here is reported
 Every caller has already resolved the name through `Ctx` -- `widthOf`, `memOf` or `arrayOf` -- and
 `Layout.of` covers exactly what those three read, so the `none` arm is unreachable. It reports
 rather than panicking because an unreachable branch that returns a wrong answer is worse than one
-that returns an error nobody sees. -/
-private def slotOf (l : Layout) (x : Name) : Except CheckError Slot :=
+that returns an error nobody sees.
+
+Public, like `CircuitHdl.operands`, because a proof about `compile` has to unfold it. A `private`
+definition one module away is worse than inconvenient under `autoImplicit`: the identifier
+silently becomes an implicit argument, and the failure arrives as "function expected" rather than
+as "unknown identifier". -/
+def slotOf (l : Layout) (x : Name) : Except CheckError Slot :=
   match l.find? x with
   | some s => .ok s
   | none => .error (.unbound x)
 
-/-- The mask that implements a width: `2 ^ w - 1`. -/
-private def widthMask (w : Nat) : Nat := 2 ^ w - 1
+/-- The mask that implements a width: `2 ^ w - 1`. Public for the same reason as `slotOf`. -/
+def widthMask (w : Nat) : Nat := 2 ^ w - 1
 
 mutual
 
@@ -720,6 +806,42 @@ def Module.compile (m : Module) : Except CheckError Plan := do
     let body ← Stmt.compileList ctx l p.body
     .ok (p.sensitivity, body)
   .ok { layout := l, comb := comb, seqs := seqs }
+
+
+/-! ### How far the equivalence proof got
+
+`Plan.run (compile m) = m.settle` is **not** proved. What is proved is the bottom layer: every
+arithmetic operation above, at every width, by the kernel. The layer that remains is
+`Expr.compile`'s own induction, and the obstacle is worth recording so the next attempt starts
+past it rather than at it.
+
+The statement that works is a single equation carrying the value and its width together,
+
+```
+(Expr.eval σ e).map (fun v => (v.width, v.toNat)) = (PExpr.eval arr pe).map (fun n => (w, n))
+```
+
+since the `Except` on each side then forces the *errors* to agree as well, which is the half that
+a weaker statement loses. It needs a `Conforms ctx l σ arr` hypothesis with three fields -- one
+per kind of declaration -- and both halves of it are load-bearing: the values are what make a slot
+read correct, and the *shapes* are what make the errors agree, since `Expr.eval` refuses to read a
+memory as a scalar where a compiled slot read cannot.
+
+`Expr` nests `List Expr` in `select`, so the induction is `Expr.rec` with `motive_2` supplied
+explicitly; the list motive is an ordinary equation, `Expr.evalIndices σ es = PExpr.evalList arr
+pes`, because both sides are already `List Nat`. The `var` and `lit` cases go through. The
+arithmetic cases need `Expr.compile`'s `do` block taken apart, and the incantation that works on
+it is `simp only [Expr.compile, bind, Except.bind, expectWidth] at h` followed by
+`repeat' split at h`, which leaves one goal per shape; `simp_all [Prod.ext_iff]` closes most of
+it, and what it loses is the width equation the `if` branch supplies. Characterising `compile`
+once per constructor -- `compile (.bin op w a b) = .ok (pe, w') ↔ ...` -- rather than
+destructuring it inside each case of the induction is the shape to try next.
+
+Above that sit the statement layer, `settle`, and `encode`/`writeBack`. The last of those is the
+one to design for rather than discover: `encode` is a `for` loop over `Array.set!`, and reasoning
+about it means a loop invariant where a structural recursion over the state would reduce. It
+should be rewritten as a fold before anything tries to prove it.
+-/
 
 /-! ### As a `Sim` -/
 

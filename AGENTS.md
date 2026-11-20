@@ -507,16 +507,38 @@ on the generated arm, and it is why the state is `Nat`.
   interpreter is one unpredictable indirect jump -- the jump table the `PExpr.eval` match compiles
   to -- plus one call, per node.
 
-### What is not done
+### How far the equivalence proof got
 
-`Plan.run (compile m) = m.settle` is **not proved**, and until it is, `CircuitHdlTest/Plan.lean`
-is the entire reason to believe the compiled path. Fifteen mutations of `Plan.lean` are listed in
-its header; fourteen are red and the fifteenth is expected green and says why. The theorem is an
-induction over `Expr`/`Stmt` with a state-encoding invariant, and it is tractable for a reason
-worth knowing: **no execution path in `Semantics.lean` ever adds a name to the state or changes a
-value's width** -- `setChecked` and `setMem` both error rather than extend -- so the slot layout is
-preserved by construction. It will carry `m.check = .ok ()` as a hypothesis, because `compile`
-refuses a width mismatch eagerly where `Module.settle` fails only if the statement is reached.
+**The arithmetic is proved, by the kernel, at every width.** `BinOp.applyNat_eq`,
+`CmpOp.applyNat_eq`, `ShiftOp.applyNat_eq`, `not_eq`, `concat_eq` and `slice_eq` say that each
+`Nat` form computes the `toNat` of the `BitVec` one, so every arithmetic step `PExpr.eval` takes
+is covered. `#print axioms` shows `propext`, `Classical.choice` and `Quot.sound` and nothing else,
+pinned in `CircuitHdlTest/Plan.lean`. That layer is worth having on its own: the operator a test
+cannot be relied on to catch is `sub`, since no design reaches its wrapping case, and a theorem
+does not depend on finding a scenario that does.
+
+**`Plan.run (compile m) = m.settle` is not proved**, so `CircuitHdlTest/Plan.lean` remains the
+reason to believe the rest of the compiled path. Fifteen mutations are listed in its header;
+fourteen are red and the fifteenth is expected green and says why.
+
+What the attempt established, written up at length beside `Plan.simOf`:
+
+- The statement that works carries the value and its width in one equation, which is what forces
+  the **errors** to agree as well. A weaker statement loses that half.
+- The `Conforms` hypothesis needs shapes as well as values, because `Expr.eval` refuses to read a
+  memory as a scalar where a compiled slot read cannot.
+- `Expr` nests `List Expr`, so the induction is `Expr.rec` with `motive_2` given explicitly. The
+  `var` and `lit` cases go through.
+- Taking `Expr.compile`'s `do` block apart inside each case does not scale. Characterise `compile`
+  once per constructor instead.
+- **`encode` should be rewritten as a fold before anything tries to prove it.** It is a `for` loop
+  over `Array.set!`, which needs a loop invariant where a structural recursion would reduce.
+
+The induction is tractable for a reason worth knowing: **no execution path in `Semantics.lean`
+ever adds a name to the state or changes a value's width** -- `setChecked` and `setMem` both error
+rather than extend -- so the slot layout is preserved by construction. The top-level theorem will
+carry `m.check = .ok ()` as a hypothesis, because `compile` refuses a width mismatch eagerly where
+`Module.settle` fails only if the statement is reached.
 
 ## Known blocker
 
