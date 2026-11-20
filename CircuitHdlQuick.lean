@@ -39,6 +39,11 @@ The membership rule is "does this module run a schedule family", which is why `F
 -- its theorems run 1024 schedules through the comparatively cheap evaluator -- while
 `Fifo.ShiftNetlist` is out, running the same schedules through `Veir.Netlist`.
 
+`Blur` is out by the same rule, since it runs its frame through sixteen stall patterns and then
+through `Veir.Netlist`; `Blur.AbstractBlurModel` is in, being pure `Nat` arithmetic. The design
+itself is still compiled here, by the `#guard verifies (blur 4 3 8)` in `Circt`, so a `module!`
+that stopped elaborating does not hide in the slow half.
+
 **Do not trust a single timing on this host**, and do not take a per-module one from inside a
 parallel build at all. Lake reports a job's wall clock, so a module competing for cores reads as
 expensive purely by when it was scheduled: two back-to-back clean builds of an identical tree put

@@ -24,6 +24,8 @@ import CircuitHdlTest.SelectChain
 import CircuitHdlTest.Mesh.RoutingModel
 import CircuitHdlTest.Mesh.Switch
 import CircuitHdlTest.Mesh
+import CircuitHdlTest.Blur.AbstractBlurModel
+import CircuitHdlTest.Blur
 
 /-!
 Umbrella module for the test suite.
@@ -84,6 +86,16 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 deadlock freedom is kernel-proved
 - `CircuitHdlTest.Mesh.Switch` -- that the switch computes `xyRoute` over all 256 (position,
                                 destination) pairs, and never offers a turn the policy forbids
+- `CircuitHdlTest.Blur.AbstractBlurModel` -- the blur specification at its edges: the kernel and
+                                the clamp pinned directly, because the design *reads* both and so
+                                cannot check either by agreeing with them; that a uniform image is
+                                a fixed point, with zero-padding as the control that says the
+                                property is about the boundary rule and not only about the kernel
+- `CircuitHdlTest.Blur`      -- the streaming blur against that model: a frame in is its blurred
+                                frame out, under back-pressure, across frames, and after a reset;
+                                the lowered form compared against the evaluator directly; and
+                                seven one-site mutations, written as one design with a knob whose
+                                off position is asserted equal to the real design
 - `CircuitHdlTest.Mesh`   -- that the assembled mesh delivers: corner to corner in each
                                 direction, under contention, and without interleaving two packets
                                 sharing an output. One `#eval` rather than many `#guard`s, because

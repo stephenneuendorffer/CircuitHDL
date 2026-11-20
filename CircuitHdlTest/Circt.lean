@@ -112,6 +112,13 @@ private def verifies (m : Module) : Bool :=
 #guard verifies (grayOfW 4)
 #guard verifies (sync2W 8)
 
+-- The blur filter, which is two memories rather than one and the only design here that emits
+-- `comb.mul` with a signal operand -- every other multiply in the package is index arithmetic,
+-- folded before the design runs. At `imgW = 4` it is also the only one whose memory address is
+-- wider than the `seq.firmem` port takes, so it is the first thing in the suite to reach
+-- `adaptWidth`'s narrowing branch.
+#guard verifies (blur 4 3 8)
+
 /-! ### What it refuses
 
 Each of these is a design the evaluator will happily run but that has no structural reading, so

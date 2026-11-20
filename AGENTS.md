@@ -646,10 +646,19 @@ semantics unchanged.
 So neither is redundant, and a change that makes `arccheck.sh` pass by editing `Circt.lean` has
 not fixed anything.
 
-Five lowering mutations, all currently caught — swap `adaptWidth`'s `comb.concat` operands (2
+Seven lowering mutations, all currently caught — swap `adaptWidth`'s `comb.concat` operands (2
 failures in `CircuitHdlTest/Circt.lean`), force `comb.extract`'s `lowBit` to 0 (5 in `AsyncFifo`),
-set `ruw = new` (7 in `AsyncFifo`), swap the `if`-reconciliation mux arms (12 in `ShiftFifo`), and
-lower `comb.and` as `comb.or` (11 in `ShiftFifo`). If you change the lowering, re-run them.
+set `ruw = new` (7 in `AsyncFifo`), swap the `if`-reconciliation mux arms (12 in `ShiftFifo`),
+lower `comb.and` as `comb.or` (11 in `ShiftFifo`), lower `comb.mul` as `comb.add` (6 of the 8
+report lines in `Blur`), and make `adaptWidth`'s narrowing branch a no-op (exactly 1 line in
+`Blur`). If you change the lowering, re-run them.
+
+The last two are the blur's, and it is the only design that reaches either operation: every other
+multiply in the package is static index arithmetic folded before the design runs, and every other
+memory address is already the width its port takes. **`comb.mul` as `comb.add` is also the
+cleanest confirmation of the table above** -- it reddens six netlist report lines and leaves all
+three `blur4x3` cases of `scripts/arccheck.sh` green, because both simulators then read the
+`comb.add` the lowering emitted and move together. Measured, both halves.
 
 Two **design**-level mutations cover the array work, and the first is the more informative:
 
@@ -759,13 +768,24 @@ them. **If you touch that dispatch, re-run `#print axioms`** — nothing else wo
 
 #### Two findings from the mutation run, both still live
 
-- **`adaptWidth`'s two branches are reached by no design in `CircuitHdl/Examples`.** `asyncFifo`
-  slices its pointers to exactly `addrW` before indexing, so the memory-address resize is dead
-  code there. Swapping its `comb.concat` operands left the whole suite green. `memAdapt` in
-  `CircuitHdlTest/Circt.lean` exists only to reach it. Note what the *first* version of that test
-  got wrong: it read the memory through the same adapted address it wrote through, so a wrong
-  address was computed twice and the design behaved identically. **An address-computation test
-  needs a read path that is not adapted the same way**, or it tests nothing.
+- **`adaptWidth`'s *widening* branch is reached by no design in `CircuitHdl/Examples`.**
+  `asyncFifo` slices its pointers to exactly `addrW` before indexing, so the memory-address resize
+  is dead code there. Swapping its `comb.concat` operands left the whole suite green. `memAdapt`
+  in `CircuitHdlTest/Circt.lean` exists only to reach it. Note what the *first* version of that
+  test got wrong: it read the memory through the same adapted address it wrote through, so a
+  wrong address was computed twice and the design behaved identically. **An address-computation
+  test needs a read path that is not adapted the same way**, or it tests nothing.
+
+  **The narrowing branch is reached now, by `blur` at a power-of-two image width.** The column
+  counter is `Nat.log2 imgW + 1` bits and `Veir.Seq.firMemAddressWidth` is
+  `Nat.log2 (imgW - 1) + 1`, so at `imgW = 4` they are 3 and 2 and the address is extracted down.
+  Measured: making the branch `return v` reddens **exactly one** line of
+  `CircuitHdlTest/Blur.lean`'s netlist report, `narrow-address`, and nothing else in the suite --
+  not even the other lines of that report, since the 5x4 design the rest of it drives has
+  `colW = addrW`. That is why `b43` is carried alongside `b54` there.
+
+  The widening branch stays unreachable from this design and will: `Nat.log2 imgW` is never below
+  `Nat.log2 (imgW - 1)`, so a column index is never *narrower* than the address it feeds.
 - **Nor for an out-of-range array index.** `Expr.select` raises `indexOutOfRange` in the
   evaluator; the lowering is a chain of `comb.mux` whose final else is element 0, so it reads
   element 0 instead. A mux tree has nowhere to put an error, and spending a comparison and a
@@ -972,6 +992,144 @@ that quietly stopped a mutation from biting would look exactly like a rewrite th
   whether the wormhole property specifically is covered — it isolates it.
 - **Reverting `SettleOrder.of` to the identity** reddens `corner-SW`, `contend` and `wormhole`,
   and eight checks in `CircuitHdlTest/SettleOrder.lean`. See the combinational-order section.
+
+## The blur filter: a stream transformed rather than stored
+
+`CircuitHdl/Examples/Blur.lean` is the first design here whose answer depends on a *window* of past
+input rather than on what it is holding. The things that cost time to get right are not the
+arithmetic.
+
+### The flush, and why it is `imgW + 3`
+
+Number the advances `j = 0, 1, ...`; advance `j` consumes input pixel `j` and produces the vertical
+tap triple `cv_j`. The window holds `cv_j`, `cv_{j-1}`, `cv_{j-2}`, so after advance `j` the centre
+is `cv_{j-1}` and the output is position `(row(j) - 1, col(j) - 1)` -- output index `j - imgW - 1`.
+With `k` the count of *completed* advances, the window during the beat where the counter reads `k`
+computes output index `k - imgW - 2`, and the advance at the end of that beat is what loads it into
+`odata`. So outputs `0 .. imgW*imgH - 1` are loaded by the advances at `k = imgW + 2 ..
+imgW*imgH + imgW + 1`, presented one beat later, and each consumed by the advance at the end of
+*its* beat -- the last of which, at `k = imgW*imgH + imgW + 2`, loads nothing and clears `oval`.
+That is `imgW*imgH + imgW + 3` advances a frame, `imgW*imgH` of which take an input.
+
+The `+ 3` rather than `+ 2` is the output register: the last pixel needs one further advance to
+leave. `haveOut` is bounded **above** as well as below for the same reason -- without that, the
+final advance would load the window's answer for a position the image does not have, and the frame
+would carry one pixel too many.
+
+Both off-by-ones in that derivation are easy to make and neither shows up as a wrong *pixel* -- a
+frame that is one beat short or one beat long comes out shifted, so the golden-model comparison
+fails on every pixel at once and says nothing about which end is wrong. If that check goes red,
+re-derive the count before touching the design.
+
+**`col` has to be reset at the frame boundary as well as at `imgW - 1`**, because
+`imgW*imgH + imgW + 3` is not a multiple of `imgW`. That is `noColReset` in the test file's
+mutation list, and it is **invisible in a single frame** -- the first frame is entirely correct,
+because the column counter has not met a frame boundary yet. It is the reason the back-to-back
+check exists.
+
+### The output register exists for the protocol, and a golden model cannot see why
+
+This is the most instructive thing the design turned up, and it was found by reading the handshake
+rather than by any test going red.
+
+The natural way to write the output is `m.valid = haveOut & (~needIn | s.valid)`: an output is on
+offer when the window holds one and the beat can be taken. **Every data check in
+`CircuitHdlTest/Blur.lean` passes against that** -- the golden-model comparison, the sixteen stall
+patterns, the back-to-back frames, the netlist agreement. No pixel is lost or duplicated.
+
+It is still a protocol violation. With the window primed and the frame still arriving, `m.valid`
+*is* `s.valid`, so a producer that drops `valid` for a cycle withdraws this design's `m.valid`
+with it, and AXI-Stream does not allow that before the handshake completes. A consumer relying on
+the rule breaks on a stream whose data is perfectly correct.
+
+**A golden-model test cannot find this, in principle**: a consumer only ever latches on a tick
+where `valid` and `ready` are both high, so withdrawing `valid` in between changes timing and
+never data. `validStability` in the test file is the observer that can, and it comes with two
+deliberately broken modules -- one that withdraws `valid`, one that moves `data` under a held
+`valid` -- because a check that has only ever been run against a correct design has not been
+shown capable of failing.
+
+Two further things that cost time:
+
+- **The observer needs a stalling consumer, not just a stalling source.** With `m.ready` held
+  high every offer is taken on the tick it is made, so there is never a held offer for a
+  withdrawal to break, and the observer returns clean against the broken design. That is why it
+  runs the whole stall family rather than one schedule.
+- **`rawValid` is not the pre-register design, and is not a pure protocol defect.** It bolts the
+  `s.valid` gate onto the *registered* output, which leaves `oval` cleared by `m.ready` alone --
+  so a tick where the consumer is ready and the spurious `m.valid` is low drops the word, and the
+  mutation loses pixels under a stalling source. The earlier design did not lose any. Both
+  measured; do not use either to describe the other.
+
+### `ready` is combinational, deliberately
+
+`asyncFifo` and `shiftFifo` both take `s.ready` off a register, which is what keeps two of them
+from forming a loop when chained. `blur` passes `m.ready` straight through to `s.ready`, because a
+beat is accepted exactly when the output register has room for what it produces. It still never
+reads `s.valid`, so there is no loop in a chain of these, only a combinational `ready` path
+through each. Breaking that needs a skid buffer -- a second storage element -- and the output
+register is not one, since it cannot accept a word while holding an unclaimed one.
+
+### What a uniform image can and cannot catch
+
+The headline property is that a flat image is a fixed point: the weights sum to the divisor and
+the boundary replicates, so every pixel is surrounded by copies of itself. It is the sharpest
+single check in the file and it is sharp about one thing only.
+
+**A flat image cannot see a tap reaching the wrong *place*** -- every place holds the same value.
+What it sees is a tap reaching somewhere holding no pixel at all, which here means a line buffer
+the frame has not filled. Measured, by asking which outputs each mutation disturbs on a flat 5x4
+frame:
+
+| mutation | pixels wrong | why |
+|---|---|---|
+| `noTop` | the whole first row | reads `lb1`, which the frame has not written |
+| `noBottom` | the whole last row | takes `s.data` in the flush, where there is none |
+| `noLeft` | pixel 0, and only pixel 0 | the window still holds a row that never ran |
+| `noRight` | **none** | the pixel it wrongly borrows is always a real one |
+
+So `noLeft` passes it by an accident of the first beat rather than because a left edge is checked,
+and `noRight` does not pass it at all. The ramp images are what catch those two. **Keep both**: a
+property and a golden model fail on disjoint things here, which is not obvious before measuring.
+
+### What no test can catch, and why that is fine
+
+The kernel is symmetric, so mirroring the window left-to-right -- swapping `t[i][0]` with `t[i][2]`
+*and* `leftEdge` with `rightEdge` -- leaves every output unchanged, as does mirroring it
+top-to-bottom. Each is a consistent renaming of the neighbourhood, the same shape as reversing
+`Port.wires` and `Port.signals` together, and the same answer applies: the weights and the clamp
+are pinned directly on the model in `CircuitHdlTest/Blur/AbstractBlurModel.lean`, not inferred from
+a comparison. `noLeft` and `noRight` are the asymmetric halves of that pair and *are* caught.
+
+### Eight mutations as one design with a knob
+
+`blurBent` is `blur` with a `BlurBug` parameter read through elaboration-time `if`s, and
+
+```lean
+theorem blurBent_ok_is_blur :
+    { blurBent 5 4 8 .ok with name := `blur } = blur 5 4 8 := by rfl
+```
+
+is what makes each setting a one-*site* change. Eight separate transcriptions would each be free
+to drift into testing a different design; this cannot, and it costs seventy lines instead of six
+hundred. The `with name := ...` is needed because `module!` puts the declaration's name in the
+`Module`, so the two differ in that field and in no other.
+
+A static `if` is what makes this work at all: one arm is built and the other does not exist, so
+`blurBent .ok` has no trace of the mutations in it and `rfl` goes through. A hardware `if` would
+have left a mux behind at every site.
+
+### Cost
+
+`CircuitHdlTest/Blur.lean` runs sixteen stall patterns on the evaluator plus one `lowered` shared
+across six netlist checks. Measured serially by `scripts/profile.sh`, one process per module with
+nothing else running: **25.4 s**, against 7.9 s for the design and 3.5 s for the model's own
+tests. All three sit well inside the per-module budget, and these are the figures to quote -- a
+per-module time read off a parallel build is a queueing artifact, as the build section above says.
+
+`blur 5 4 8` is 14 `seq.firreg`s and 220 operations -- against `asyncFifo`'s 55 and the mesh's
+7214 -- and the pair is pinned in the report's `size` line rather than written down here, for the
+reason the mesh's numbers were moved out of prose.
 
 ## Conventions
 

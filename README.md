@@ -48,15 +48,17 @@ design would be — there are no hand-built `Module` literals here:
 | `Examples/Fifo/Async.lean` | An asynchronous FIFO with AXI valid/ready ports: two clocks, gray-coded pointers, two-flop synchronizers. |
 | `Examples/Fifo/Shift.lean` | The same interface built the opposite way: one clock, no memory, data moves instead of pointers. Its depth is a parameter, over an array of registers. |
 | `Examples/RegFile.lean` | Storage addressed by a value: two read ports as mux chains over an array, one write port as a decoder. |
+| `Examples/Blur.lean` | A 3x3 blur over a stream of RGB pixels: two line buffers, a window of registers, and a flush at the end of each frame. The one design here whose output depends on a *window* of past input. |
 
-Alongside the designs, two *specifications* — what a FIFO is, with no reference to any
-implementation. Neither imports the HDL, which is what lets both FIFOs above be checked against
-the same models:
+Alongside the designs, three *specifications* — what a FIFO is, and what a blur is, with no
+reference to any implementation. None of them imports the HDL, which is what lets both FIFOs above
+be checked against the same two models:
 
 | File | Contents |
 |---|---|
 | `Examples/Fifo/AbstractFifoModel.lean` | A depth and a count. Forgetting the data is what makes the flag logic provable. |
 | `Examples/Fifo/AbstractQueueModel.lean` | A depth and a list, plus `counting`, the map down to the model above. Says the first-in-first-out property, which a counter cannot. |
+| `Examples/Blur/AbstractBlurModel.lean` | An image, a kernel, a divisor and a boundary rule. The design *calls* the first and follows the last, so the two cannot disagree about them — and for the same reason cannot check each other about them either. |
 
 Tests live in their own library under `CircuitHdlTest/`, so they can be built and run on their
 own with `lake test`. `lake build CircuitHdlQuick` builds the subset that runs no bounded
@@ -76,6 +78,7 @@ since they are assertions rather than designs:
 | `CircuitHdlTest/Fifo/Imported.lean` | Driving a `hw.module` this package did not build — the boundary, the bridge to `Veir.Netlist`, and the abstraction functions the two files above share. |
 | `CircuitHdlTest/Fifo/AbstractFifoModel.lean`, `AbstractQueueModel.lean` | The two specifications at their edges: saturation, overflow, degenerate depths. |
 | `CircuitHdlTest/FifoHarness.lean` | Shared machinery for checking any design against the models. |
+| `CircuitHdlTest/Blur.lean`, `Blur/AbstractBlurModel.lean` | The blur: its specification at the edges, and the design against it — under back-pressure, across frames, after a reset, and once lowered. Seven one-site mutations, written as one design with a knob whose off position is asserted equal to the real one. |
 | `CircuitHdlTest/Circt.lean` | The CIRCT lowering: the text it emits for the smallest designs, and VeIR's verdict on every example. |
 
 ## Layer 2: typed circuit core
@@ -527,8 +530,14 @@ two.runClocks two.initState [(`ca, []), (`ca, []), (`cb, []), (`ca, [])]
 
 ### Not yet covered
 
-There is no division, multiplication, or
-variable-amount shifts.
+There are no variable-amount shifts, and no signed operations: Verilog decides signedness from
+operand *declarations* and this language has no such notion, so `CmpOp` and `/` and `%` are
+unsigned throughout.
+
+Multiplication and division **are** covered — `BinOp` is `add | sub | mul | divu | modu | and |
+or | xor` — and both are reached by a design rather than only by a test: `Examples/Blur.lean`
+multiplies a pixel channel by a kernel weight. A zero divisor is the one thing `/` and `%` add to
+the divergence list, and it is refused rather than made poison the way CIRCT does.
 
 ## Example 1: 2-input AND
 
@@ -672,6 +681,48 @@ still drops. That is correct, not a bug: the read pointer reaches the write doma
 late, so the write side works from a stale view and back-pressures a write it could in principle
 have taken. Ready built on synchronized pointers is necessarily pessimistic — and pessimistic is
 the safe direction, since the opposite error overwrites data the reader has not taken.
+
+## Example 5: a 3x3 blur over a video stream
+
+Every design above either stores a stream, addresses storage, or routes packets. `Examples/Blur.lean`
+is the first one that *transforms* a stream: its output at any beat is a weighted average of a 3x3
+neighbourhood of the input, which means it has to remember the previous two rows.
+
+```lean
+module! blur #[(imgW imgH cw : Nat) (_h : validImage imgW imgH = true := by decide)]
+    (clk : 1, rst : 1, slave s : axis (3 * cw)) -> (master m : axis (3 * cw)) {
+  let pw := 3 * cw;
+  memory lb0[imgW] : pw;     -- the previous row
+  memory lb1[imgW] : pw;     -- the row before that
+  reg w[3][3] : pw;          -- the window, centre at w[*][1]
+  …
+}
+```
+
+Pixels arrive packed, `{r, g, b}` with red in the high bits, one per AXI-Stream beat, in raster
+order. Two `memory` delay lines hand back the same column from the two rows above; a 3x3 window of
+registers holds the last three such columns; the nine taps are weighted `1 2 1 / 2 4 2 / 1 2 1` and
+divided by 16, which the weights sum to — so the divide is a slice and not a divider.
+
+Three things about it are worth more than the arithmetic.
+
+**A frame in is a frame out.** A window centred on the last row needs a row that never arrives, so
+the frame does not end when the last pixel does: the design drops `s.ready` and runs `imgW + 3`
+further beats of its own, pushing the window out the far end. That makes the contract a golden-model
+comparison — `imgW * imgH` pixels in, their blur out — rather than an exercise in matching offsets.
+
+**The boundary replicates, and that buys a property.** An off-image tap repeats the nearest real
+pixel, so a *uniform image is a fixed point*: the weights sum to the divisor, and with replication a
+border pixel is as surrounded by copies of itself as an interior one is. Zero-padding would darken
+every border pixel, and `CircuitHdlTest/Blur/AbstractBlurModel.lean` carries that as the control.
+
+**The output is registered, and `ready` is not.** `m.valid` and `m.data` come off a register pair
+that the arithmetic does not need; they are there so that `m.valid` reads no input signal and
+cannot be withdrawn before its handshake. Written the obvious way instead — `m.valid` high when the
+window holds an output and the beat can be taken — the design delivers every pixel correctly and
+still violates AXI-Stream, which is a defect no golden-model test can see. `s.ready`, by contrast,
+does pass `m.ready` straight through, so unlike the FIFOs two of these cannot be chained without a
+skid buffer between them.
 
 ## Clock domains
 

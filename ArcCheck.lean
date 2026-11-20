@@ -185,6 +185,23 @@ private def asyncDesign : ArcDesign :=
     srcValid := `s.valid, srcData := `s.data, srcWidth := 8, dstReady := `m.ready
     observe := [`s.ready, `m.valid, `m.data] }
 
+/-- The blur filter, which is here for the **operations** rather than for the protocol: it is the
+only design in the package that emits `comb.mul` with a signal operand, and at `imgW = 4` the only
+one whose memory address is narrowed on its way to the `seq.firmem` port. Both of those are
+things `Veir.Netlist` and `CircuitHdl.Circt` could agree about while being wrong together, which
+is exactly what this file exists to notice.
+
+Its ports are FIFO-shaped -- `s.valid`/`s.data`/`s.ready` against `m.valid`/`m.data`/`m.ready` on
+one clock -- so `ArcDesign` needs no generalising to carry it. `AGENTS.md` records that shape as
+the reason `regFile` has no entry; the blur has one because it reaches operations the FIFOs do
+not, which is the bar that paragraph sets. -/
+private def blurDesign : ArcDesign :=
+  { label := "blur4x3"
+    m := blur 4 3 8
+    clocks := [`clk], resets := [`rst]
+    srcValid := `s.valid, srcData := `s.data, srcWidth := 24, dstReady := `m.ready
+    observe := [`s.ready, `m.valid, `m.data] }
+
 /-- `writes` offers then `reads` accepts, repeated, alternating the clock a tick belongs to. At
 depth 4 and six writes a round this fills the FIFO and wraps its pointers. -/
 private def burstTicks (d : ArcDesign) (writes reads rounds : Nat) : List ArcTick :=
@@ -203,6 +220,36 @@ private def schedulesFor (d : ArcDesign) : List (String × List ArcTick) :=
   let wrap := burstTicks d 6 3 3
   let withReset := (burstTicks d 6 1 1) ++ [arcResetTick d] ++ burstTicks d 3 3 1
   [("fill", fill), ("wrap", wrap), ("reset", withReset)]
+
+/-! ### The blur's schedules
+
+A frame is `imgW * imgH` pixels followed by `imgW + 2` flush beats, and the stimulus here is a
+fixed sequence rather than a handshake: both sides are driven identically, so what is compared is
+two simulators on the same inputs and not whether a protocol was obeyed. Offering a pixel every
+tick with `m.ready` held high does advance the pipeline exactly once a tick, so the frame does go
+through.
+-/
+
+/-- A ramp whose three channels move at different rates, so a channel leaking into another shows
+up in the compared ports. -/
+private def blurFrame (n : Nat) : List Nat :=
+  (List.range n).map fun i =>
+    (i * 7 + 3) % 256 + ((i * 13 + 40) % 256) * 256 + ((i * 29 + 11) % 256) * 65536
+
+/-- `pixels` offered one a tick, then `flush` idle ticks with the consumer still ready. -/
+private def frameTicks (pixels : List Nat) (flush : Nat) (accept : Bool := true) :
+    List ArcTick :=
+  pixels.map (fun p => { clock := `clk, offer := some p, accept : ArcTick })
+    ++ List.replicate flush ({ clock := `clk, offer := none, accept } : ArcTick)
+
+private def blurSchedules : List (String × List ArcTick) :=
+  let frame := frameTicks (blurFrame 12) 8
+  -- A consumer that is never ready: `adv` stays low once an output is on offer, so the design
+  -- holds. That exercises the stall path through `comb.mux` and the register enables.
+  let held := frameTicks (blurFrame 12) 8 (accept := false)
+  let withReset := frameTicks (blurFrame 6) 0 ++ [arcResetTick blurDesign]
+    ++ frameTicks (blurFrame 12) 8
+  [("frame", frame), ("held", held), ("reset", withReset)]
 
 /-! ### Entry point -/
 
@@ -223,6 +270,8 @@ def main : IO Unit := do
   for d in [shiftDesign, asyncDesign] do
     for (name, sched) in schedulesFor d do
       writeCase dir d name sched
+  for (name, sched) in blurSchedules do
+    writeCase dir blurDesign name sched
 
 end CircuitHdl
 
