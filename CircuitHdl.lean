@@ -5,6 +5,7 @@ import CircuitHdl.SettleOrder
 import CircuitHdl.SelectChain
 import CircuitHdl.Syntax
 import CircuitHdl.Semantics
+import CircuitHdl.Plan
 import CircuitHdl.Transactions
 import CircuitHdl.Circt
 import CircuitHdl.Examples.And2
@@ -36,6 +37,9 @@ The language itself:
                             order is not one
 - `CircuitHdl.Syntax`    -- the `module!` surface syntax, its lowering and width inference
 - `CircuitHdl.Semantics` -- evaluation over core `BitVec`
+- `CircuitHdl.Plan`      -- the same semantics with names resolved to slots and the state in one
+                            flat `Array`, which is about 170x faster on the mesh. `Semantics` is
+                            the specification; this is what a long run should execute
 - `CircuitHdl.SelectChain` -- that a dynamic array read *is* a mux over every element, which is
                             what the backend builds for one. Kernel-proved, at every width, depth
                             and in-range address

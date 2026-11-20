@@ -441,6 +441,78 @@ That took `mesh 4 13` from 160 to **320 `seq.firreg`s** and about 7200 lowered o
 The buffer deliberately does not bypass, which caps a link at one flit every two cycles and is
 what keeps `iK.ready` free of any `oJ.ready` term. Bypassing reintroduces the backward loop.
 
+## The compiled evaluator
+
+`CircuitHdl/Plan.lean` is a second implementation of `CircuitHdl/Semantics.lean`: `compile`
+resolves every `Name` to an integer slot and every width to a mask, and `Plan.run` executes that
+over one flat `Array Nat`. `Module.fastSim` is it as a `Sim`, beside `Module.sim` and `lowered`.
+**`Semantics.lean` remains the specification** -- it is what the refinement results are stated
+against and what a proof would reduce through -- and nothing has switched to the compiled path
+yet.
+
+Per tick, pinned, both `Sim`s bound once:
+
+| design | statements | `Module.sim` | `Module.fastSim` | |
+|---|---|---|---|---|
+| `shiftFifo 4 8` | 6 | 0.106 ms | 0.027 | 3.9x |
+| `asyncFifo 4 8` | 13 | 0.154 | 0.051 | 3.0x |
+| `mesh 2 5` | 492 | 17.5 | 1.03 | 17x |
+| `mesh 4 13` | 1920 | 272 | 4.50 | 60x |
+
+**The gain scales with declarations, not with ticks**, because what it removes is a list walk per
+access: `State.get?` is a `List.lookup` and `State.setCell` a `List.map` over the whole state.
+Measured directly -- `shiftFifo 4` and `shiftFifo 16` cost the same per statement to three digits
+while holding 16 against 28 values, so it is the number of *declarations* that matters.
+
+### Generating Lean source was tried and is not worth it
+
+The obvious alternative is to emit a `def` of straight-line `let`s per design. Measured against
+the interpreter over identical expression trees at mesh shape, it wins -- 0.247 us/stmt against
+0.382 at 1920 statements, and 3x at 492 -- and then costs about **73 ms per statement** of
+elaboration, 143 s for a design the size of `mesh 4 13`. A mesh test runs a few hundred ticks and
+the break-even is around a million. It also cannot carry a theorem: "this emitted `Syntax` denotes
+the same function as `m.settle`" is not statable inside Lean without a deep embedding of Lean's
+own term language.
+
+Two sub-results worth not re-deriving. A naive emitter that gives every expression node its own
+slot and its own array write is *slower* than the interpreter and takes **19m58s** to compile at
+mesh scale; chunking the output into bounded-depth definitions (16 statements each) takes that to
+143 s and makes it linear, and keeping intermediates as Lean locals is what makes it faster at
+all. And the element type decides the rest: `Array UInt64` boxes every element so each write
+allocates, `Array Nat` stores small values as tagged immediates. That is 0.38 against 0.53 us/stmt
+on the generated arm, and it is why the state is `Nat`.
+
+### Things that bit
+
+- **`Nat` subtraction truncates at zero where `BitVec` wraps**, so `sub` is `a + (2^w - b)` masked
+  and never `a - b`. No design in `Examples` reaches the wrapping case -- `shiftFifo`'s
+  `count - (rfire ? 1 : 0)` has `rfire` implying `count != 0` -- so a mutation run found this
+  green and `planWrap` in `CircuitHdlTest/Plan.lean` exists for it.
+- **`writeBack` narrows every value to its declared width, which hides too-wide intermediates.**
+  An operator that drops its mask is invisible wherever the result is *stored* at the width that
+  would have masked it anyway, which is almost everywhere. Three of the six initially-green
+  mutations were this. A probe has to put the value somewhere it survives -- a comparison, or a
+  wider result.
+- **`BitVec.ofNat` recomputes `2 ^ w` on every call**, and at a width read from a declaration the
+  compiler cannot fold it. That was 2.1 ms of a 5.8 ms mesh tick -- more than the settle it
+  wrapped -- in `writeBack` alone. It looks free when measured at a literal width, which is
+  exactly how not to measure it.
+- **Flattening expression trees into a contiguous op array is slower, not faster.** 0.418 us/stmt
+  against 0.382: it trades 1920 array writes for 12193 and keeps the dispatch. What dominates the
+  interpreter is one unpredictable indirect jump -- the jump table the `PExpr.eval` match compiles
+  to -- plus one call, per node.
+
+### What is not done
+
+`Plan.run (compile m) = m.settle` is **not proved**, and until it is, `CircuitHdlTest/Plan.lean`
+is the entire reason to believe the compiled path. Fifteen mutations of `Plan.lean` are listed in
+its header; fourteen are red and the fifteenth is expected green and says why. The theorem is an
+induction over `Expr`/`Stmt` with a state-encoding invariant, and it is tractable for a reason
+worth knowing: **no execution path in `Semantics.lean` ever adds a name to the state or changes a
+value's width** -- `setChecked` and `setMem` both error rather than extend -- so the slot layout is
+preserved by construction. It will carry `m.check = .ok ()` as a hypothesis, because `compile`
+refuses a width mismatch eagerly where `Module.settle` fails only if the statement is reached.
+
 ## Known blocker
 
 `∀ depth dw h, (asyncFifo depth dw h).check = .ok ()` is **not** provable with current tactics,

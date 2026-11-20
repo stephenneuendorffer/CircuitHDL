@@ -467,11 +467,17 @@ where
             if k < n then .ok w else .error (.elemRange a 0 k n)
         | _ => .error (.noSuchPort i.name a)
 
+/-- A module's declarations, as the context every rule in this file reads.
+
+Fails exactly where `Module.declEnv` does, so a name declared twice at disagreeing widths is
+reported here rather than by whichever rule reaches it first. -/
+def Module.ctx? (m : Module) : Except CheckError Ctx := do
+  let env ← m.declEnv
+  .ok { env := env, inputs := (m.inputs.map Port.name), arrays := m.allArrays, mems := m.mems }
+
 /-- Check every process in a module against its declarations, and every instance's bindings. -/
 def Module.check (m : Module) : Except CheckError Unit := do
-  let env ← m.declEnv
-  let ctx : Ctx :=
-    { env := env, inputs := (m.inputs.map Port.name), arrays := m.allArrays, mems := m.mems }
+  let ctx ← m.ctx?
   m.insts.forM (InstInfo.check ctx)
   m.body.forM (Process.check ctx)
 

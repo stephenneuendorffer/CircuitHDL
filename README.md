@@ -29,7 +29,8 @@ The language itself, under `CircuitHdl/`:
 | `Width.lean` | The width rules as ordinary Lean over the AST (`Expr.width?`, `Module.check`). |
 | `Clocks.lean` | Clock-domain analysis (`Module.clockDomains`, `Module.singleClocked`). |
 | `Syntax.lean` | The `module!` surface syntax, its lowering into the AST, and width inference. |
-| `Semantics.lean` | Evaluation over core `BitVec` (`Expr.eval`, `Module.step`, `Module.run`). |
+| `Semantics.lean` | Evaluation over core `BitVec` (`Expr.eval`, `Module.step`, `Module.run`). The specification. |
+| `Plan.lean` | The same semantics compiled: names resolved to slots, widths to masks, the state one flat `Array`. `Module.fastSim` is 3x on a FIFO and 60x on a 4x4 mesh. |
 | `Transactions.lean` | Driving AXI-Stream ports at transaction level (`Module.transfer`). |
 | `Circt.lean` | Lowering to the CIRCT dialects `hw`/`comb`/`seq` via VeIR (`Module.toMlir`, `Module.toVeir`). The one module with a dependency outside core `Lean`. |
 | `../CircuitHdl.lean` | Umbrella module importing the above. |
@@ -67,6 +68,7 @@ since they are assertions rather than designs:
 |---|---|
 | `CircuitHdlTest/Syntax.lean` | Expression lowering and precedence, plus round-trips asserting the example designs lower to the hand-written reference structures (`and2Example`, `counterExample`) kept here. |
 | `CircuitHdlTest/Semantics.lean` | Executable tests: the counter counts, the and2 truth table, non-blocking assignment. |
+| `CircuitHdlTest/Plan.lean` | The compiled evaluator against the specification one: that `compile` accepts exactly what `check` accepts, that the two agree on every example, and that the flat layout is what it says. |
 | `CircuitHdlTest/Clocks.lean` | Clock-domain analysis on small modules: what it accepts, rejects, and where the boundary sits. |
 | `CircuitHdlTest/Fifo/Async.lean` | The FIFO simulated at three clock ratios and with intermittent handshakes, gray-code and synchronizer unit tests, and its refinement of the abstract models — including `bv_decide` proofs that the gray-coded full and empty flags fire at exactly the right occupancy. |
 | `CircuitHdlTest/Fifo/Shift.lean` | The shift-register FIFO: that it carries the same traffic, and that it refines the same models by entirely different means. |

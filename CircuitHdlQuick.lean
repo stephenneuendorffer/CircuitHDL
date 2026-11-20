@@ -2,6 +2,7 @@ import CircuitHdlTest.Fifo.AbstractFifoModel
 import CircuitHdlTest.Fifo.AbstractQueueModel
 import CircuitHdlTest.Syntax
 import CircuitHdlTest.Semantics
+import CircuitHdlTest.Plan
 import CircuitHdlTest.Clocks
 import CircuitHdlTest.SettleOrder
 import CircuitHdlTest.Circt

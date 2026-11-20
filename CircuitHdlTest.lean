@@ -2,6 +2,7 @@ import CircuitHdlTest.Fifo.AbstractFifoModel
 import CircuitHdlTest.Fifo.AbstractQueueModel
 import CircuitHdlTest.Syntax
 import CircuitHdlTest.Semantics
+import CircuitHdlTest.Plan
 import CircuitHdlTest.Clocks
 import CircuitHdlTest.SettleOrder
 import CircuitHdlTest.Fifo.AsyncDesigns
@@ -39,6 +40,12 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 hand-written reference modules
 - `CircuitHdlTest.Semantics` -- executable tests: the counter counts, the and2 truth table,
                                 blocking versus non-blocking assignment
+- `CircuitHdlTest.Plan`      -- the compiled evaluator against the specification one: that
+                                `compile` accepts exactly what `check` accepts, that the two
+                                semantics agree on every example, and that the flat layout is
+                                what it says. Nothing here is a proof, and until
+                                `Plan.run (compile m) = m.settle` is one, this file is the whole
+                                reason to believe the compiled path
 - `CircuitHdlTest.Clocks`    -- clock-domain analysis: what it accepts, rejects, and where the
                                 boundary sits
 - `CircuitHdlTest.Fifo.Async` -- the FIFO at three clock ratios and with intermittent handshakes,
