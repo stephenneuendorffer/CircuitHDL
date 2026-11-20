@@ -157,7 +157,15 @@ design's gray-coded full test are both exercised.
 
 Each of these runs the real `asyncFifo` and checks, at every tick, that the occupancy its pointers
 encode is exactly the model's, and that the occupancy is within the depth. Together the file costs
-roughly 20s to check, almost all of it here.
+roughly 25s to check, almost all of it here: `shortSchedules` is 4096 schedules of four ticks, so
+the two theorems over it drive 16,384 ticks each and account for most of the file.
+
+That cost is a factor of twenty below what it was, and none of it came from the proofs. The sort
+`Module.settle` used to redo on every settle is now computed once in `Module.sim`, and the
+`CircuitHdl` library is precompiled, without which `native_decide` runs in Lean's IR interpreter.
+`AGENTS.md` carries both measurements. Before them this file was the slowest in the suite at
+544s, and splitting it was the obvious move; it is worth knowing that the obvious move would have
+been wasted work.
 -/
 
 /-- **Every schedule of length 4, at depth 4.** -/

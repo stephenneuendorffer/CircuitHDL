@@ -46,16 +46,77 @@ concurrently only if neither imports the other, so a two-way split where the net
 the source-level half would have bought nothing. `lake build CircuitHdlQuick` is the subset that
 runs no schedule family, and is not a substitute -- `CircuitHdlQuick.lean` says what it omits.
 
-**Do not trust a single wall-clock measurement on this host.** It is shared, and unchanged modules
-were measured sevenfold apart between runs (`CircuitHdlTest.Mesh` at 688s then 98s,
-`CircuitHdlTest.Fifo.Shift` at 31s then 233s). Two traps cost time here, and each produces a
-result that reads as success:
+**A per-module time taken from inside a parallel build is not a cost, it is a queueing artifact.**
+Lake reports each job's *wall* time, and a module competing with ten others for cores looks slow
+purely because of when it was scheduled. Two clean builds of an identical tree, back to back:
+`Fifo.Verilog` 234s then 30s, `Fifo.ShiftNetlist` 29s then 263s, `Fifo.Pipe` 75s then 14s --
+while the **totals agreed to 0.5%**, 297.2s against 295.7s. This is most of the "sevenfold
+variance" this file used to attribute to other users on the host (`Mesh` at 688s then 98s,
+`Fifo.Shift` at 31s then 233s): same effect, read off the same kind of log.
+
+So measure the two things separately. A whole-build wall clock is reproducible and is what
+`lake test` costs. A per-module cost has to be measured **serially**, one module per process with
+nothing else running -- `scripts/profile.sh` does that, and repeats agree closely (`Mesh` 183s
+then 180s, `Fifo.Firrtl` 218s then 219s).
+
+Two further traps cost time here, and each produces a result that reads as success:
 
 - `touch` invalidates nothing, since lake traces content hashes rather than mtimes.
 - `lake clean` leaves `.lake/build/lib/lean/CircuitHdlTest/` in place, so a "full rebuild" can
   rebuild only the library. Lake writing to a pipe rather than a TTY prints nothing at all for the
   up-to-date modules, so the log looks plausible. Delete the test build directories explicitly and
   check the job count.
+- **A failed build is a fast build.** A `lean` that dies on a missing symbol exits in a second or
+  two, which reads as a spectacular improvement if the only thing recorded is the clock. A
+  measurement that does not check for "Build completed successfully" has measured nothing; this
+  produced a reported 43x speedup that was six builds failing in 4.4s each.
+- **`precompileModules` changes the build config without changing an olean**, so enabling it does
+  not invalidate anything downstream. A module has to be deleted or edited to be re-elaborated,
+  and a rebuild that reuses everything times as a win.
+
+**Keep a single module under about two minutes.** Since a module is serial, the suite costs what
+its slowest module costs, and the serial unit is the *declaration* -- once a theorem is over
+budget on its own, no amount of splitting modules helps and the theorem itself has to get cheaper.
+`scripts/profile.sh` is the instrument; its header lists the ways a per-module measurement goes
+quietly wrong.
+
+#### `native_decide` is interpreted unless the module it calls is precompiled
+
+This was the single largest cost in the package, and nothing about it is visible in a profile --
+it shows up only as an absolute number far too large for the work being done. A `State.setCell`
+over a 31-element list measured **56us**, which is roughly 200x what compiled code takes.
+
+`lakefile.toml` sets `precompileModules` on the `CircuitHdl` library for this reason. Measured on
+a module holding one theorem that runs 5000 settles, identical text, forced rebuild, `lake` both
+times: **42.3s to 13.2s**, and about 6.5x once the ~8s of import and lake overhead both runs pay
+is taken off. It costs the library build about 45s and takes it from 212 jobs to 677.
+
+Measure a change like this with *one* method on both sides. Half the confusion in arriving at
+these numbers came from comparing a `lake` build against a bare `lean` invocation, which differ
+by the dynlibs, by lake's own startup, and by what counts as a dependency rebuild.
+
+- **The test library cannot have it.** Lake then builds a `.so` per test module and they fail to
+  load: `undefined symbol: initialize_VeIR_Veir_Interpreter_Netlist`. VeIR ships
+  `libVeIR_Veir.so` without setting `precompileModules` at all, and that library does not cover
+  `Veir.Interpreter.Netlist`. Until that is resolved upstream, everything in `CircuitHdlTest` --
+  the harness, the `VeirBridge` -- runs interpreted, which is why the four modules that lean on
+  the bridge are the ones still over budget.
+- **Running `lean` directly no longer measures the truth.** Lake passes `--load-dynlib` for every
+  precompiled dependency, leaves-first: Coinductive, lean-ctrees, VeIR, then CircuitHdl. Without
+  those flags the module still builds, about 4x slower, with no indication anything is wrong.
+
+#### Where the per-tick cost went
+
+`Module.sim` computes the dependency sort **once** and the closures capture it. Building the
+`Sim` from `m.settle` and `m.stepClock` instead is the same simulator and re-sorts on every
+settle -- three times a tick, since the harness settles once itself and `stepClock` settles on
+both sides of the edge. Worth 1.7x across the evaluator-backed modules, and the three pure-netlist
+modules moved less than 1%, which is what says the gain was the sort and not the host.
+
+Per-theorem cost cannot be read off a trace profile here. A proof elaborated as an async task
+blocks behind the declarations ahead of it and its trace node **spans the wait**, so the four
+`native_decide` checks in `Fifo/Async.lean` each report 50.1s and each cost about 1s. Time a
+theorem in its own process instead.
 
 ## Tests are compile-time, and a test is not a proof
 

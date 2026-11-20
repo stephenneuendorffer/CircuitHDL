@@ -37,14 +37,20 @@ The membership rule is "does this module run a schedule family", which is why `F
 -- its theorems run 1024 schedules through the comparatively cheap evaluator -- while
 `Fifo.ShiftNetlist` is out, running the same schedules through `Veir.Netlist`.
 
-**Do not trust a single timing on this host.** Measurements taken to draw the line disagreed with
-each other by up to sevenfold on unchanged modules: `CircuitHdlTest.Mesh` came in at 688s and then
-98s, `Fifo.Shift` at 31s and then 233s, with no edit between. The box is shared, so wall-clock per
-module tracks whatever else is running. What survives that noise is the *ordering* -- the modules
-left out are consistently the expensive ones, and `Fifo.AsyncRefinement` or one of its siblings is
-consistently the critical path -- and the structural fact that `lake` parallelises across modules
-but not within one, so `lake test` costs about what its slowest single module costs. Anything
-finer than that needs a quiet machine and repeated runs.
+**Do not trust a single timing on this host**, and do not take a per-module one from inside a
+parallel build at all. Lake reports a job's wall clock, so a module competing for cores reads as
+expensive purely by when it was scheduled: two back-to-back clean builds of an identical tree put
+`Fifo.Verilog` at 234s and then 30s, and `Fifo.ShiftNetlist` at 29s and then 263s, while the two
+**totals** agreed to 0.5%. That is most of the "sevenfold variance" this file used to report. A
+per-module cost has to be measured serially -- `scripts/profile.sh` -- and `AGENTS.md` says what
+else goes quietly wrong when measuring one.
+
+The line drawn here predates two changes that took the suite from roughly ten minutes to about
+five: `Module.sim` now computes the settle order once rather than on every settle, and the
+`CircuitHdl` library is precompiled, without which `native_decide` runs interpreted. The
+membership rule is unchanged and still structural, but the modules it excludes are no longer
+dramatic -- `Fifo.AsyncRefinement` went from 544s to about 25s, and the two genuinely expensive
+modules left are `Fifo.Verilog` and `Fifo.Firrtl`, which this target already omits.
 
 The `*Designs` and `Imported` modules carry no theorems, so they are here for the compile check on
 the designs themselves -- a `module!` that stopped elaborating would otherwise show up only in the
