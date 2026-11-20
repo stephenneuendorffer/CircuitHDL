@@ -370,6 +370,18 @@ def Module.initState (m : Module) : State :=
       if σ.any (·.1 == x) then σ else σ ++ [(x, Cell.mem (List.replicate d (Value.ofNat w 0)))])
     withArrays
 
+/-- Settle against an order that has already been computed.
+
+The order is a property of the *module*, so a simulator that settles thousands of times should
+sort once rather than once per settle. `Module.settle` takes the module and therefore cannot: it
+calls `Module.settleOrder`, which runs the whole dependency sort, and `step` and `stepClock` each
+settle twice. That is the right shape for a one-shot `#guard` and the wrong one for a schedule
+family, where the same module is settled tens of thousands of times and the answer never changes.
+
+`Module.sim` is where the hoisting happens, and the testbenches drive a `Sim`. -/
+def Module.settleWith (order : SettleOrder) (σ : State) : Except EvalError State :=
+  Stmt.execBlockingList σ order.steps
+
 /-- Run the combinational logic to a settled state.
 
 One pass, over `Module.settleOrder` rather than over the processes in source order. The pass is
@@ -382,7 +394,7 @@ unnoticed for so long.
 The flattening is free: a combinational process has no sensitivity list and blocking assignment
 makes statement order the only thing the boundary expressed. -/
 def Module.settle (m : Module) (σ : State) : Except EvalError State :=
-  Stmt.execBlockingList σ m.settleOrder.steps
+  Module.settleWith m.settleOrder σ
 
 /-- Take a clock edge: run the sequential processes. -/
 def Module.clockEdge (m : Module) (σ : State) : Except EvalError State :=
@@ -460,9 +472,21 @@ structure Sim where
   /-- One tick of one clock: settle, take that clock's edge, settle again. -/
   stepClock : Name → State → State → Except EvalError State
 
-/-- The evaluator in this file, as a `Sim`. -/
+/-- The evaluator in this file, as a `Sim`.
+
+The dependency sort happens **here**, once, and the closures below capture the result. Writing
+this as `{ settle := m.settle, stepClock := m.stepClock }` is the same simulator and re-sorts on
+every settle -- three times a tick, since the harness settles once itself and `stepClock` settles
+on both sides of the edge. A `Sim` is built once per check and then driven over a whole schedule
+family, so this is the one place where the distinction is worth tens of thousands of sorts. -/
 def Module.sim (m : Module) : Sim :=
-  { init := m.initState, settle := m.settle, stepClock := m.stepClock }
+  let order := m.settleOrder
+  { init := m.initState
+    settle := Module.settleWith order
+    stepClock := fun clk σ inputs => do
+      let σ ← Module.settleWith order (σ.apply inputs)
+      let σ ← m.clockEdgeOn clk σ
+      Module.settleWith order σ }
 
 /-- So that a testbench written against `Sim` still reads `refinesAlongAll fifo4 ..`, with the
 design named directly. -/
