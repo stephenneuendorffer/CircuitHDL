@@ -145,6 +145,24 @@ has fewer array accesses.
 4.36 runtime against a 4.35 library fails at link time on a missing symbol rather than at run
 time. Use `$(dirname $(elan which lean))/leanc`, or the explicit toolchain path.
 
+#### Two ways a timer measures nothing, both met in one afternoon
+
+`Bench.lean` (`lake exe bench`) times a design over a real workload, where `scripts/profile.sh`
+times a module's elaboration. Both of these produced a *plausible* zero rather than an error:
+
+- **`timed (pure e)` measures the wrapping.** `pure` stores `e` unevaluated, so the caller's first
+  use pays the cost. A 64x16 frame reported 0.0 ms on every simulator inside a process that ran
+  for 12.6 s. The tell was the per-tick figure **falling** as the frame grew -- a fixed overhead
+  divided by a rising tick count. Force the result inside the window, and make the second clock
+  reading depend on it so the match cannot be floated past it.
+- **`let` is strict, so a timer opened after one is too late.** `let net := lowered m` lowers
+  there and then, and a timer started afterwards reports 0.0 ms for an 11 ms lowering. `Sim` is in
+  `Type 1` and cannot be returned through `IO`, so the timer cannot wrap the binding either:
+  `lowerMs` builds the IR a second time inside the window and says so.
+
+Both have the same shape as the "a failed build is a fast build" trap above: the number is small,
+and small is what success looks like.
+
 **And pin the process.** The host is two sockets and two NUMA nodes (`0-83,168-251` and
 `84-167,252-335`) at 1500-3700 MHz. Unpinned, the *same binary* measured a `mesh 4 13` tick at
 123 ms, 13 ms and 123 ms on three consecutive runs, while `shiftFifo` in those same runs held

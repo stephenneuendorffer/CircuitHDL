@@ -37,3 +37,10 @@ name = "CircuitHdlQuick"
 [[lean_exe]]
 name = "arccheck"
 root = "ArcCheck"
+
+# The run-time benchmark. `scripts/profile.sh` measures what a module costs to elaborate; this
+# measures what a design costs to simulate, on all three simulators, over a real workload.
+# Deliberately not a test: a timing is not a property, and the host's clock speed is not pinned.
+[[lean_exe]]
+name = "bench"
+root = "Bench"
