@@ -17,6 +17,7 @@ import CircuitHdlTest.SelectChain
 import CircuitHdlTest.Mesh.RoutingModel
 import CircuitHdlTest.Mesh.Switch
 import CircuitHdlTest.Blur.AbstractBlurModel
+import CircuitHdlTest.Riscv.Alu
 
 /-!
 The subset of the suite that does not run bounded refinement proofs, for iterating on the language

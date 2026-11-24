@@ -78,19 +78,12 @@ structure State.HoldsArray (σ : State) (a : Name) (ws : List Value) (elemW : Na
 
 `Expr.eval` is written in `do` notation over `Except`, and a width check is a `dite`. Both reduce
 definitionally only when the widths are *literals*; at a symbolic width `Nat.decEq w w` is stuck,
-which is why `rfl` will not do and these two exist. -/
+which is why `rfl` will not do.
 
-@[simp] private theorem bind_ok {ε α β : Type} (x : α) (f : α → Except ε β) :
-    (Except.ok x : Except ε α) >>= f = f x := rfl
-
-/-- Viewing a value at the width it was built with always succeeds, and changes nothing.
-
-Stated over the constructor rather than as `v.atWidth v.width`, so that it matches a goal where
-the width is a literal: `simp` compares the second argument syntactically, and `1` is not
-`(Value.mk 1 b).width` to it. -/
-@[simp] theorem Value.atWidth_mk (w : Nat) (x : BitVec w) (ctx : String) :
-    (Value.mk w x).atWidth w ctx = .ok x := by
-  simp [Value.atWidth]
+Both lemmas this file used to carry -- `Except.bind_ok` and `Value.atWidth_mk` -- are in
+`CircuitHdl.Semantics` now, beside the definitions they are about. The ALU proofs in the test
+tree need the same two rewrites, and a fact about `Value` belongs where `Value` is defined rather
+than in the first file to have needed it. -/
 
 /-! ### The two reads, each on its own -/
 
@@ -126,8 +119,8 @@ theorem eval_select_eq_elem {σ : State} {a : Name} {elemW count : Nat} {addr : 
     (haddr : Expr.eval σ addr = .ok av) (hlt : av.toNat < count) :
     Expr.eval σ (.select a elemW [count] [addr])
       = Expr.eval σ (.elem a elemW [count] [av.toNat]) := by
-  simp only [Expr.eval, Expr.evalIndices, haddr, bind_ok, pure_bind, dynOffset, dynOffset.go,
-    rowMajorStrides, hlt, if_pos, List.prod_nil, Nat.mul_one, Nat.add_zero,
+  simp only [Expr.eval, Expr.evalIndices, haddr, Except.bind_ok, pure_bind, dynOffset,
+    dynOffset.go, rowMajorStrides, hlt, if_pos, List.prod_nil, Nat.mul_one, Nat.add_zero,
     rowMajorOffset_singleton, List.headD, List.head?]
 
 theorem eval_select_eq {σ : State} {a : Name} {ws : List Value} {elemW count : Nat} {addr : Expr}
@@ -145,7 +138,8 @@ theorem eval_select_out_of_range {σ : State} {a : Name} {ws : List Value} {elem
     Expr.eval σ (.select a elemW [count] [addr])
       = .error (.indexOutOfRange a av.toNat ws.length) := by
   subst hc
-  simp only [Expr.eval, Expr.evalIndices, haddr, bind_ok, pure_bind, dynOffset, dynOffset.go]
+  simp only [Expr.eval, Expr.evalIndices, haddr, Except.bind_ok, pure_bind, dynOffset,
+    dynOffset.go]
   rw [if_neg (Nat.not_lt.mpr hi)]
   rfl
 
@@ -160,7 +154,7 @@ theorem eval_mux_eq {σ : State} {c t f : Expr} {b : BitVec 1} {tv fv : Value}
   obtain ⟨fw, fb⟩ := fv
   simp only at hw
   subst hw
-  simp only [Expr.eval, hc, ht, hf, bind_ok, Value.atWidth_mk]
+  simp only [Expr.eval, hc, ht, hf, Except.bind_ok, Value.atWidth_mk]
 
 /-- The address comparison one arm tests, as a decision about the address's value.
 
@@ -182,7 +176,7 @@ theorem eval_addrEq {σ : State} {addr : Expr} {addrW k : Nat} {ab : BitVec addr
         rw [Ne, BitVec.toNat_eq, BitVec.toNat_ofNat, Nat.mod_eq_of_lt hk]
         exact h
       simp [hne, h]
-  simp only [Expr.eval, haddr, operands, bind_ok, Value.atWidth_mk, Value.ofNat,
+  simp only [Expr.eval, haddr, operands, Except.bind_ok, Value.atWidth_mk, Value.ofNat,
     CmpOp.apply, hbool]
 
 /-! ### The chain -/

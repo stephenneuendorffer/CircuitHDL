@@ -26,6 +26,7 @@ import CircuitHdlTest.Mesh.Switch
 import CircuitHdlTest.Mesh
 import CircuitHdlTest.Blur.AbstractBlurModel
 import CircuitHdlTest.Blur
+import CircuitHdlTest.Riscv.Alu
 
 /-!
 Umbrella module for the test suite.
@@ -96,6 +97,12 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 the lowered form compared against the evaluator directly; and
                                 seven one-site mutations, written as one design with a knob whose
                                 off position is asserted equal to the real design
+- `CircuitHdlTest.Riscv.Alu` -- the RV64I ALU against `../veir`'s behavioural model: ten
+                                operations, each proved equal to the `BitVec 64` function
+                                `Veir.Data.RISCV` defines for it, at every input rather than over
+                                a schedule. The only result here stated against a specification
+                                this package did not write, and the only one that reduces a
+                                `module!` design symbolically rather than running it
 - `CircuitHdlTest.Mesh`   -- that the assembled mesh delivers: corner to corner in each
                                 direction, under contention, and without interleaving two packets
                                 sharing an output. One `#eval` rather than many `#guard`s, because

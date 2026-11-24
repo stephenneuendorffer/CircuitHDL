@@ -25,6 +25,7 @@ import CircuitHdl.Examples.Mesh.Switch
 import CircuitHdl.Examples.Mesh
 import CircuitHdl.Examples.Blur.AbstractBlurModel
 import CircuitHdl.Examples.Blur
+import CircuitHdl.Examples.Riscv.Alu
 
 /-!
 Umbrella module for the circuit HDL sketch.
@@ -88,4 +89,9 @@ language they need:
                                       line buffers in `memory`, a 3x3 window in registers, and a
                                       flush at the end of each frame so that a frame in is a
                                       frame out
+- `CircuitHdl.Examples.Riscv.Alu` -- the integer ALU of an RV64I core: two log shifters, a signed
+                                      comparison built out of unsigned, and ten operations
+                                      selected by the four bits the instruction already spends on
+                                      choosing between them. The one design here whose
+                                      specification was written in another repository
 -/

@@ -119,6 +119,12 @@ private def verifies (m : Module) : Bool :=
 -- `adaptWidth`'s narrowing branch.
 #guard verifies (blur 4 3 8)
 
+-- The RV64I ALU, which is the widest design here by a factor of eight and the only purely
+-- combinational one with a non-trivial depth: two six-stage shifters feeding a ten-arm mux, all
+-- at 64 bits. `CircuitHdlTest/Riscv/Alu.lean` proves what it computes; this says the lowering of
+-- it is well formed, which no proof about `CircuitHdl.Semantics` can.
+#guard verifies riscvAlu
+
 /-! ### What it refuses
 
 Each of these is a design the evaluator will happily run but that has no structural reading, so

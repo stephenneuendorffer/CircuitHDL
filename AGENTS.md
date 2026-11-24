@@ -1207,6 +1207,109 @@ per-module time read off a parallel build is a queueing artifact, as the build s
 7214 -- and the pair is pinned in the report's `size` line rather than written down here, for the
 reason the mesh's numbers were moved out of prose.
 
+## Proving a design symbolically, and the RV64I ALU
+
+`CircuitHdl/Examples/Riscv/Alu.lean` is the integer ALU of an RV64I core, and
+`CircuitHdlTest/Riscv/Alu.lean` proves it equal to `../veir`'s RISC-V behavioural model --
+`Veir/Data/RISCV/Reg/Basic.lean`, one pure `BitVec 64` function per instruction, documented as
+proven equivalent to the authoritative Sail model and taken from `opencompl/riscv-lean` -- for
+**every** input, by the kernel, rather than over a schedule.
+
+Two things about the result are new here and neither is the ISA. The specification was written in
+another repository, which is the same argument that keeps `Veir.Netlist` out of this one: a model
+written beside its design agrees with whatever its author assumed twice. And it is the first
+result that **reduces a `module!` design symbolically** rather than running it, which required
+machinery nothing else here had needed.
+
+### A proof cannot go through `Module.settle`
+
+`SettleOrder.of` builds a `Std.HashMap Name _` and `Name.hash` is `@[extern]`, so the kernel
+cannot run it. Measured on a module with one statement: `m.settleOrder.steps.length = 1` fails by
+`rfl` while `m.body` and `m.initState` both succeed. So a theorem reduces `Stmt.execBlockingList`
+over the design's own statements and a **`#guard` pins `m.settleOrder.steps` against them** --
+`repr` rather than `==`, since `Stmt` derives only `Repr`. The pin is a test, in the same sense
+`CircuitHdlTest/SelectChain.lean` is one, and it is the check that fires if a design's statements
+stop being in dependency order as written.
+
+The statement list itself is *derived*, not transcribed: `simp only [m, Module.ofItems,
+Item.processes, Item.processes.flushPending, ..]` unfolds a module into the list the surface
+syntax produced. Nothing hand-written stands between the design and the theorems.
+
+Nor can the state be given concretely. `State.get?` is a `List.lookup` whose `BEq Name` lands in a
+`match` scrutinee, and `simp` will not evaluate one there -- the same blocker recorded above for
+`Module.check`. The state is abstract and carries hypotheses, as `State.HoldsArray` already did
+one module over, and `aluOn_initState` discharges them by `rfl` against the design's own power-up
+state so the hypotheses are known to describe a state that exists.
+
+`CircuitHdl/Semantics.lean` grew the lemmas this needs: `lookup_setCell_self`/`_ne`,
+`get?_set_self`/`_ne`, `State.Holds` with `setChecked_of_holds`, `Value.ite_mk` and
+`Except.bind_ok`. `Value.atWidth_mk` moved there from `SelectChain.lean` for the same reason.
+
+### Two costs, each a factor of ten or more
+
+- **Fold a chain's stages back into opaque functions as `simp` goes.** `Expr.eval` substitutes
+  each shifter stage into the next, so the settled value of a six-stage shifter contains its input
+  `2 ^ 6` times and the state term is quadratic on top of that. Reduced that way, under the
+  default `simp` set, one operation took **113 s**. Two `rfl` lemmas folding
+  `if sel = 1#1 then x.shiftLeft sh else x` back into an `lsStage` application, together with a
+  tight `simp only` list, take the whole reduction at a *symbolic* opcode to about **14 s**. The
+  two changes were made together and the factor is not split between them. The same folding is
+  what keeps the SAT problems linear in the depth of the chain.
+- **`unfold f` is not `simp only [f]`.** Unfolding a six-deep nest of one definition with `simp
+  only` duplicates its argument at every rewrite and re-simplifies each copy: it failed to finish
+  within 1,000,000 heartbeats. `unfold shlChain lsStage RISCV.sll` followed by `dsimp only` is
+  delta reduction, takes about a second, and `bv_decide` then closes the goal in about three.
+  **Reach for `unfold` before a `bv_decide` on anything built from nested definitions.**
+
+### Two things `bv_decide` will not take
+
+- **A `Value` in the goal.** `Value.bits` is a dependent projection, so `apply_ite Value.bits`
+  does not typecheck and `bv_decide`'s preprocessing fails on the `ite` that `Expr.eval` builds
+  for a mux. `Value.ite_mk` rewrites the conditional at the `Value` level first; a one-line
+  `ok_mk_of_eq` then strips `Except.ok` and `Value.mk` and leaves a `BitVec` goal.
+- **A `<<<` that `simp` has already rewritten.** `simp [Veir.Data.RISCV.sll]` turns the shift into
+  `BitVec.ofNatClamp ..`, which `bv_decide` abstracts as an opaque variable and then reports a
+  spurious counterexample. `simp only` leaves the shift alone and it goes through.
+
+### What is kernel-only, and what is not
+
+Five of the ten operations -- `add`, `sub`, `xor`, `or`, `and` -- are the model's own operator at
+the model's own width, so the reduction lands on that operator and the theorem is `rfl`: `propext`,
+`Classical.choice`, `Quot.sound` and nothing else. The other five need `bv_decide` and carry its
+generated axiom. That split is pinned with `#print axioms` rather than described, and it is a fact
+about the design rather than about the tactic.
+
+**A mutation of the design does not falsify a theorem, it fails the build**, which is worth
+knowing before reading the controls as weaker than they are: `aluOut` transcribes the design, so
+`alu_settles` stops closing by `rfl` before any operation theorem is reached. Measured, by tying
+`fill` low. Update `aluOut` to match the mutated design and the localisation is there -- the same
+mutation with `aluOut`'s `fl` set to `0#1` falsifies **`alu_sra` alone**, leaving `alu_srl`
+untouched although it traverses the same six stages of the same chain. Both halves measured.
+
+So the recorded controls are behavioural: five one-site mutations behind a knob, and a report
+naming which operations each breaks. One of them, `rsAmount`, broke **nothing** as first written,
+because the vector set never shifted a large enough operand by an amount with bit 4 set; adding
+two further vectors fixed the control. A control that cannot fail is worth nothing.
+
+The settle-order `#guard` bites too: writing `l1` before `l0` fires it, with `alu_settles` failing
+alongside, since the sort repairs the order where the derived list keeps it.
+
+Measured serially by `scripts/profile.sh`, one process per module with nothing else running:
+**67 s** for `CircuitHdlTest/Riscv/Alu.lean` and 7.3 s for the design. Four repeats agreed --
+66.8, 66.9, 67.1, 66.8 -- and one earlier reading of 12.7 s did not reproduce in any of them, so
+treat that one as the artifact it is. This is the slowest module in the suite. With it in,
+deleting the test library's oleans, its IR and its shared object and running `lake test` takes
+**1 m 46 s** over 59 elaborated modules; the 91 s recorded in the precompilation section above was
+measured some other way and the two are not comparable.
+
+Where the 67 s goes, measured by truncating the file: **12.9 s** to the end of `alu_settles`,
+**52 s** for the ten operation theorems, **2 s** for the controls. So the cost is the SAT solving
+and nothing else -- the reduction, the `#guard`s and the mutation report together are a fifth of
+it. It is **deliberately one module** rather than siblings over a shared base, which is the
+arrangement the FIFOs use: splitting would have to cut the five `bv_decide` operations into two
+arbitrary halves to balance, since the five `rfl` ones are free, and a 23 s saving does not buy
+splitting one argument across two files. Revisit the arrangement once a second design lands here.
+
 ## Conventions
 
 - **A filename matches the primary data structure in it.** `AbstractFifoModel.lean` defines

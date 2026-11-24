@@ -52,6 +52,25 @@ def atWidth (v : Value) (w : Nat) (ctx : String) : Except EvalError (BitVec w) :
   if h : v.width = w then .ok (BitVec.cast h v.bits)
   else .error (.check (.widthMismatch ctx w v.width))
 
+/-- Viewing a value at the width it was built with always succeeds, and changes nothing.
+
+Stated over the *constructor* rather than as `v.atWidth v.width`, so that it matches a goal where
+the width is a literal: `simp` compares the second argument syntactically, and `1` is not
+`(Value.mk 1 b).width` to it. -/
+@[simp] theorem atWidth_mk (w : Nat) (x : BitVec w) (ctx : String) :
+    (Value.mk w x).atWidth w ctx = .ok x := by
+  simp [Value.atWidth]
+
+/-- A conditional between two values of one width is that width holding a conditional.
+
+`bits` is a *dependent* projection -- its type mentions `width` -- so `apply_ite Value.bits` does
+not typecheck and `simp` cannot push a projection through the `ite` that `Expr.eval` builds for a
+mux. Rewriting the `ite` at the `Value` level first is what gets a `BitVec` goal out of a design
+with a mux in it, which is every design worth proving anything about. -/
+@[simp] theorem ite_mk {c : Prop} [Decidable c] {w : Nat} {p q : BitVec w} :
+    (if c then Value.mk w p else Value.mk w q) = Value.mk w (if c then p else q) := by
+  split <;> rfl
+
 end Value
 
 /-! ### State -/
@@ -120,6 +139,124 @@ def setChecked (σ : State) (x : Name) (v : Value) : Except EvalError State := d
 /-- Apply a batch of updates left to right. -/
 def apply (σ : State) (updates : State) : State :=
   updates.foldl (fun s (x, c) => s.setCell x c) σ
+
+/-! ### Reading a state back after writing it
+
+A combinational process is a *sequence* of blocking assignments, so anything proved about one
+has to say what the statements after an assignment read. `CircuitHdl.SelectChain` needed none of
+this -- it reasons about a single `Expr.eval` -- and these lemmas are what take the same style of
+proof from one expression to a whole process.
+
+**They are the only way in.** A state cannot be given concretely instead: `State.get?` is a
+`List.lookup` whose `BEq Name` lands in a `match` scrutinee, and `simp` will not evaluate one
+there, which is the blocker `AGENTS.md` already records for `Module.check`. Nor can the proof
+reach the statements through `Module.settle`, since `SettleOrder.of` builds a `Std.HashMap Name _`
+and `Name.hash` is `@[extern]`, so the kernel cannot run it. What is left is an abstract `σ`
+carrying hypotheses, exactly as `State.HoldsArray` does one module over. -/
+
+/-- Everything here is `do` notation over `Except`, so a successful step has to get out of the
+way before the next one is visible. -/
+@[simp] theorem _root_.Except.bind_ok {ε α β : Type} (x : α) (f : α → Except ε β) :
+    (Except.ok x : Except ε α) >>= f = f x := rfl
+
+/-- A map that rewrites values and leaves keys alone commutes with a lookup. Both branches of
+`setCell` are of that shape, which is why this is stated once rather than per branch. -/
+private theorem lookup_map_key_preserving (σ : State) (g : Name → Cell → Cell) (y : Name) :
+    (σ.map (fun p => (p.1, g p.1 p.2))).lookup y = (σ.lookup y).map (g y) := by
+  induction σ with
+  | nil => rfl
+  | cons p t ih =>
+    cases hb : y == p.1 with
+    | true =>
+      have : y = p.1 := by simpa using hb
+      simp [List.lookup, this]
+    | false => simp [List.lookup, hb, ih]
+
+/-- The guard `setCell` branches on, as a statement about the lookup it is guarding. -/
+private theorem any_iff_lookup (σ : State) (x : Name) :
+    (σ.any (·.1 == x)) = true ↔ (σ.lookup x).isSome = true := by
+  induction σ with
+  | nil => simp [List.lookup]
+  | cons p t ih =>
+    cases hb : x == p.1 with
+    | true =>
+      have h1 : (p.1 == x) = true := by simpa [BEq.comm] using hb
+      simp [List.lookup, hb, h1]
+    | false =>
+      have h1 : (p.1 == x) = false := by
+        cases h2 : p.1 == x
+        · rfl
+        · simp_all [BEq.comm]
+      simp [List.lookup, hb, h1, ih]
+
+/-- `setCell`'s rewriting branch with the key factored out of the conditional, which is the shape
+the lookup lemma above matches. The two sides differ only in where the `ite` sits. -/
+private theorem setCell_map_eq (x : Name) (c : Cell) :
+    (fun (p : Name × Cell) => if p.1 == x then (p.1, c) else (p.1, p.2))
+      = (fun p => (p.1, if p.1 == x then c else p.2)) := by
+  funext p; split <;> rfl
+
+/-- Writing a cell and reading it back gives what was written, **whichever branch `setCell`
+took**: present, every matching entry is rewritten; absent, it is appended to a list that did not
+contain the name. -/
+theorem lookup_setCell_self (σ : State) (x : Name) (c : Cell) :
+    (σ.setCell x c).lookup x = some c := by
+  unfold State.setCell
+  split
+  · rename_i h
+    rw [setCell_map_eq, lookup_map_key_preserving σ (fun k v => if k == x then c else v) x]
+    have hs : (σ.lookup x).isSome = true := (any_iff_lookup σ x).mp h
+    cases hl : σ.lookup x with
+    | none => simp [hl] at hs
+    | some v => simp
+  · rename_i h
+    have hn : σ.lookup x = none := by
+      cases hl : σ.lookup x with
+      | none => rfl
+      | some v => exact absurd ((any_iff_lookup σ x).mpr (by simp [hl])) (by simpa using h)
+    simp [List.lookup_append, hn, List.lookup]
+
+/-- Writing one cell leaves every other name alone. -/
+theorem lookup_setCell_ne (σ : State) (x y : Name) (c : Cell) (hxy : y ≠ x) :
+    (σ.setCell x c).lookup y = σ.lookup y := by
+  unfold State.setCell
+  split
+  · rw [setCell_map_eq, lookup_map_key_preserving σ (fun k v => if k == x then c else v) y]
+    cases hl : σ.lookup y <;> simp [hxy]
+  · have hb : (y == x) = false := by simpa using hxy
+    simp [List.lookup_append, List.lookup, hb]
+
+@[simp] theorem get?_set_self (σ : State) (x : Name) (v : Value) :
+    (σ.set x v).get? x = .ok v := by
+  simp [State.get?, State.set, lookup_setCell_self]
+
+@[simp] theorem get?_set_ne (σ : State) (x y : Name) (v : Value) (h : y ≠ x) :
+    (σ.set x v).get? y = σ.get? y := by
+  simp [State.get?, State.set, lookup_setCell_ne σ x y _ h]
+
+/-- That `σ` holds `x` as a scalar of width `w` -- the one thing `setChecked` asks before it
+writes, and so the one thing a proof has to carry from statement to statement.
+
+The *value* is existential on purpose. A proof has the exact contents of the inputs it was handed
+and of every wire it has already driven; for the rest, all that is needed to get past the width
+check is that the declaration is present and is the right size, which is what
+`Module.initState` arranges for every declared signal. -/
+def Holds (σ : State) (x : Name) (w : Nat) : Prop :=
+  ∃ v : BitVec w, σ.get? x = .ok (Value.mk w v)
+
+@[simp] theorem Holds_set_self (σ : State) (x : Name) (w : Nat) (b : BitVec w) :
+    (σ.set x (Value.mk w b)).Holds x w := ⟨b, by simp⟩
+
+@[simp] theorem Holds_set_ne (σ : State) (x y : Name) (v : Value) (w : Nat) (h : y ≠ x) :
+    (σ.set x v).Holds y w ↔ σ.Holds y w := by
+  simp [State.Holds, h]
+
+/-- A checked assignment at the declared width is an unchecked one. This is the rewrite that
+turns a blocking block into a chain of `set`s. -/
+@[simp] theorem setChecked_of_holds (σ : State) (x : Name) (w : Nat) (b : BitVec w)
+    (h : σ.Holds x w) : σ.setChecked x (Value.mk w b) = .ok (σ.set x (Value.mk w b)) := by
+  obtain ⟨old, hold⟩ := h
+  simp [State.setChecked, hold]
 
 end State
 
