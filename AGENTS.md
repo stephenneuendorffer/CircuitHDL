@@ -1223,9 +1223,16 @@ machinery nothing else here had needed.
 
 ### A proof cannot go through `Module.settle`
 
-`SettleOrder.of` builds a `Std.HashMap Name _` and `Name.hash` is `@[extern]`, so the kernel
-cannot run it. Measured on a module with one statement: `m.settleOrder.steps.length = 1` fails by
-`rfl` while `m.body` and `m.initState` both succeed. So a theorem reduces `Stmt.execBlockingList`
+`SettleOrder.of` builds a `Std.HashMap` to index statements by the signals they read, and **a
+`Std.HashMap` does not reduce in the kernel at all**. The cause is not the key type: a `Nat`-keyed
+map fails identically, and `size` of a one-element `Std.HashMap Nat Nat` is not provable by `rfl`.
+It is `USize`. A hash map picks buckets with machine words, `USize.size` is
+`2 ^ System.Platform.numBits`, and `numBits` is `(System.Platform.getNumBits ()).val` where
+`getNumBits` is `opaque` -- deliberately, since its value is whatever the host is. The kernel has
+no value for it, so every bucket index is stuck and everything downstream with it.
+
+Measured on a module with one statement: `m.settleOrder.steps.length = 1` fails by `rfl` while
+`m.body` and `m.initState` both succeed. So a theorem reduces `Stmt.execBlockingList`
 over the design's own statements and a **`#guard` pins `m.settleOrder.steps` against them** --
 `repr` rather than `==`, since `Stmt` derives only `Repr`. The pin is a test, in the same sense
 `CircuitHdlTest/SelectChain.lean` is one, and it is the check that fires if a design's statements

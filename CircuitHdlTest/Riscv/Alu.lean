@@ -29,9 +29,10 @@ to `Circt.lean`. This is that argument applied to a design.
 
 ### The one gap, named
 
-`Module.settle` walks `Module.settleOrder`, and `SettleOrder.of` builds a `Std.HashMap Name _`
-whose `Name.hash` is `@[extern]`. The kernel cannot run it, so no proof can reduce through
-`Module.settle`. What the theorems below reduce is `Stmt.execBlockingList` over the design's own
+`Module.settle` walks `Module.settleOrder`, and `SettleOrder.of` builds a `Std.HashMap`, which
+does not reduce in the kernel at all: bucket indices go through `USize`, whose width is an opaque
+platform constant. `AGENTS.md` has the chain. So no proof can reduce through `Module.settle`, and
+what the theorems below reduce is `Stmt.execBlockingList` over the design's own
 statements in source order, which is what `Module.settleWith` runs -- *provided* the sort returned
 source order. The `#guard` on `repr riscvAlu.settleOrder.steps` below checks that by running it,
 and is therefore a test in exactly the sense `CircuitHdlTest/SelectChain.lean` is one: a pin on
@@ -88,9 +89,9 @@ def aluSteps : List Stmt := (riscvAlu.body.map Process.body).flatten
 
 -- **The settle order is source order**, so `Module.settleWith` runs exactly `aluSteps`.
 --
--- A `#guard` rather than a theorem because `SettleOrder.of` hashes `Name`s and the kernel cannot
--- reduce it; comparing `repr` rather than `==` because `Stmt` derives `Repr` and `Expr` is a
--- nested inductive that `deriving BEq` does not handle.
+-- A `#guard` rather than a theorem because `SettleOrder.of` goes through a `Std.HashMap`, which
+-- the kernel cannot reduce; comparing `repr` rather than `==` because `Stmt` derives `Repr` and
+-- `Expr` is a nested inductive that `deriving BEq` does not handle.
 --
 -- What it is *for* is to say that the list the theorems reduce is the list `Module.settleWith`
 -- runs. Measured: writing `l1` before `l0` makes it fire, and `alu_settles` fail alongside it --

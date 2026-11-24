@@ -150,8 +150,8 @@ proof from one expression to a whole process.
 **They are the only way in.** A state cannot be given concretely instead: `State.get?` is a
 `List.lookup` whose `BEq Name` lands in a `match` scrutinee, and `simp` will not evaluate one
 there, which is the blocker `AGENTS.md` already records for `Module.check`. Nor can the proof
-reach the statements through `Module.settle`, since `SettleOrder.of` builds a `Std.HashMap Name _`
-and `Name.hash` is `@[extern]`, so the kernel cannot run it. What is left is an abstract `σ`
+reach the statements through `Module.settle`, since `SettleOrder.of` builds a `Std.HashMap`, which
+does not reduce in the kernel at all -- see `AGENTS.md` for why. What is left is an abstract `σ`
 carrying hypotheses, exactly as `State.HoldsArray` does one module over. -/
 
 /-- Everything here is `do` notation over `Except`, so a successful step has to get out of the
