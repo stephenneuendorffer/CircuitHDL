@@ -27,6 +27,8 @@ import CircuitHdlTest.Mesh
 import CircuitHdlTest.Blur.AbstractBlurModel
 import CircuitHdlTest.Blur
 import CircuitHdlTest.Riscv.Alu
+import CircuitHdlTest.Riscv.Model
+import CircuitHdlTest.Riscv
 
 /-!
 Umbrella module for the test suite.
@@ -103,6 +105,15 @@ pins the width-error messages, and `#guard` forces evaluation of the simulations
                                 a schedule. The only result here stated against a specification
                                 this package did not write, and the only one that reduces a
                                 `module!` design symbolically rather than running it
+- `CircuitHdlTest.Riscv.Model` -- what an RV64I machine does, with every arithmetic result
+                                delegated to the same `Veir.Data.RISCV` functions the ALU was
+                                proved against, and the decode written out independently of the
+                                design's
+- `CircuitHdlTest.Riscv`     -- the core against that machine: five programs run in lockstep on
+                                the evaluator and on the lowered netlist, with the whole
+                                architectural state compared after every instruction, and the
+                                three conventions the two machines share pinned directly because
+                                comparing them cannot see one
 - `CircuitHdlTest.Mesh`   -- that the assembled mesh delivers: corner to corner in each
                                 direction, under contention, and without interleaving two packets
                                 sharing an output. One `#eval` rather than many `#guard`s, because

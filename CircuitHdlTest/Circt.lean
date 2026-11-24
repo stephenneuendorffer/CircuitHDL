@@ -125,6 +125,10 @@ private def verifies (m : Module) : Bool :=
 -- it is well formed, which no proof about `CircuitHdl.Semantics` can.
 #guard verifies riscvAlu
 
+-- The core around it, which is the only design here with a register file read by a value and a
+-- memory written under a condition in the same module.
+#guard verifies riscv
+
 /-! ### What it refuses
 
 Each of these is a design the evaluator will happily run but that has no structural reading, so

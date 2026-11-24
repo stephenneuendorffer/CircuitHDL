@@ -18,6 +18,8 @@ import CircuitHdlTest.Mesh.RoutingModel
 import CircuitHdlTest.Mesh.Switch
 import CircuitHdlTest.Blur.AbstractBlurModel
 import CircuitHdlTest.Riscv.Alu
+import CircuitHdlTest.Riscv.Model
+import CircuitHdlTest.Riscv
 
 /-!
 The subset of the suite that does not run bounded refinement proofs, for iterating on the language

@@ -1297,10 +1297,10 @@ alongside, since the sort repairs the order where the derived list keeps it.
 Measured serially by `scripts/profile.sh`, one process per module with nothing else running:
 **67 s** for `CircuitHdlTest/Riscv/Alu.lean` and 7.3 s for the design. Four repeats agreed --
 66.8, 66.9, 67.1, 66.8 -- and one earlier reading of 12.7 s did not reproduce in any of them, so
-treat that one as the artifact it is. This is the slowest module in the suite. With it in,
-deleting the test library's oleans, its IR and its shared object and running `lake test` takes
-**1 m 46 s** over 59 elaborated modules; the 91 s recorded in the precompilation section above was
-measured some other way and the two are not comparable.
+treat that one as the artifact it is. This is the slowest module in the suite. Deleting the test
+library's oleans, its IR and its shared object and running `lake test` takes **1 m 43 s**, with
+the whole test tree rebuilt; the 91 s recorded in the precompilation section above was measured
+some other way and the two are not comparable.
 
 Where the 67 s goes, measured by truncating the file: **12.9 s** to the end of `alu_settles`,
 **52 s** for the ten operation theorems, **2 s** for the controls. So the cost is the SAT solving
@@ -1309,6 +1309,51 @@ it. It is **deliberately one module** rather than siblings over a shared base, w
 arrangement the FIFOs use: splitting would have to cut the five `bv_decide` operations into two
 arbitrary halves to balance, since the five `rfl` ones are free, and a 23 s saving does not buy
 splitting one argument across two files. Revisit the arrangement once a second design lands here.
+
+### The core around it, and the half the ALU proof cannot reach
+
+`CircuitHdl/Examples/Riscv.lean` is a single-cycle in-order RV64I core: one instruction per clock
+edge, a thirty-two entry register file read by value, a 64-word data memory, and **no instruction
+memory**. `Sim.init` is every signal at its power-up value with no way to preload a cell, so a
+program held inside the design could only be written in through its own write port one word per
+cycle. The core presents `pc` as an output and takes `instr` as an input instead, and the
+testbench is the instruction memory.
+
+`CircuitHdlTest/Riscv/Model.lean` is the reference machine, and the division of labour is the
+point: the ALU theorems say each operation computes what RV64I says, and say nothing about *when*
+the hardware applies each one. `RiscvModel` answers that by calling the same `Veir.Data.RISCV`
+functions -- including `addi`, `slli`, `lui` and `auipc`, so the immediates are veir's sign
+extension rather than one written again -- with the decode written out independently of the
+design's.
+
+**A core wired to subtract where it should add passes the ALU theorems and fails this; an ALU
+whose shifter is off by one stage fails the ALU theorems and may well pass this**, since a program
+has to shift by 32 or more to notice. Neither layer subsumes the other.
+
+Three things that cost time or would have:
+
+- **`reg` is a reserved token for the whole file.** `RiscvModel.reg` fails to parse wherever
+  `CircuitHdl.Syntax` is imported, which is the rule already recorded for `mem`. It is `readReg`.
+- **The `jalr` control was vacuous as first written.** `pJump` returned through `jalr x0, 0(x1)`,
+  whose computed target is already even, so deleting the ISA's clearing of bit 0 from the design
+  disturbed nothing. The offset is `1` now. That is the second control in this pair of files
+  found worthless by running the mutation rather than by reading it, the other being `rsAmount`.
+- **The core is smaller lowered than it looks.** 33 `seq.firreg`s and 667 operations, against the
+  mesh's 320 and 7214: a register file is one register per entry rather than one per bit, and an
+  operation here is 64 bits wide where the mesh's are 13. So the netlist runs the whole program
+  set rather than a sample, and `CircuitHdlTest/Riscv.lean` elaborates in **5.7 s**.
+
+Five design mutations, each run. Making `aluB` take the immediate under `OP` falsifies all five
+programs; a taken branch advancing by four falsifies `loop` and `branch`; `jalr` leaving bit 0 set
+falsifies `jump` at tick 2; `x0` as an ordinary register falsifies `jump` at tick 2; `maddr` as
+`aluY[7:2]` and a load that does not assert `we` each falsify `mem`. The report names the tick and
+the field, which is what comparing after **every** instruction buys -- a final-state comparison on
+a program with a loop reports two numbers and leaves the tick to be found by hand.
+
+**Three conventions the comparison cannot see**, because the core and the model share them: the
+address truncated to bits 8..3 so the memory aliases every 512 bytes, an unimplemented opcode
+advancing as a no-op, and `x0` reading zero. Each is pinned against a written-out expectation,
+for the reason `Port.wires` and `Port.signals` are.
 
 ## Conventions
 

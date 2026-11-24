@@ -26,6 +26,7 @@ import CircuitHdl.Examples.Mesh
 import CircuitHdl.Examples.Blur.AbstractBlurModel
 import CircuitHdl.Examples.Blur
 import CircuitHdl.Examples.Riscv.Alu
+import CircuitHdl.Examples.Riscv
 
 /-!
 Umbrella module for the circuit HDL sketch.
@@ -94,4 +95,8 @@ language they need:
                                       selected by the four bits the instruction already spends on
                                       choosing between them. The one design here whose
                                       specification was written in another repository
+- `CircuitHdl.Examples.Riscv`   -- a single-cycle in-order RV64I core around that ALU: a
+                                      thirty-two entry register file read by value, a data
+                                      memory, and an instruction bus, executing one instruction
+                                      per clock edge
 -/
