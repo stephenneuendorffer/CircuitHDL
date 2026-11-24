@@ -85,10 +85,12 @@ private def expectedTrace (d : ArcDesign) (sim : Sim) (sched : List ArcTick) :
   for t in sched do
     if t.reset then
       for c in d.clocks do
-        σ ← sim.stepClock c σ (inputsFor d t true)
+        σ := sim.stepClock c σ (inputsFor d t true)
     else
-      σ ← sim.stepClock t.clock σ (inputsFor d t false)
-    out := out ++ [d.observe.map fun x => (σ.valueOf? x).getD 0]
+      σ := sim.stepClock t.clock σ (inputsFor d t false)
+    if let some e := sim.error σ then throw e
+    let q := sim.query σ
+    out := out ++ [d.observe.map fun x => (q.valueOf? x).getD 0]
   return out
 
 /-! ### Generating the driver -/

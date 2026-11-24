@@ -51,7 +51,7 @@ wrapping pointers and a memory is exactly the work this implementation does not 
 -/
 
 /-- The occupancy of a shift-register FIFO: it keeps a count, so there is nothing to reconstruct. -/
-def shiftAbstractionOf (depth : Nat) (σ : State) : Option AbstractFifoModel := do
+def shiftAbstractionOf (depth : Nat) (σ : Query) : Option AbstractFifoModel := do
   let count ← σ.valueOf? `count
   return { depth, count }
 
@@ -59,7 +59,7 @@ def shiftAbstractionOf (depth : Nat) (σ : State) : Option AbstractFifoModel := 
 
 One lookup, because the registers are an array and `State` holds an array as one cell. Spelling
 out `[`r0, `r1, `r2, `r3]` was the only thing in this file that knew the depth was four. -/
-def shiftQueueAbstractionOf (depth : Nat) (σ : State) : Option AbstractQueueModel := do
+def shiftQueueAbstractionOf (depth : Nat) (σ : Query) : Option AbstractQueueModel := do
   let count ← σ.valueOf? `count
   let regs ← σ.memOf? `r
   return { depth, queue := regs.take count }

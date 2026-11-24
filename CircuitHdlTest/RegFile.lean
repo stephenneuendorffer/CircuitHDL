@@ -50,15 +50,14 @@ private def RfTick.inputs (t : RfTick) : State :=
 private def rfTrace (s : Sim) (ts : List RfTick) : Option (List (Nat × Nat)) :=
   go s.init ts
 where
-  go (σ : State) : List RfTick → Option (List (Nat × Nat))
+  go (σ : s.Rep) : List RfTick → Option (List (Nat × Nat))
     | [] => some []
-    | t :: rest =>
-        match s.stepClock `clk σ t.inputs with
-        | .error _ => none
-        | .ok σ' => do
-            let a ← σ'.valueOf? `rd0
-            let b ← σ'.valueOf? `rd1
-            return (a, b) :: (← go σ' rest)
+    | t :: rest => do
+        let σ' := s.stepClock `clk σ t.inputs
+        let q := s.query σ'
+        let a ← q.valueOf? `rd0
+        let b ← q.valueOf? `rd1
+        return (a, b) :: (← go σ' rest)
 
 /-- Writes land where they are addressed, each read follows its own address, and a tick with `we`
 low leaves the file alone. -/
@@ -82,9 +81,8 @@ private def scenario : List RfTick :=
 -- is there, which is what `rfTrace` reports. This matches the `ruw = old` that `CircuitHdl.Circt`
 -- gives a `seq.firmem`, so the two kinds of storage agree on the one case a memory has to be told
 -- about.
-#guard (rf.sim.settle (rf.sim.init.apply
-    ({ we := 1, wa := 0, wd := 0x5E, ra0 := 0 : RfTick }).inputs)).toOption.bind
-  (State.valueOf? · `rd0) = some 0
+#guard (rf.sim.query (rf.sim.settle rf.sim.init
+    ({ we := 1, wa := 0, wd := 0x5E, ra0 := 0 : RfTick }).inputs)).valueOf? `rd0 = some 0
 
 /-! ### Reset
 
@@ -158,13 +156,12 @@ module! arrFile #[(depth dw aw : Nat)]
 private def oneReadTrace (s : Sim) : Option (List Nat) :=
   go s.init scenario
 where
-  go (σ : State) : List RfTick → Option (List Nat)
+  go (σ : s.Rep) : List RfTick → Option (List Nat)
     | [] => some []
-    | t :: rest =>
-        match s.stepClock `clk σ
-            [(`we, c 1 t.we), (`wa, c 2 t.wa), (`wd, c 8 t.wd), (`ra0, c 2 t.ra0)] with
-        | .error _ => none
-        | .ok σ' => do return (← σ'.valueOf? `rd0) :: (← go σ' rest)
+    | t :: rest => do
+        let σ' := s.stepClock `clk σ
+          [(`we, c 1 t.we), (`wa, c 2 t.wa), (`wd, c 8 t.wd), (`ra0, c 2 t.ra0)]
+        return (← (s.query σ').valueOf? `rd0) :: (← go σ' rest)
 
 -- **The two storage kinds behave identically.**
 #guard oneReadTrace (memFile 4 8 2).sim = oneReadTrace (arrFile 4 8 2).sim

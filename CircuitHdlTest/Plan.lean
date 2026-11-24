@@ -193,14 +193,26 @@ pass, and on a design the size of the mesh most of the state is intermediate.
 -/
 
 /-- A state as plain numbers, so two of them can be compared and printed. `Cell` has no `BEq`, and
-giving it one would be a definition in the language for the sake of a test. -/
-private def shape : Except EvalError State → Except String (List (Name × List Nat))
-  | .ok σ => .ok (σ.map fun (x, c) =>
-      (x, match c with | .sig v => [v.toNat] | .mem ws => ws.map Value.toNat))
-  | .error e => .error e.render
+giving it one would be a definition in the language for the sake of a test.
 
-private def trace (s : Sim) (clk : Name) (ins : List State) : Except EvalError State :=
-  ins.foldlM (fun σ i => s.stepClock clk σ i) s.init
+**Asked through `Query`**, since the two semantics hold their states differently and what a name
+answers is the only thing they share -- so this compares them through the interface rather than as
+two association lists. The declaration names come from the module, so a simulator holding *fewer*
+declarations than the design has answers `none` and shows up here; the declaration count in
+`agrees` is what covers one holding *more*. -/
+private def shape (names : List Name) (s : Sim) (σ : s.Rep) :
+    Except String (List (Name × List Nat)) :=
+  match s.error σ with
+  | some e => .error e.render
+  | none =>
+      names.mapM fun x =>
+        match s.query σ x with
+        | some (.sig v) => .ok (x, [v.toNat])
+        | some (.mem ws) => .ok (x, ws.map Value.toNat)
+        | none => .error s!"no cell for '{x}'"
+
+private def trace (s : Sim) (clk : Name) (ins : List State) : s.Rep :=
+  ins.foldl (fun σ i => s.stepClock clk σ i) s.init
 
 /-- Run one scenario on both semantics.
 
@@ -208,10 +220,16 @@ private def trace (s : Sim) (clk : Name) (ins : List State) : Except EvalError S
 the fold would compile once per tick -- the trap `CircuitHdlTest/Mesh.lean` records for
 `lowered`. -/
 private def agrees (nm : String) (m : Module) (clk : Name) (ins : List State) : String :=
-  let ref := shape (trace m.sim clk ins)
-  let fast := shape (trace m.fastSim clk ins)
-  if ref == fast then s!"{nm}: ok"
-  else s!"{nm}: ref={repr ref} fast={repr fast}"
+  let names := m.initState.map Prod.fst
+  let a := m.sim
+  let b := m.fastSim
+  let ref := shape names a (trace a clk ins)
+  let fast := shape names b (trace b clk ins)
+  -- The declaration count as well as the values: `shape` asks for the names the module declares,
+  -- so a representation carrying an extra one is invisible to it.
+  let sizes := (m.initState.length, (m.compile.map (fun p => p.layout.decls.length)).toOption)
+  if ref == fast && sizes.2 == some sizes.1 then s!"{nm}: ok"
+  else s!"{nm}: ref={repr ref} fast={repr fast} decls={repr sizes}"
 
 private def sig (w n : Nat) : Cell := .sig (Value.ofNat w n)
 
@@ -381,8 +399,12 @@ Each of these would be green if the thing above it were not doing its job.
 #guard (illFormed.map (fun (_, m) => m.check.isOk)).all (· == false)
 
 -- The error cases above really do error, rather than agreeing because both returned a state.
-#guard (shape (trace (planDivMod.fastSim) `clk [[(`a, sig 8 1), (`b, sig 8 0)]])).isOk == false
-#guard (shape (trace (planMemOob.fastSim) `clk [[(`a, sig 4 5), (`d, sig 8 7)]])).isOk == false
+#guard (let s := planDivMod.fastSim
+        (shape (planDivMod.initState.map Prod.fst) s
+          (trace s `clk [[(`a, sig 8 1), (`b, sig 8 0)]])).isOk) == false
+#guard (let s := planMemOob.fastSim
+        (shape (planMemOob.initState.map Prod.fst) s
+          (trace s `clk [[(`a, sig 4 5), (`d, sig 8 7)]])).isOk) == false
 
 -- And that `agrees` can say something other than `ok`: a design compared against a *different*
 -- design reports two states rather than passing. Without this the report above would read the
@@ -390,8 +412,11 @@ Each of these would be green if the thing above it were not doing its job.
 /-- info: mismatch: ref=Except.ok [(`clk, [0]), (`a, [0]), (`b, [0])] fast=Except.ok [(`clk, [0]), (`a, [0]), (`b, [1])] -/
 #guard_msgs in #eval IO.println <|
   let ins : List State := [[(`a, sig 1 1), (`b, sig 1 0)]]
-  let ref := shape (trace swapComb.sim `clk ins)
-  let other := shape (trace swapSeq.fastSim `clk ins)
+  let names := swapComb.initState.map Prod.fst
+  let a := swapComb.sim
+  let b := swapSeq.fastSim
+  let ref := shape names a (trace a `clk ins)
+  let other := shape names b (trace b `clk ins)
   if ref == other then "mismatch: ok" else s!"mismatch: ref={repr ref} fast={repr other}"
 
 end CircuitHdl

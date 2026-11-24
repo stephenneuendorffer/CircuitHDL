@@ -36,15 +36,14 @@ private def ins (we wr wc wd rr rc : Nat) : State :=
 a column -- a decoder that dropped a dimension would still look right on a diagonal.
 
 `[1][1]` is written last and deliberately: it is where the out-of-range read below lands. -/
-private def filled (s : Sim) : Option State := do
+private def filled (s : Sim) : s.Rep := Id.run do
   let mut σ := s.init
   for (r, c, d) in [(1, 2, 0xA5), (3, 0, 0x5A), (0, 3, 0x11), (1, 1, 0x77)] do
-    σ ← (s.stepClock `clk (σ.apply (ins 1 r c d 0 0)) (ins 1 r c d 0 0)).toOption
+    σ := s.stepClock `clk σ (ins 1 r c d 0 0)
   return σ
 
-private def readAt (s : Sim) (r c : Nat) : Option Nat := do
-  let σ ← filled s
-  (s.settle (σ.apply (ins 0 0 0 0 r c))).toOption.bind (State.valueOf? · `rd)
+private def readAt (s : Sim) (r c : Nat) : Option Nat :=
+  (s.query (s.settle (filled s) (ins 0 0 0 0 r c))).valueOf? `rd
 
 private def spots : List (Nat × Nat) := [(1, 2), (3, 0), (0, 3), (1, 1), (2, 2), (0, 0)]
 
@@ -61,7 +60,7 @@ private def spots : List (Nat × Nat) := [(1, 2), (3, 0), (0, 3), (1, 1), (2, 2)
 --
 -- `[1][2]` is offset 6 row-major and 9 column-major, so this is the one line that fixes the
 -- convention, and the convention is what two semantics have to agree on.
-#guard (filled grid.sim).bind (State.memOf? · `g)
+#guard (grid.sim.query (filled grid.sim)).memOf? `g
   = some [0, 0, 0, 0x11,  0, 0x77, 0xA5, 0,  0, 0, 0, 0,  0x5A, 0, 0, 0]
 
 -- And the lowered form agrees, which is the claim about the flat address the lowering builds and
@@ -86,9 +85,9 @@ reducing by `rfl`, so the four well-formedness theorems in `CircuitHdlTest/Fifo/
 
 /-- info: "index 5 is out of range for dimension 1 of 'g', which has 4 elements" -/
 #guard_msgs in
-#eval match (filled grid.sim).map (fun σ => grid.settle (σ.apply (ins 0 0 0 0 0 5))) with
-  | some (.error e) => toString e
-  | _ => "no error"
+#eval match grid.sim.error (grid.sim.settle (filled grid.sim) (ins 0 0 0 0 0 5)) with
+  | some e => toString e
+  | none => "no error"
 
 -- The netlist answers instead, with element `[1][1]` -- a real value belonging to a different
 -- square, which is exactly what a flat bound would have let the evaluator return too. The same

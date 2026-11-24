@@ -111,18 +111,21 @@ def importedSim (src : String) : Sim :=
   match importedBridge src with
   | some b => b.sim
   | none =>
-      { init := [],
-        settle := fun _ => .error (.check (.unbound `imported_bridge)),
-        stepClock := fun _ _ _ => .error (.check (.unbound `imported_bridge)) }
+      { Rep := Unit
+        init := ()
+        query := fun _ _ => none
+        error := fun _ => some (.check (.unbound `imported_bridge))
+        settle := fun _ _ => ()
+        stepClock := fun _ _ _ => () }
 
 /-- The occupancy: both designs keep a count, so there is nothing to reconstruct. -/
-def shiftFifo4AbstractionOf (depth : Nat) (σ : State) : Option AbstractFifoModel := do
+def shiftFifo4AbstractionOf (depth : Nat) (σ : Query) : Option AbstractFifoModel := do
   let count ← σ.valueOf? `count
   return { depth, count }
 
 /-- The contents: the first `count` registers, oldest first. Four lookups where the Lean design
 needs one, because the queue is four registers rather than an array. -/
-def shiftFifo4QueueAbstractionOf (depth : Nat) (σ : State) : Option AbstractQueueModel := do
+def shiftFifo4QueueAbstractionOf (depth : Nat) (σ : Query) : Option AbstractQueueModel := do
   let count ← σ.valueOf? `count
   let regs ← [`r0, `r1, `r2, `r3].mapM σ.valueOf?
   return { depth, queue := regs.take count }

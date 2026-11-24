@@ -48,9 +48,8 @@ private def viaChain : Module :=
 
 /-- Fill the array, then read at `i`, under whichever semantics. -/
 private def readAt (s : Sim) (i : Nat) : Option Nat :=
-  match s.stepClock `clk s.init [] with
-  | .error _ => none
-  | .ok σ => (s.settle (σ.apply [(`i, c 2 i)])).toOption.bind (·.valueOf? `o)
+  let σ := s.stepClock `clk s.init []
+  (s.query (s.settle σ [(`i, c 2 i)])).valueOf? `o
 
 /-! ### The theorem, executably
 

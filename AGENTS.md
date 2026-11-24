@@ -329,8 +329,9 @@ Things the surface syntax does *not* have, each of which has bitten:
 
   The copy a design used to write by hand did not disappear; it moved here. It costs nothing in
   the IR -- a combinational `setElem` is a scope rebinding -- and that was measured rather than
-  assumed: the mesh is **320 `seq.firreg`s and 7221 lines** before and after. What it costs is
-  `settleOrder.steps`, 1600 to 1920.
+  assumed: neither the mesh's register count nor its operation count moved. Both are pinned in the
+  `size` line of `CircuitHdlTest/Mesh.lean`, which is where to read the current pair. What it
+  costs is `settleOrder.steps`, 1600 to 1920.
 
 - **The binding key is a `PortRef`, and making it one was worth 43x.** `.i[2].valid` is
   `PortRef.elem \`i.valid 2`, because the macro has the base, the index and the field in hand.
@@ -462,7 +463,8 @@ over one flat `Array Nat`. `Module.fastSim` is it as a `Sim`, beside `Module.sim
 against and what a proof would reduce through -- and nothing has switched to the compiled path
 yet.
 
-Per tick, pinned, both `Sim`s bound once:
+Per tick, pinned, both `Sim`s bound once. Every design here holds a few dozen scalars, which is
+the shape where reading a whole state is cheap; `blur` below is the shape where it is not:
 
 | design | statements | `Module.sim` | `Module.fastSim` | |
 |---|---|---|---|---|
@@ -475,6 +477,61 @@ Per tick, pinned, both `Sim`s bound once:
 access: `State.get?` is a `List.lookup` and `State.setCell` a `List.map` over the whole state.
 Measured directly -- `shiftFifo 4` and `shiftFifo 16` cost the same per statement to three digits
 while holding 16 against 28 values, so it is the number of *declarations* that matters.
+
+### `Sim` carries its own state representation
+
+A simulator holds its state the way its engine wants -- an association list for `Module.sim`, a
+flat `Array Nat` for `Module.fastSim`, a netlist state for the VeIR bridge -- and a testbench
+reads one only through `query : Rep → Query`. Nothing outside a simulator names a representation,
+so converting between them never arises.
+
+**A boundary cost is a ratio against the work it wraps, not a constant**, and that is the whole
+reason for the shape. Reading or rebuilding a whole state is `O(state words)`, where a memory
+contributes one word per element. At the mesh's shape -- 1920 statements against a state that is
+mostly scalars -- that is a few percent of a settle. At the blur's -- 74 statements against two
+memories of the image width -- it would be most of a frame.
+
+`Module.fastSim` per tick on `blur`, pinned, median of 5:
+
+| imgW | 4 | 16 | 64 | 128 | 256 | 512 |
+|---|---|---|---|---|---|---|
+| us/tick | 115 | 121 | 118 | 121 | 126 | 132 |
+
+**Flat in the image size**, which is the thing to re-check after touching `Plan.simOf`: the
+interpreter underneath is flat, so any growth with `imgW` is a whole-state read that has crept
+back onto the per-tick path. A 320x240 frame is 9.9 s at 129 us/tick.
+
+For scale, xezim -- a production SystemVerilog bytecode interpreter in Rust, driven over the same
+frame through firtool-generated Verilog -- runs it in 10.2 s. Two caveats, both in xezim's favour:
+it is four-state and event-driven where this is two-state and cycle-based, and its testbench is
+itself interpreted, which measured at about a third of its time.
+
+What the interface costs in care:
+
+- **`Rep : Type` is a field**, so `Sim` is in `Type 1` and nothing else in the package is. That is
+  checked rather than assumed: `native_decide` evaluates through it, `#print axioms` is unchanged
+  (`propext`, `Classical.choice`, `Quot.sound`, one `_native.*`), `decide` reduces, and the
+  `Module → Sim` coercion still fires. Spike it again before any similar move.
+- **`Query` is a `def`, not an `abbrev`.** An `abbrev` reduces to a function type and `q.valueOf?`
+  then looks for `Function.valueOf?`.
+- **The driven inputs are a `List (Name × Cell)`, not a `Rep`.** An input vector is partial --
+  "drive these three signals" -- where a state is total, and a flat array cannot say "absent"
+  without a mask. Building one per tick would put the `O(state words)` cost back, on the input
+  side.
+- **Failure lives in the state**, reachable through `error`, and is sticky: a simulator returns a
+  failed state unchanged, so a dead run costs a branch a tick.
+- **`Layout.writeBack` has no caller.** It rebuilds a whole `State` from the array, which nothing
+  on the execution path needs -- `Layout.cellAt` answers one name instead. It survives because the
+  equivalence proof's plan names it, and because `CircuitHdlTest/Plan.lean` still explains the
+  width-narrowing trap in its terms. Do not read it as part of how a design runs.
+
+**A verdict has to consult `error`.** A failed state answers `none` to every query, which is also
+what an abstraction function says when it cannot read a signal, so the two are told apart only by
+asking. `refinesAlong` checks `m.ok` alongside the abstraction, and `failsAfter` in
+`CircuitHdlTest/FifoHarness.lean` injects a failure at a chosen tick so that
+`shift_failure_is_not_vacuous` requires `false` from a broken run. Its partner,
+`shift_failure_control_is_tight`, places the same failure past the end of every schedule and
+requires `true`, so the wrapper is not what reddens the first.
 
 ### Generating Lean source was tried and is not worth it
 
@@ -500,14 +557,15 @@ on the generated arm, and it is why the state is `Nat`.
   and never `a - b`. No design in `Examples` reaches the wrapping case -- `shiftFifo`'s
   `count - (rfire ? 1 : 0)` has `rfire` implying `count != 0` -- so a mutation run found this
   green and `planWrap` in `CircuitHdlTest/Plan.lean` exists for it.
-- **`writeBack` narrows every value to its declared width, which hides too-wide intermediates.**
-  An operator that drops its mask is invisible wherever the result is *stored* at the width that
-  would have masked it anyway, which is almost everywhere. Three of the six initially-green
-  mutations were this. A probe has to put the value somewhere it survives -- a comparison, or a
-  wider result.
+- **Reading a slot narrows it to its declared width, which hides too-wide intermediates.**
+  `Layout.valueAt` masks, so an operator that drops its own mask is invisible wherever the result
+  is *stored* at the width that would have masked it anyway -- which is almost everywhere. Three
+  of the six initially-green mutations were this. A probe has to put the value somewhere it
+  survives: a comparison, or a wider result.
 - **`BitVec.ofNat` recomputes `2 ^ w` on every call**, and at a width read from a declaration the
-  compiler cannot fold it. That was 2.1 ms of a 5.8 ms mesh tick -- more than the settle it
-  wrapped -- in `writeBack` alone. It looks free when measured at a literal width, which is
+  compiler cannot fold it. Converting a whole mesh state cost 2.1 ms that way, more than the
+  settle it accompanied, which is why `Layout.valueAt` takes the modulus as an argument and its
+  callers hoist it out of their loops. It looks free when measured at a literal width, which is
   exactly how not to measure it.
 - **Flattening expression trees into a contiguous op array is slower, not faster.** 0.418 us/stmt
   against 0.382: it trades 1920 array writes for 12193 and keeps the dispatch. What dominates the
@@ -585,7 +643,7 @@ Things that cost time to get right:
   MLIR infers it, and real CIRCT rejects the attribute if present. `write_port` and
   `read_write_port` do take them. VeIR's `Seq.propertiesOf` already encodes this.
 
-### The lowered form has its own semantics, and three layers check it
+### The lowered form has its own semantics, and four layers check it
 
 A refinement theorem about a design is a theorem about `CircuitHdl/Semantics.lean` and about
 nothing that would be built. Three things close that gap, and they overlap less than they look:
@@ -633,8 +691,8 @@ state it never wrote. The bridge now resolves the string against the module's ow
 The same hole was latent for an instance-local register (`u.q`); nothing had read one that way.
 
 An array is also *reassembled* there: it is `count` `seq.firreg`s on one side and a single cell
-on the other, which is what lets `shiftQueueAbstractionOf` be one `σ.memOf? \`r` and serve both
-semantics unchanged.
+on the other, which is what lets `shiftQueueAbstractionOf` be one `q.memOf? \`r`. It serves every
+simulator unchanged because it is handed a `Query` and cannot tell which one produced it.
 
 **The two layers catch disjoint things, and this was measured rather than assumed:**
 

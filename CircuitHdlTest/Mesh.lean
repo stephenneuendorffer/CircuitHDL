@@ -69,8 +69,8 @@ private def meshNodes (n : Nat) : List (Nat × Nat) :=
 -- `nodeIdx`. A port of node `(x, y)` is therefore a place inside a cell and not a name of its own,
 -- which is why the driver below writes whole cells -- `State.apply` merges a cell at a time -- and
 -- reads results with `valueAt?` rather than `valueOf?`.
--- The shapes, so an element can be read out of the flat cell it lives in. A `Sim` does not
--- carry them -- it is just init/settle/step -- so the driver takes them from the design.
+-- The shapes, so an element can be read out of the flat cell it lives in. A `Sim` answers by
+-- name and carries no shapes, so the driver takes them from the design.
 private def ejValidAt (n x y : Nat) : Signal := .elem `ej.valid [nodeIdx n x y]
 private def ejDataAt (n x y : Nat) : Signal := .elem `ej.data [nodeIdx n x y]
 private def injReadyAt (n x y : Nat) : Signal := .elem `inj.ready [nodeIdx n x y]
@@ -98,8 +98,8 @@ private def pendingAt (qs : List SourceQueue) (x y : Nat) : Option Nat :=
   (qs.lookup (x, y)).bind List.head?
 
 /-- Drive `qs` into an `n` by `n` mesh of `fw`-bit flits for `ticks` cycles, collecting every
-ejection. `arrs` are the design's array shapes, which a `Sim` does not carry -- a `Sim` is
-init/settle/step and nothing else -- so the caller takes them from the design. -/
+ejection. `arrs` are the design's array shapes, which a `Sim` does not carry -- it answers by
+name, and a row-major offset is a property of the declaration -- so the caller supplies them. -/
 def runMesh (n fw : Nat) (arrs : List (Name × List Nat × Nat)) (s : Sim) (qs : List SourceQueue)
     (ticks : Nat) : Except EvalError (List (Nat × Nat × Nat)) := do
   let mut σ := s.init
@@ -111,16 +111,18 @@ def runMesh (n fw : Nat) (arrs : List (Name × List Nat × Nat)) (s : Sim) (qs :
         (`inj.valid, perNode n 1 fun x y => if (pendingAt queues x y).isSome then 1 else 0),
         (`inj.data, perNode n fw fun x y => (pendingAt queues x y).getD 0),
         (`ej.ready, perNode n 1 fun _ _ => 1) ]
-    let σs ← s.settle (σ.apply ins)
+    let σs := s.settle σ ins
+    if let some e := s.error σs then throw e
+    let q := s.query σs
     -- Ejections this cycle. `ready` is held high, so a raised `valid` *is* a transfer.
     for (x, y) in meshNodes n do
-      if σs.valueAt? arrs (ejValidAt n x y) == some 1 then
-        out := out ++ [(x, y, (σs.valueAt? arrs (ejDataAt n x y)).getD 0)]
+      if q.valueAt? arrs (ejValidAt n x y) == some 1 then
+        out := out ++ [(x, y, (q.valueAt? arrs (ejDataAt n x y)).getD 0)]
     -- Retire an injected flit the switch accepted.
     queues := queues.map fun (node, fs) =>
-      if σs.valueAt? arrs (injReadyAt n node.1 node.2) == some 1 then (node, fs.drop 1)
+      if q.valueAt? arrs (injReadyAt n node.1 node.2) == some 1 then (node, fs.drop 1)
       else (node, fs)
-    σ ← s.stepClock `clk σ ins
+    σ := s.stepClock `clk σ ins
   return out
 
 /-- The 4x4 mesh every scenario below drives, and its shapes. -/

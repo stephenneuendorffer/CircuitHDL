@@ -122,11 +122,13 @@ private def runBlur (s : Sim) (pw : Nat) (frame : List Nat) (srcOn dstOn : List 
         (`s.valid, bit offering),
         (`s.data, Cell.sig (Value.ofNat pw (todo.head?.getD 0))),
         (`m.ready, bit accepting) ]
-    let σs ← s.settle (σ.apply ins)
-    if offering && σs.valueOf? `s.ready == some 1 then todo := todo.drop 1
-    if accepting && σs.valueOf? `m.valid == some 1 then
-      got := got ++ [(σs.valueOf? `m.data).getD 0]
-    σ ← s.stepClock `clk σ ins
+    let σs := s.settle σ ins
+    if let some e := s.error σs then throw e
+    let q := s.query σs
+    if offering && q.valueOf? `s.ready == some 1 then todo := todo.drop 1
+    if accepting && q.valueOf? `m.valid == some 1 then
+      got := got ++ [(q.valueOf? `m.data).getD 0]
+    σ := s.stepClock `clk σ ins
   return got
 
 /-- Ticks enough for a frame at a given stall pattern, with room to spare: a frame is
@@ -242,14 +244,16 @@ private def validStability (s : Sim) (pw : Nat) (frame : List Nat) (srcOn dstOn 
         (`s.valid, bit offering),
         (`s.data, Cell.sig (Value.ofNat pw (todo.head?.getD 0))),
         (`m.ready, bit accepting) ]
-    let σs ← s.settle (σ.apply ins)
-    let v := σs.valueOf? `m.valid == some 1
-    let d := (σs.valueOf? `m.data).getD 0
+    let σs := s.settle σ ins
+    if let some e := s.error σs then throw e
+    let q := s.query σs
+    let v := q.valueOf? `m.valid == some 1
+    let d := (q.valueOf? `m.data).getD 0
     if let some prev := held then
       if !v || d != prev then return some i
     held := if v && !accepting then some d else none
-    if offering && σs.valueOf? `s.ready == some 1 then todo := todo.drop 1
-    σ ← s.stepClock `clk σ ins
+    if offering && q.valueOf? `s.ready == some 1 then todo := todo.drop 1
+    σ := s.stepClock `clk σ ins
   return none
 
 -- Over every stall pattern, including the ones that hold the consumer off for two ticks running.
@@ -303,11 +307,11 @@ private def runAfterReset (s : Sim) (pre : List Nat) (frame : List Nat) (ticks :
     let ins : State :=
       [ (`rst, bit false), (`s.valid, bit true),
         (`s.data, Cell.sig (Value.ofNat 24 p)), (`m.ready, bit true) ]
-    σ ← s.stepClock `clk σ ins
+    σ := s.stepClock `clk σ ins
   let rstIns : State :=
     [ (`rst, bit true), (`s.valid, bit false),
       (`s.data, Cell.sig (Value.ofNat 24 0)), (`m.ready, bit false) ]
-  σ ← s.stepClock `clk σ rstIns
+  σ := s.stepClock `clk σ rstIns
   -- …and then the real frame, from wherever reset left it.
   let mut todo := frame
   let mut got : List Nat := []
@@ -315,10 +319,12 @@ private def runAfterReset (s : Sim) (pre : List Nat) (frame : List Nat) (ticks :
     let ins : State :=
       [ (`rst, bit false), (`s.valid, bit !todo.isEmpty),
         (`s.data, Cell.sig (Value.ofNat 24 (todo.head?.getD 0))), (`m.ready, bit true) ]
-    let σs ← s.settle (σ.apply ins)
-    if !todo.isEmpty && σs.valueOf? `s.ready == some 1 then todo := todo.drop 1
-    if σs.valueOf? `m.valid == some 1 then got := got ++ [(σs.valueOf? `m.data).getD 0]
-    σ ← s.stepClock `clk σ ins
+    let σs := s.settle σ ins
+    if let some e := s.error σs then throw e
+    let q := s.query σs
+    if !todo.isEmpty && q.valueOf? `s.ready == some 1 then todo := todo.drop 1
+    if q.valueOf? `m.valid == some 1 then got := got ++ [(q.valueOf? `m.data).getD 0]
+    σ := s.stepClock `clk σ ins
   return got
 
 theorem blur_reset_restarts :

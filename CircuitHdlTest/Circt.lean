@@ -259,11 +259,12 @@ private def agreesOn (m : Module) (observe : List Name) (ticks : List (Name × S
     let mut σa := a.init
     let mut σb := b.init
     for (clk, ins) in ticks do
-      match a.stepClock clk σa ins, b.stepClock clk σb ins with
-      | .ok x, .ok y =>
-          if observe.any (fun n => x.valueOf? n != y.valueOf? n) then return false
-          σa := x; σb := y
-      | _, _ => return false
+      σa := a.stepClock clk σa ins
+      σb := b.stepClock clk σb ins
+      if !a.ok σa || !b.ok σb then return false
+      let qa := a.query σa
+      let qb := b.query σb
+      if observe.any (fun n => qa.valueOf? n != qb.valueOf? n) then return false
     return true
 
 private def adaptTick (we narrow wide raddr din : Nat) : Name × State :=
@@ -280,9 +281,9 @@ private def adaptTick (we narrow wide raddr din : Nat) : Name × State :=
     adaptTick 0 0 0 0 0, adaptTick 0 0 0 1 0, adaptTick 0 0 0 2 0, adaptTick 0 0 0 3 0 ]
 
 -- And the comparison is not vacuous: the words really did land where the evaluator says.
-#guard (match (lowered memAdapt).stepClock `clk (lowered memAdapt).init (adaptTick 1 1 2 1 77).2 with
-        | .ok σ => (σ.valueOf? `dn, σ.valueOf? `dw)
-        | .error _ => (none, none)) = (some 77, some 0)
+#guard (let s := lowered memAdapt
+        let q := s.query (s.stepClock `clk s.init (adaptTick 1 1 2 1 77).2)
+        (q.valueOf? `dn, q.valueOf? `dw)) = (some 77, some 0)
 
 /-! #### An address out of range for the depth is where the two semantics part
 
@@ -304,12 +305,12 @@ cannot change quietly.
 private def oobTick : Name × State := adaptTick 1 0 5 1 22
 
 -- The evaluator refuses.
-#guard (memAdapt.sim.stepClock `clk memAdapt.sim.init oobTick.2).isOk = false
+#guard (let s := memAdapt.sim; s.ok (s.stepClock `clk s.init oobTick.2)) = false
 
 -- The lowered design truncates 5 to 1 and carries on, so `hi[1]` now holds the word.
-#guard ((lowered memAdapt).stepClock `clk (lowered memAdapt).init oobTick.2).toOption.bind
-  (fun σ => (σ.apply (adaptTick 0 0 0 1 0).2 |> (lowered memAdapt).settle).toOption.bind
-    (·.valueOf? `dw)) = some 22
+#guard (let s := lowered memAdapt
+        let σ := s.stepClock `clk s.init oobTick.2
+        (s.query (s.settle σ (adaptTick 0 0 0 1 0).2)).valueOf? `dw) = some 22
 
 -- Which is to say: this is one of the schedules on which `agreesOn` comes out `false`, and that
 -- is the expected answer rather than a failure to be fixed.
@@ -343,9 +344,8 @@ private def oobArrayAt (i : Nat) : State := [(`i, Cell.sig (Value.ofNat 4 i))]
 
 /-- Fill it, then read at `i`, under whichever semantics. -/
 private def oobRead (s : Sim) (i : Nat) : Option Nat :=
-  match s.stepClock `clk s.init [] with
-  | .error _ => none
-  | .ok σ => ((s.settle (σ.apply (oobArrayAt i))).toOption.bind (·.valueOf? `o))
+  let σ := s.stepClock `clk s.init []
+  (s.query (s.settle σ (oobArrayAt i))).valueOf? `o
 
 -- In range, the two agree, which is what makes the disagreement below about the range and not
 -- about the array.
@@ -379,9 +379,8 @@ module! divides #[] (a : 8, b : 8) -> (q : 8) {
 }
 
 private def divAt (s : Sim) (x y : Nat) : Option Nat :=
-  (s.settle (s.init.apply
-    [(`a, Cell.sig (Value.ofNat 8 x)), (`b, Cell.sig (Value.ofNat 8 y))])).toOption.bind
-    (State.valueOf? · `q)
+  (s.query (s.settle s.init
+    [(`a, Cell.sig (Value.ofNat 8 x)), (`b, Cell.sig (Value.ofNat 8 y))])).valueOf? `q
 
 -- With a divisor, the two agree, which is what makes the disagreement below about the zero.
 #guard divAt (divides : Sim) 200 3 = some 66

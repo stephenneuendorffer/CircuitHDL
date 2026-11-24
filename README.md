@@ -31,6 +31,7 @@ The language itself, under `CircuitHdl/`:
 | `Syntax.lean` | The `module!` surface syntax, its lowering into the AST, and width inference. |
 | `Semantics.lean` | Evaluation over core `BitVec` (`Expr.eval`, `Module.step`, `Module.run`). The specification. |
 | `Plan.lean` | The same semantics compiled: names resolved to slots, widths to masks, the state one flat `Array`. `Module.fastSim` is 3x on a FIFO and 60x on a 4x4 mesh. |
+| `Semantics.lean` (`Sim`, `Query`) | What a testbench drives and how it reads a result. A simulator carries its **own** state representation and hands out a `Query`; failure lives in the state and is read through `error`. |
 | `Transactions.lean` | Driving AXI-Stream ports at transaction level (`Module.transfer`). |
 | `Circt.lean` | Lowering to the CIRCT dialects `hw`/`comb`/`seq` via VeIR (`Module.toMlir`, `Module.toVeir`). The one module with a dependency outside core `Lean`. |
 | `../CircuitHdl.lean` | Umbrella module importing the above. |

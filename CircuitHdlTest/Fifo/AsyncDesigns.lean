@@ -39,14 +39,14 @@ pointers encode.
 Pointers are one bit wider than the address and so wrap at `2 * depth`. Natural subtraction
 truncates at zero, so the wrap has to be added back explicitly -- without the `+ 2 * depth` this
 reports an empty FIFO whenever the write pointer has wrapped and the read pointer has not. -/
-def abstractionOf (depth : Nat) (σ : State) : Option AbstractFifoModel := do
+def abstractionOf (depth : Nat) (σ : Query) : Option AbstractFifoModel := do
   let write ← σ.valueOf? `wbin
   let read ← σ.valueOf? `rbin
   return { depth, count := (write + 2 * depth - read) % (2 * depth) }
 
 /-- The contents a concrete FIFO state represents: the words the write pointer has committed and
 the read pointer has not yet taken, oldest first. Same wrap-around care as `abstractionOf`. -/
-def queueAbstractionOf (depth : Nat) (σ : State) : Option AbstractQueueModel := do
+def queueAbstractionOf (depth : Nat) (σ : Query) : Option AbstractQueueModel := do
   let write ← σ.valueOf? `wbin
   let read ← σ.valueOf? `rbin
   let mem ← σ.memOf? `mem
@@ -65,13 +65,13 @@ def fifoRst : ResetSpec := { write := `wrst, read := `rrst }
 
 /-- `abstractionOf` without the wrap-around correction. Natural subtraction truncates at zero, so
 this reports an empty FIFO whenever the write pointer has wrapped and the read pointer has not. -/
-def abstractionWithoutWrap (depth : Nat) (σ : State) : Option AbstractFifoModel := do
+def abstractionWithoutWrap (depth : Nat) (σ : Query) : Option AbstractFifoModel := do
   let write ← σ.valueOf? `wbin
   let read ← σ.valueOf? `rbin
   return { depth, count := (write - read) % (2 * depth) }
 
 /-- `queueAbstractionOf` with the words read out newest-first: a LIFO, not a FIFO. -/
-def queueAbstractionReversed (depth : Nat) (σ : State) : Option AbstractQueueModel := do
+def queueAbstractionReversed (depth : Nat) (σ : Query) : Option AbstractQueueModel := do
   let q ← queueAbstractionOf depth σ
   return { q with queue := q.queue.reverse }
 

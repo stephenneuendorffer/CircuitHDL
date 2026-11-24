@@ -47,13 +47,13 @@ writes enter, and a word only ever moves toward stage 0, so index order is age o
 -/
 
 /-- The occupancy of a pipeline FIFO: how many stages are valid. -/
-def pipeAbstractionOf (depth : Nat) (σ : State) : Option AbstractFifoModel := do
+def pipeAbstractionOf (depth : Nat) (σ : Query) : Option AbstractFifoModel := do
   let vs ← [`v0, `v1, `v2, `v3].mapM σ.valueOf?
   return { depth, count := (vs.filter (· == 1)).length }
 
 /-- The contents of a pipeline FIFO: the valid stages, oldest first. The gaps are skipped, which
 is the one thing this abstraction has to do that `shiftFifo`'s does not. -/
-def pipeQueueAbstractionOf (depth : Nat) (σ : State) : Option AbstractQueueModel := do
+def pipeQueueAbstractionOf (depth : Nat) (σ : Query) : Option AbstractQueueModel := do
   let vs ← [`v0, `v1, `v2, `v3].mapM σ.valueOf?
   let rs ← [`r0, `r1, `r2, `r3].mapM σ.valueOf?
   return { depth, queue := (vs.zip rs).filterMap fun (v, r) => if v == 1 then some r else none }
@@ -121,13 +121,10 @@ private def bubbleTrace : Option (List (List Nat)) := Id.run do
   let mut σ := sim.init
   let mut out : List (List Nat) := []
   for offer in [some 11, none, some 22, none, none] do
-    match sim.stepClock `clk σ (drive offer) with
-    | .error _ => return none
-    | .ok σ' =>
-        σ := σ'
-        match [`v0, `v1, `v2, `v3].mapM σ'.valueOf? with
-        | some vs => out := out ++ [vs]
-        | none => return none
+    σ := sim.stepClock `clk σ (drive offer)
+    match [`v0, `v1, `v2, `v3].mapM (sim.query σ).valueOf? with
+    | some vs => out := out ++ [vs]
+    | none => return none
   return some out
 
 -- The valid pattern after each tick, with the consumer taking throughout. `[0,1,0,1]` at tick 3 is
@@ -144,7 +141,7 @@ private def bubbleTrace : Option (List (List Nat)) := Id.run do
 filter -- the `take count` that works for `shiftFifo` -- reports whatever stale data a gap is
 sitting on. That it fails here and not there is the difference between the two designs, stated as
 a theorem rather than as a comment. -/
-private def pipeQueueDense (depth : Nat) (σ : State) : Option AbstractQueueModel := do
+private def pipeQueueDense (depth : Nat) (σ : Query) : Option AbstractQueueModel := do
   let count ← (pipeAbstractionOf depth σ).map (·.count)
   let rs ← [`r0, `r1, `r2, `r3].mapM σ.valueOf?
   return { depth, queue := rs.take count }
@@ -155,7 +152,7 @@ theorem pipe_is_not_dense :
 
 /-- **And the gaps are not merely cosmetic**: reading the stages in reverse -- newest first --
 is rejected too, so the filter is ordering the queue and not just counting it. -/
-private def pipeQueueReversed (depth : Nat) (σ : State) : Option AbstractQueueModel := do
+private def pipeQueueReversed (depth : Nat) (σ : Query) : Option AbstractQueueModel := do
   let q ← pipeQueueAbstractionOf depth σ
   return { q with queue := q.queue.reverse }
 
@@ -188,18 +185,13 @@ private def fullRateOccupancy : Option (List Nat) := Id.run do
   let mut out : List Nat := []
   -- Four writes with the consumer idle fills every stage.
   for _ in List.range 4 do
-    match sim.stepClock `clk σ (drive true false) with
-    | .error _ => return none
-    | .ok σ' => σ := σ'
+    σ := sim.stepClock `clk σ (drive true false)
   -- Then write and read together.
   for _ in List.range 4 do
-    match sim.stepClock `clk σ (drive true true) with
-    | .error _ => return none
-    | .ok σ' =>
-        σ := σ'
-        match [`v0, `v1, `v2, `v3].mapM σ'.valueOf? with
-        | some (vs : List Nat) => out := out ++ [(vs.filter (· == 1)).length]
-        | none => return none
+    σ := sim.stepClock `clk σ (drive true true)
+    match [`v0, `v1, `v2, `v3].mapM (sim.query σ).valueOf? with
+    | some (vs : List Nat) => out := out ++ [(vs.filter (· == 1)).length]
+    | none => return none
   return some out
 
 #guard fullRateOccupancy = some [4, 4, 4, 4]
@@ -213,13 +205,9 @@ private def shiftFullRateReady : Option Nat := Id.run do
       (`rst, Value.ofNat 1 0) ]
   let mut σ := sim.init
   for _ in List.range 4 do
-    match sim.stepClock `clk σ (drive true false) with
-    | .error _ => return none
-    | .ok σ' => σ := σ'
+    σ := sim.stepClock `clk σ (drive true false)
   -- Full. What does it offer the producer while the consumer is taking?
-  match sim.settle (σ.apply (drive true true)) with
-  | .error _ => none
-  | .ok settled => settled.valueOf? `s.ready
+  return (sim.query (sim.settle σ (drive true true))).valueOf? `s.ready
 
 #guard shiftFullRateReady = some 0
 
@@ -240,11 +228,8 @@ private def latencyOf (m : Module) : Option Nat := Id.run do
       (`m.ready, Value.ofNat 1 0), (`rst, Value.ofNat 1 0) ]
   let mut σ := sim.init
   for t in List.range 8 do
-    match sim.stepClock `clk σ (drive (if t == 0 then some 99 else none)) with
-    | .error _ => return none
-    | .ok σ' =>
-        σ := σ'
-        if σ'.valueOf? `m.valid == some 1 then return some (t + 1)
+    σ := sim.stepClock `clk σ (drive (if t == 0 then some 99 else none))
+    if (sim.query σ).valueOf? `m.valid == some 1 then return some (t + 1)
   return none
 
 #guard latencyOf (shiftFifo 4 8) = some 1

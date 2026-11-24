@@ -46,6 +46,23 @@ theorem shift_refines_short :
     refinesAlongAll sfifo 4 shiftSource shiftDest shiftShortSchedules shiftAbstractionOf
       = true := by native_decide
 
+/-- **And a design that breaks partway through a schedule comes out `false`.**
+
+A failure is a property of the state rather than of the result, so a failed state answers `none`
+to every query -- which is also what an abstraction function says when it cannot read a signal.
+This is the check that the two are told apart. `failsAfter` is the same design with a failure
+injected at tick 3 and nothing else changed. -/
+theorem shift_failure_is_not_vacuous :
+    refinesAlongAll (failsAfter sfifo.sim 3) 4 shiftSource shiftDest shiftShortSchedules
+        shiftAbstractionOf = false := by native_decide
+
+/-- …and the wrapper is not what breaks it: the same `failsAfter` with its failure placed beyond
+the end of every schedule passes. Without this line the theorem above would read the same if
+`failsAfter` simply broke the design outright. -/
+theorem shift_failure_control_is_tight :
+    refinesAlongAll (failsAfter sfifo.sim 1000) 4 shiftSource shiftDest shiftShortSchedules
+        shiftAbstractionOf = true := by native_decide
+
 /-- **And over the schedules that fill it.** -/
 theorem shift_refines_burst :
     refinesAlongAll sfifo 4 shiftSource shiftDest burstSchedules shiftAbstractionOf

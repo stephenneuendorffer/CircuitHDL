@@ -39,11 +39,9 @@ def dirCode : Option Dir → Nat
 /-- Run the routing unit on one set of coordinates. -/
 private def routeUnit (mx my dx dy : Nat) : Option Nat :=
   let sim := (meshRouteUnit 2).sim
-  match sim.settle (sim.init.apply
+  (sim.query (sim.settle sim.init
       [ (`myX, Value.ofNat 2 mx), (`myY, Value.ofNat 2 my),
-        (`dstX, Value.ofNat 2 dx), (`dstY, Value.ofNat 2 dy) ]) with
-  | .ok σ => σ.valueOf? `dir
-  | .error _ => none
+        (`dstX, Value.ofNat 2 dx), (`dstY, Value.ofNat 2 dy) ])).valueOf? `dir
 
 /-! ### Obligation 1: the unit computes `xyRoute`
 

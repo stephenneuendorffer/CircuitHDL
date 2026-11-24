@@ -451,26 +451,105 @@ def Module.runClocks (m : Module) (σ : State) :
       let σ' ← m.stepClock clk σ inputs
       .ok (σ' :: (← m.runClocks σ' rest))
 
+/-! ### Reading a state, without knowing how one is stored
+
+A testbench asks a simulation three things -- the value of a scalar, the contents of a memory, and
+the value of one element of an array -- and all three are one question: what cell does this name
+hold. `Query` is that question, and it is the whole of what a testbench may know about a state.
+
+Everything on this page is therefore stated over a `Query` rather than over a `State`, which is
+what lets an abstraction function serve the evaluator, the compiled plan and the netlist unchanged
+-- not because the three agree to key their states by the design's own names, but because a
+`Query` is the only thing any of them hands out.
+
+A `def` rather than an `abbrev`, so that `q.valueOf?` resolves: an `abbrev` reduces to a function
+type and dot notation then looks for `Function.valueOf?`.
+-/
+
+/-- What a state answers: the cell a name holds, or `none` for a name the design does not declare
+-- and for every name once the state has failed. -/
+def Query := Name → Option Cell
+
+/-- The value of a single scalar signal, for reading results out of a simulation. -/
+def Query.valueOf? (q : Query) (x : Name) : Option Nat :=
+  match q x with
+  | some (.sig v) => some v.toNat
+  | _ => none
+
+/-- The contents of a memory, for inspecting a simulation. -/
+def Query.memOf? (q : Query) (x : Name) : Option (List Nat) :=
+  match q x with
+  | some (.mem ws) => some (ws.map Value.toNat)
+  | _ => none
+
+/-- The value of one `Signal` -- a scalar, or one element of a cell. `Query.valueOf?` for a world
+in which an array element is a place a port can live.
+
+The shapes have to be passed in: an element is named by its indices and the storage is flat, so
+reading one means a row-major offset, which only the declaration knows. -/
+def Query.valueAt? (q : Query) (arrays : List (Name × List Nat × Nat)) : Signal → Option Nat
+  | .sig x => q.valueOf? x
+  | .elem a i => do
+      let (dims, _) ← arrays.lookup a
+      let ws ← q.memOf? a
+      ws[rowMajorOffset dims i]?
+
+/-- A `State` answers the question directly, being an association list of exactly that. -/
+def State.query (σ : State) : Query := fun x => σ.lookup x
+
+/-! The same three reads for a `State` held directly rather than obtained from a `Sim`.
+
+Code driving `Module.settle` has a `State` in hand and no simulator to ask, and so does the VeIR
+bridge, which builds one. These delegate rather than restate, so there is one definition of what
+each read means and two ways to reach it. -/
+
+/-- The value of a single scalar signal of a `State`. -/
+def State.valueOf? (σ : State) (x : Name) : Option Nat := σ.query.valueOf? x
+
+/-- The contents of a memory of a `State`. -/
+def State.memOf? (σ : State) (x : Name) : Option (List Nat) := σ.query.memOf? x
+
+/-- The value of one `Signal` of a `State`. -/
+def State.valueAt? (σ : State) (arrays : List (Name × List Nat × Nat)) (s : Signal) : Option Nat :=
+  σ.query.valueAt? arrays s
+
 /-! ### Simulators
 
-A testbench needs three things from whatever it is driving: where to start, how to settle, and how
-to take an edge on one clock. Bundling them lets the same testbench drive a `Module` under the
-evaluator above *or* the same design after `Module.toNetlist`, under `CircuitHdl.NetlistSemantics`
--- which is the only reason this exists. The alternative, making the harness generic over a class,
-buys nothing: there are two implementations and neither needs dispatch.
+A testbench needs to know where to start, how to settle, how to take an edge on one clock, and how
+to read the result. Bundling them lets one testbench drive the evaluator above, the compiled
+evaluator in `CircuitHdl.Plan`, or the design after `Module.toVeir` under `Veir.Netlist`.
 
-Both implementations key their state by the source module's own signal names, so an abstraction
-function written against one works against the other unchanged.
+**The representation is a field.** Each simulator holds its state the way its own engine wants --
+an association list here, a flat `Array Nat` in `CircuitHdl.Plan`, a netlist state in the VeIR
+bridge -- and hands out a `Query`. Converting between representations on every call costs
+`O(state words)`, which on a design whose state is mostly memory dominates the settle it wraps;
+keeping `Rep` opaque is what avoids paying it.
+
+**Failure lives in the state.** `settle` is `Rep → _ → Rep`, so a testbench threads one value and
+asks `error` once rather than binding a result at every tick. The failure is sticky: a simulator
+returns a failed state unchanged, so a dead run costs a branch a tick rather than a settle. What
+that costs in care is that **a verdict has to consult `error`** -- a failed state answers `none`
+to every query, which an abstraction function can report as "nothing to compare" rather than as a
+broken design.
 -/
 
 /-- Everything driving a design requires, independent of how the design is represented. -/
 structure Sim where
+  /-- How this simulator represents a state. Opaque: a testbench reads one through `query`. -/
+  Rep : Type
   /-- Every signal at its power-up value. -/
-  init : State
-  /-- Run the combinational logic to a settled state. -/
-  settle : State → Except EvalError State
+  init : Rep
+  /-- The cell a name holds. `none` once the state has failed, so a reading is never stale. -/
+  query : Rep → Query
+  /-- Why the state failed, if it has. Sticky -- the first failure is the one kept. -/
+  error : Rep → Option EvalError
+  /-- Drive the inputs, then run the combinational logic to a settled state. -/
+  settle : Rep → State → Rep
   /-- One tick of one clock: settle, take that clock's edge, settle again. -/
-  stepClock : Name → State → State → Except EvalError State
+  stepClock : Name → Rep → State → Rep
+
+/-- Did the run get this far without failing? -/
+def Sim.ok (s : Sim) (σ : s.Rep) : Bool := (s.error σ).isNone
 
 /-- The evaluator in this file, as a `Sim`.
 
@@ -478,43 +557,25 @@ The dependency sort happens **here**, once, and the closures below capture the r
 this as `{ settle := m.settle, stepClock := m.stepClock }` is the same simulator and re-sorts on
 every settle -- three times a tick, since the harness settles once itself and `stepClock` settles
 on both sides of the edge. A `Sim` is built once per check and then driven over a whole schedule
-family, so this is the one place where the distinction is worth tens of thousands of sorts. -/
+family, so this is the one place where the distinction is worth tens of thousands of sorts.
+
+The representation is `Except EvalError State`, because `Module.settleWith` returns one: `settle`
+is then a `bind`, and the evaluator needs no wrapper of its own. -/
 def Module.sim (m : Module) : Sim :=
   let order := m.settleOrder
-  { init := m.initState
-    settle := Module.settleWith order
-    stepClock := fun clk σ inputs => do
-      let σ ← Module.settleWith order (σ.apply inputs)
-      let σ ← m.clockEdgeOn clk σ
-      Module.settleWith order σ }
+  { Rep := Except EvalError State
+    init := .ok m.initState
+    query := fun σ x => σ.toOption.bind (fun s => s.lookup x)
+    error := fun σ => match σ with | .error e => some e | .ok _ => none
+    settle := fun σ inputs => σ.bind (fun s => Module.settleWith order (s.apply inputs))
+    stepClock := fun clk σ inputs => σ.bind (fun s => do
+      let s ← Module.settleWith order (s.apply inputs)
+      let s ← m.clockEdgeOn clk s
+      Module.settleWith order s) }
 
 /-- So that a testbench written against `Sim` still reads `refinesAlongAll fifo4 ..`, with the
 design named directly. -/
 instance : CoeHead Module Sim := ⟨Module.sim⟩
-
-/-- The value of a single scalar signal, for reading results out of a simulation. -/
-def State.valueOf? (σ : State) (x : Name) : Option Nat :=
-  match σ.lookup x with
-  | some (.sig v) => some v.toNat
-  | _ => none
-
-/-- The contents of a memory, for inspecting a simulation. -/
-def State.memOf? (σ : State) (x : Name) : Option (List Nat) :=
-  match σ.lookup x with
-  | some (.mem ws) => some (ws.map Value.toNat)
-  | _ => none
-
-/-- The value of one `Signal` -- a scalar, or one element of a cell. `State.valueOf?` for a world
-in which an array element is a place a port can live.
-
-The shapes have to be passed in: an element is named by its indices and the storage is flat, so
-reading one means a row-major offset, which only the declaration knows. -/
-def State.valueAt? (σ : State) (arrays : List (Name × List Nat × Nat)) : Signal → Option Nat
-  | .sig x => σ.valueOf? x
-  | .elem a i => do
-      let (dims, _) ← arrays.lookup a
-      let ws ← σ.memOf? a
-      ws[rowMajorOffset dims i]?
 
 /-- Write one `Signal`. Fails rather than ignoring an out-of-range element or a whole array, so a
 bridge that computed the wrong place says so instead of writing nowhere. -/

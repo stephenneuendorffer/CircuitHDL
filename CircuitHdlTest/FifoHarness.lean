@@ -114,18 +114,19 @@ equivalence -- a tick on which the design conservatively refuses simply leaves t
 Reset is driven *low* here rather than left alone. The state persists between ticks, so a reset
 asserted on the previous tick would otherwise still be asserted on this one. -/
 private def stepBoth (m : Sim) (source dest : AxisPort) (rst : Option ResetSpec) (clk : Name)
-    (offer : Option Nat) (accept : Bool) (σ : State) (model : AbstractFifoModel) :
-    Except EvalError (State × AbstractFifoModel) := do
+    (offer : Option Nat) (accept : Bool) (σ : m.Rep) (model : AbstractFifoModel) :
+    m.Rep × AbstractFifoModel :=
   let driven : State :=
     [ (source.valid, Value.ofNat 1 (if offer.isSome then 1 else 0)),
       (source.data, Value.ofNat source.width (offer.getD 0)),
       (dest.ready, Value.ofNat 1 (if accept then 1 else 0)) ]
   let inputs : State := driven ++ resetInputs rst false
   -- Settle first, so the handshake is decided on the values the edge actually sees.
-  let settled ← m.settle (σ.apply inputs)
-  let wrote := offer.isSome && settled.valueOf? source.ready == some 1 && clk == source.clock
-  let took := accept && settled.valueOf? dest.valid == some 1 && clk == dest.clock
-  let σ' ← m.stepClock clk settled inputs
+  let settled := m.settle σ inputs
+  let q := m.query settled
+  let wrote := offer.isSome && q.valueOf? source.ready == some 1 && clk == source.clock
+  let took := accept && q.valueOf? dest.valid == some 1 && clk == dest.clock
+  let σ' := m.stepClock clk settled inputs
   -- **Pop before push**, which matters only when both fire at a full FIFO. `push` at `depth` is a
   -- silent no-op in both models, so pushing first would drop the word the design just accepted and
   -- then pop another, leaving the model one short. A design may legitimately take a word in and
@@ -134,7 +135,7 @@ private def stepBoth (m : Sim) (source dest : AxisPort) (rst : Option ResetSpec)
   -- whose `ready` is low when full, which is why `asyncFifo` and `shiftFifo4` never noticed.
   let model := if took then model.pop else model
   let model := if wrote then model.push else model
-  return (σ', model)
+  (σ', model)
 
 /-- A reset tick: assert every domain's reset, offer nothing, accept nothing, and take an edge in
 each clock domain.
@@ -142,16 +143,14 @@ each clock domain.
 Both domains, because that is the only reset event the abstract models can describe -- they hold
 one count, and a design with one pointer cleared and the other not does not have one. The second
 edge is skipped when the two ports share a clock, so a single-clock design sees exactly one. -/
-private def resetBoth (m : Sim) (source dest : AxisPort) (r : ResetSpec) (σ : State) :
-    Except EvalError State := do
+private def resetBoth (m : Sim) (source dest : AxisPort) (r : ResetSpec) (σ : m.Rep) : m.Rep :=
   let idle : State :=
     [ (source.valid, Value.ofNat 1 0),
       (source.data, Value.ofNat source.width 0),
       (dest.ready, Value.ofNat 1 0) ]
   let inputs : State := idle ++ resetInputs (some r) true
-  let σ ← m.stepClock source.clock σ inputs
-  if source.clock == dest.clock then return σ
-  m.stepClock dest.clock σ inputs
+  let σ := m.stepClock source.clock σ inputs
+  if source.clock == dest.clock then σ else m.stepClock dest.clock σ inputs
 
 /-- A schedule asking for reset on a check that was given no `ResetSpec`. Rejected rather than
 ignored: silently dropping the reset would leave the model resetting while the design did not. -/
@@ -165,12 +164,11 @@ opens with the same two ticks and for the same reason.
 A schedule that opens with a reset tick reaches the same place and does not need this -- see
 `reset_replaces_warmup`. Warm-up survives because it is the only option for a design with no reset
 port at all, and because the existing results are stated in terms of it. -/
-private def warmUp (m : Sim) (source dest : AxisPort) (rst : Option ResetSpec) :
-    Except EvalError State := do
-  let (σ, _) ←
+private def warmUp (m : Sim) (source dest : AxisPort) (rst : Option ResetSpec) : m.Rep :=
+  let (σ, _) :=
     stepBoth m source dest rst source.clock none false m.init (AbstractFifoModel.empty 0)
-  let (σ, _) ← stepBoth m source dest rst dest.clock none false σ (AbstractFifoModel.empty 0)
-  return σ
+  let (σ, _) := stepBoth m source dest rst dest.clock none false σ (AbstractFifoModel.empty 0)
+  σ
 
 /-! ### The counting check -/
 
@@ -180,22 +178,29 @@ occupancy, and that the occupancy is within the depth.
 Offered values are a counter rather than a fixed word: nothing here observes data, but distinct
 values keep a run from passing by accident on a design that writes the wrong word. -/
 private def refinesAlong (m : Sim) (depth : Nat) (source dest : AxisPort)
-    (rst : Option ResetSpec) (abstraction : Nat → State → Option AbstractFifoModel) :
-    Nat → State → AbstractFifoModel → Schedule → Bool
-  | _, _, _, [] => true
+    (rst : Option ResetSpec) (abstraction : Nat → Query → Option AbstractFifoModel) :
+    Nat → m.Rep → AbstractFifoModel → Schedule → Bool
+  | _, σ, _, [] => m.ok σ
   | next, σ, model, t :: rest =>
-      let stepped : Except EvalError (State × AbstractFifoModel) :=
+      -- A schedule asking for reset on a check given no `ResetSpec` is the one failure that is
+      -- the harness's rather than the design's, so it is the one still decided outside the state.
+      let stepped : Option (m.Rep × AbstractFifoModel) :=
         if t.reset then
           match rst with
-          | none => .error noResetSpec
-          | some r => do return (← resetBoth m source dest r σ, model.reset)
+          | none => none
+          | some r => some (resetBoth m source dest r σ, model.reset)
         else
           let clk := if t.writeClock then source.clock else dest.clock
-          stepBoth m source dest rst clk (if t.offers then some next else none) t.accepts σ model
+          some (stepBoth m source dest rst clk (if t.offers then some next else none)
+                  t.accepts σ model)
       match stepped with
-      | .error _ => false
-      | .ok (σ', model') =>
-          abstraction depth σ' == some model'
+      | none => false
+      | some (σ', model') =>
+          -- `m.ok` as well as the abstraction, which would already report `none` on a failed
+          -- state: with the error inside the state, "the design broke" and "there was nothing to
+          -- read" are otherwise the same answer.
+          m.ok σ'
+            && abstraction depth (m.query σ') == some model'
             && decide (model'.count ≤ model'.depth)
             && refinesAlong m depth source dest rst abstraction
                  (if t.offers then next + 1 else next) σ' model' rest
@@ -207,13 +212,12 @@ thing an implementation has to supply. `warm` runs two idle ticks first, which a
 flags are not valid at power-up needs; `asyncFifo` is one such and `shiftFifo4` is not. `rst` is
 needed only by schedules that actually assert reset. -/
 def refinesAlongAll (m : Sim) (depth : Nat) (source dest : AxisPort) (schedules : List Schedule)
-    (abstraction : Nat → State → Option AbstractFifoModel) (warm : Bool := true)
+    (abstraction : Nat → Query → Option AbstractFifoModel) (warm : Bool := true)
     (rst : Option ResetSpec := none) : Bool :=
-  match (if warm then warmUp m source dest rst else .ok m.init) with
-  | .error _ => false
-  | .ok σ =>
-      schedules.all
-        (refinesAlong m depth source dest rst abstraction 1 σ (AbstractFifoModel.empty depth))
+  let σ := if warm then warmUp m source dest rst else m.init
+  m.ok σ
+    && schedules.all
+         (refinesAlong m depth source dest rst abstraction 1 σ (AbstractFifoModel.empty depth))
 
 /-! ### The contents check -/
 
@@ -227,44 +231,46 @@ drives the right word exactly when `m.ready` happens to be high and garbage othe
 what `dataOnlyWhenReady_rejected` exhibits. It also rules out asserting `m.valid` with nothing in
 the FIFO, since an empty model has no head for the data to match. -/
 private def stepQueue (m : Sim) (source dest : AxisPort) (rst : Option ResetSpec) (clk : Name)
-    (offer : Option Nat) (accept : Bool) (σ : State) (model : AbstractQueueModel) :
-    Except EvalError (Option (State × AbstractQueueModel)) := do
+    (offer : Option Nat) (accept : Bool) (σ : m.Rep) (model : AbstractQueueModel) :
+    Option (m.Rep × AbstractQueueModel) :=
   let driven : State :=
     [ (source.valid, Value.ofNat 1 (if offer.isSome then 1 else 0)),
       (source.data, Value.ofNat source.width (offer.getD 0)),
       (dest.ready, Value.ofNat 1 (if accept then 1 else 0)) ]
   let inputs : State := driven ++ resetInputs rst false
-  let settled ← m.settle (σ.apply inputs)
-  let wrote := offer.isSome && settled.valueOf? source.ready == some 1 && clk == source.clock
-  let offering := settled.valueOf? dest.valid == some 1
+  let settled := m.settle σ inputs
+  let q := m.query settled
+  let wrote := offer.isSome && q.valueOf? source.ready == some 1 && clk == source.clock
+  let offering := q.valueOf? dest.valid == some 1
   let took := accept && offering && clk == dest.clock
-  let emitted := settled.valueOf? dest.data
-  let σ' ← m.stepClock clk settled inputs
+  let emitted := q.valueOf? dest.data
+  let σ' := m.stepClock clk settled inputs
   if offering && emitted != model.queue.head? then
-    return none
-  -- Pop before push; see the note in `stepBoth`.
-  let model := if took then model.popped else model
-  let model := if wrote then model.push (offer.getD 0) else model
-  return some (σ', model)
+    none
+  else
+    -- Pop before push; see the note in `stepBoth`.
+    let model := if took then model.popped else model
+    let model := if wrote then model.push (offer.getD 0) else model
+    some (σ', model)
 
 private def refinesQueueAlong (m : Sim) (depth : Nat) (source dest : AxisPort)
-    (rst : Option ResetSpec) (abstraction : Nat → State → Option AbstractQueueModel) :
-    Nat → State → AbstractQueueModel → Schedule → Bool
-  | _, _, _, [] => true
+    (rst : Option ResetSpec) (abstraction : Nat → Query → Option AbstractQueueModel) :
+    Nat → m.Rep → AbstractQueueModel → Schedule → Bool
+  | _, σ, _, [] => m.ok σ
   | next, σ, model, t :: rest =>
-      let stepped : Except EvalError (Option (State × AbstractQueueModel)) :=
+      let stepped : Option (m.Rep × AbstractQueueModel) :=
         if t.reset then
           match rst with
-          | none => .error noResetSpec
-          | some r => do return some (← resetBoth m source dest r σ, model.reset)
+          | none => none
+          | some r => some (resetBoth m source dest r σ, model.reset)
         else
           let clk := if t.writeClock then source.clock else dest.clock
           stepQueue m source dest rst clk (if t.offers then some next else none) t.accepts σ model
       match stepped with
-      | .error _ => false
-      | .ok none => false
-      | .ok (some (σ', model')) =>
-          abstraction depth σ' == some model'
+      | none => false
+      | some (σ', model') =>
+          m.ok σ'
+            && abstraction depth (m.query σ') == some model'
             && decide (model'.queue.length ≤ model'.depth)
             && refinesQueueAlong m depth source dest rst abstraction
                  (if t.offers then next + 1 else next) σ' model' rest
@@ -275,14 +281,31 @@ Offered words are a counter from 1, so every word in flight is distinct and dist
 the zeros an untouched memory holds. -/
 def refinesQueueAll (m : Sim) (depth : Nat) (source dest : AxisPort)
     (schedules : List Schedule)
-    (abstraction : Nat → State → Option AbstractQueueModel) (warm : Bool := true)
+    (abstraction : Nat → Query → Option AbstractQueueModel) (warm : Bool := true)
     (rst : Option ResetSpec := none) : Bool :=
-  match (if warm then warmUp m source dest rst else .ok m.init) with
-  | .error _ => false
-  | .ok σ =>
-      schedules.all
-        (refinesQueueAlong m depth source dest rst abstraction 1 σ
-          (AbstractQueueModel.empty depth))
+  let σ := if warm then warmUp m source dest rst else m.init
+  m.ok σ
+    && schedules.all
+         (refinesQueueAlong m depth source dest rst abstraction 1 σ
+           (AbstractQueueModel.empty depth))
+
+/-- `m`, but broken from tick `n` onwards: every query answers `none` and `error` answers why.
+
+**A control on the one thing a failure inside the state can hide.** A failed run keeps ticking
+and answers `none` to everything, which an abstraction function reports exactly as it reports a
+signal it could not read. Without a design that fails *partway through a schedule*, nothing here
+distinguishes "this broke" from "there was nothing to compare", and a refinement result is free to
+pass vacuously.
+
+Injected rather than found, because no design in the package fails midway through a FIFO schedule
+and one written to would be testing its own bug as well as this. -/
+def failsAfter (m : Sim) (n : Nat) : Sim where
+  Rep := m.Rep × Nat
+  init := (m.init, 0)
+  query := fun (σ, k) x => if n ≤ k then none else m.query σ x
+  error := fun (σ, k) => if n ≤ k then some (.check (.unbound `failsAfter)) else m.error σ
+  settle := fun (σ, k) ins => (m.settle σ ins, k)
+  stepClock := fun clk (σ, k) ins => (m.stepClock clk σ ins, k + 1)
 
 /-! ### Driving the lowered design
 
@@ -457,8 +480,24 @@ private def encode (b : VeirBridge) (st : Veir.Netlist.State)
 
 private def fail : EvalError := .check (.unbound `veir_bridge)
 
+/-- A `Sim` that fails every step, for a design that does not lower.
+
+`Unit` is the whole representation: there is no state worth holding, every query answers `none`
+and `error` answers why. That a theorem stated over such a design comes out `false` rather than
+vacuously true is the property `lowered` exists to keep. -/
+private def deadSim : Sim where
+  Rep := Unit
+  init := ()
+  query := fun _ _ => none
+  error := fun _ => some fail
+  settle := fun _ _ => ()
+  stepClock := fun _ _ _ => ()
+
 def VeirBridge.sim (b : VeirBridge) : Sim :=
-  { init :=
+  { Rep := Except EvalError State
+    query := fun σ x => σ.toOption.bind fun s => s.lookup x
+    error := fun σ => match σ with | .error e => some e | .ok _ => none
+    init := .ok <|
       -- Only the scalar ports need a cell of their own here; an array port's elements are
       -- covered by the array's cell, which `b.arrays` builds below.
       (b.inputs.toList.filterMap (fun (x, w) => x.asName?.map (·, Cell.sig (Value.ofNat w 0))))
@@ -480,12 +519,13 @@ def VeirBridge.sim (b : VeirBridge) : Sim :=
             (nm, Cell.mem (match b.info.mems[i]? with
               | some (_, mt) => List.replicate mt.depth (Value.ofNat mt.width 0)
               | none => []))))
-    settle := fun σ => do
+    settle := fun σ inputs => σ.bind fun σ => do
+      let σ := σ.apply inputs
       let some (args, st) := decode b σ | .error fail
       let some (vals, defined, _) := Veir.Netlist.settle b.ctx b.info args st | .error fail
       let some σ' := encode b st args vals defined σ | .error fail
       return σ'
-    stepClock := fun clk σ inputs => do
+    stepClock := fun clk σ inputs => σ.bind fun σ => do
       let σ := σ.apply inputs
       let some (args, st) := decode b σ | .error fail
       let some clkIdx := b.inputs.findIdx? (·.1 == Signal.sig clk) | .error fail
@@ -502,13 +542,13 @@ at all *pass* its netlist checks, which is the one result that must not be reach
 def lowered (m : Module) : Sim :=
   match VeirBridge.of m with
   | some b => b.sim
-  | none => { init := [], settle := fun _ => .error fail, stepClock := fun _ _ _ => .error fail }
+  | none => deadSim
 
 /-- The same, over an IR context supplied by the caller. -/
 def loweredFrom (m : Module) (ctx : Veir.WfIRContext Veir.OpCode) (top : Veir.OperationPtr) : Sim :=
   match VeirBridge.ofVeir m ctx top with
   | some b => b.sim
-  | none => { init := [], settle := fun _ => .error fail, stepClock := fun _ _ _ => .error fail }
+  | none => deadSim
 
 
 /-! ### Schedule families

@@ -530,11 +530,15 @@ end Plan
 
 /-! ### The boundary
 
-A `Sim` speaks `State`, keyed by the design's own names, because that is what lets one abstraction
-function serve the evaluator, the netlist and this. So a plan is driven by converting in and out
-once per call. That is `O(declarations)` against `O(statements x declarations)` for the pass it
-wraps -- about 7% of a mesh settle, measured -- and it is what keeps every existing testbench
-working unchanged.
+`encode` and `writeBack` convert a whole `State` to and from the flat array, at `O(state words)`.
+`init` is the one place a whole state is read, and so the one place they run: `Sim` carries its own
+representation, and `Plan.simOf` keeps the array between ticks.
+
+**A boundary cost is a ratio against the work it wraps, not a constant**, so measure it on the
+design in hand. At the mesh's shape -- 1920 statements against a state that is mostly scalars --
+converting a whole state is a few percent of a settle. At the blur's -- 74 statements against two
+memories of the image width -- it is most of a frame at 320 pixels wide, while the interpreter
+under it is flat in the image size.
 -/
 
 namespace Layout
@@ -845,20 +849,64 @@ should be rewritten as a fold before anything tries to prove it.
 
 /-! ### As a `Sim` -/
 
-/-- Drive a plan through the `State` interface every testbench here speaks.
+namespace Layout
 
-The conversion happens per call rather than once, because a `Sim` is `State`-keyed on purpose: it
-is what lets one abstraction function serve this, the association-list evaluator and the VeIR
-netlist without knowing which it is driving. -/
+/-- The cell a name holds, read straight out of the flat array.
+
+Built on demand, which is the whole trade: a scalar costs one array read and a memory costs its
+depth, and a testbench reads a handful of names a tick against a settle over every statement.
+Rebuilding every declaration instead would cost the whole state whether anything was read or
+not. -/
+def cellAt (l : Layout) (arr : Array Nat) (x : Name) : Option Cell := do
+  let s ← l.find? x
+  let md := 2 ^ s.width
+  if s.count == 1 then
+    return .sig (valueAt s.width md rfl arr[s.base]!)
+  else
+    return .mem ((List.range s.count).map fun k => valueAt s.width md rfl arr[s.base + k]!)
+
+/-- Write the driven inputs into the array, leaving every other slot alone.
+
+`O(inputs)` rather than `O(state words)`: a testbench drives a handful of signals, where `encode`
+walks every declaration and so grows with a memory's depth. That is what leaves a tick costing the
+settle and nothing else.
+
+The per-entry checks are `encode`'s, so a testbench driving a scalar at a memory's name is refused
+here as it is there. Absent is the "every declaration is present" test, which is a question about
+a whole state and belongs to `init`. -/
+def drive (l : Layout) (arr : Array Nat) (inputs : State) : Except EvalError (Array Nat) := do
+  let mut a := arr
+  for (x, c) in inputs do
+    match l.find? x, c with
+    -- A testbench may drive a signal the design does not declare; `encode` ignores one too.
+    | none, _ => pure ()
+    | some s, .sig v =>
+        if s.count ≠ 1 then throw (.check (.notAMemory x))
+        else a := a.set! s.base v.toNat
+    | some s, .mem ws =>
+        if ws.length ≠ s.count then
+          throw (.check (.widthMismatch s!"cell '{x}'" s.count ws.length))
+        else
+          for (v, k) in ws.zipIdx do
+            a := a.set! (s.base + k) v.toNat
+  return a
+
+end Layout
+
+/-- Drive a plan, keeping the flat array between ticks.
+
+The array **is** the representation, so `encode` runs once for `init` and `writeBack` not at all
+on this path. Converting at every call instead would cost `O(state words)` four times a tick,
+which on a design whose state is mostly memory is most of the run -- and grows with the memory's
+depth while the interpreter under it does not. -/
 def Plan.simOf (m : Module) (p : Plan) : Sim where
-  init := m.initState
-  settle := fun σ => do
-    let arr ← p.layout.encode σ
-    .ok (p.layout.writeBack (← p.settle arr) σ)
-  stepClock := fun clk σ inputs => do
-    let σ := σ.apply inputs
-    let arr ← p.layout.encode σ
-    .ok (p.layout.writeBack (← p.stepClock clk arr) σ)
+  Rep := Except EvalError (Array Nat)
+  init := p.layout.encode m.initState
+  query := fun arr x => arr.toOption.bind fun a => p.layout.cellAt a x
+  error := fun arr => match arr with | .error e => some e | .ok _ => none
+  settle := fun arr inputs => arr.bind fun a => do p.settle (← p.layout.drive a inputs)
+  stepClock := fun clk arr inputs => arr.bind fun a => do
+    p.stepClock clk (← p.layout.drive a inputs)
 
 /-- The compiled evaluator, as a `Sim`.
 
@@ -875,8 +923,13 @@ def Module.fastSim (m : Module) : Sim :=
   match m.compile with
   | .ok p => p.simOf m
   | .error e =>
-      { init := m.initState
-        settle := fun _ => .error (.check e)
-        stepClock := fun _ _ _ => .error (.check e) }
+      -- A design that does not compile has no state worth representing, so `Unit` is the whole of
+      -- it: every query answers `none` and `error` answers why.
+      { Rep := Unit
+        init := ()
+        query := fun _ _ => none
+        error := fun _ => some (.check e)
+        settle := fun _ _ => ()
+        stepClock := fun _ _ _ => () }
 
 end CircuitHdl
