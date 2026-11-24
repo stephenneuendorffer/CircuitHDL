@@ -283,4 +283,76 @@ guards, and it is not visible from any end-to-end test: the old switch delivered
 #guard (mesh 4 13).settleOrder.steps.length = 1920
 #guard (meshSwitch 2 13).settleOrder.steps.length = 85
 
+/-! ### A signal driven more than once
+
+A signal with one driver has a dataflow meaning and the sort finds it. A signal with several has
+only the sequential one blocking assignment gives it, and the **write-after-write** edges are what
+keep its drivers in source order. Nothing flows along such an edge; it exists so that
+last-write-wins means what it says.
+
+`for` is unrolled by the elaborator -- `Stmt` has no loop constructor -- so a loop with a carried
+variable is where a design meets this.
+-/
+
+module! accum #[] (a : 8, b : 8) -> (y : 8) {
+  wire v[2] : 8;
+  wire s : 8;
+  assign v[0] = a;
+  assign v[1] = b;
+  assign s = 0;
+  for i < 2 {
+    assign s = s + v[i];
+  }
+  assign y = s;
+}
+
+private def accumIn : State := [(`a, w8 1), (`b, w8 2)]
+
+-- Three statements drive `s` and two of them read it. Before the write-after-write edges each
+-- waited for the other two, nothing was ever ready, and this came back `[sig s]` -- a reported
+-- cycle in a design that has none. The answer was right even then, because the fallback for a
+-- reported cycle is source order, so what was wrong was the report.
+#guard accum.settleOrder.unresolved = []
+#guard settledAt accum accumIn `y = some 3
+
+/-! **The sharper case is a wrong answer rather than a false cycle.**
+
+`s = t` has to wait for `t`; `s = 1` waits for nothing. Without an edge between the two writes the
+sort is free to run the later one first and let the earlier one land on top of it, and `unresolved`
+stays empty while `y` comes out wrong. Measured both ways: `y` is 5 without the edges and 1 with
+them, and blocking assignment says 1.
+-/
+
+module! lateWrite #[] (i : 8) -> (y : 8) {
+  wire s : 8;
+  wire t : 8;
+  assign s = t;
+  assign s = 1;
+  assign t = i;
+  assign y = s;
+}
+
+#guard lateWrite.settleOrder.unresolved = []
+#guard lateWrite.settleOrder.steps.map Stmt.targets
+  = [[.sig `t], [.sig `s], [.sig `s], [.sig `y]]
+#guard settledAt lateWrite [(`i, w8 5)] `y = some 1
+
+/-! A reader *between* two writes is the one case left diverging from blocking assignment: it
+waits for every driver, so it sees the last write rather than the one before it. That is the
+behaviour this file had before the write-after-write edges and it is unchanged by them -- changing
+it would need the reader's position to matter, and position must *not* matter for a singly-driven
+signal, which is the whole reason `reversed` above settles in one pass. Pinned so the divergence
+cannot move quietly.
+-/
+
+module! between #[] (i : 8) -> (y : 8) {
+  wire s : 8;
+  assign s = 1;
+  assign y = s;
+  assign s = i;
+}
+
+#guard between.settleOrder.unresolved = []
+#guard settledAt between [(`i, w8 9)] `y = some 9
+
 end CircuitHdl

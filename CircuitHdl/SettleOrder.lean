@@ -128,52 +128,6 @@ private instance : Inhabited Stmt := ⟨.assign .anonymous (.lit 0 0)⟩
 private def nub (xs : List Signal) : List Signal :=
   xs.foldl (fun acc x => if acc.contains x then acc else acc ++ [x]) []
 
-/-! ### Counting drivers through an overlap
-
-A statement waits on one edge per (signal it reads, statement that drives that signal), so the
-scheduler needs to know how many statements drive a given read. With arrays that is no longer a
-lookup, because a dynamic write to `a` drives `a[3]` without being equal to it.
-
-`Signal.overlaps` says which pairs touch, and these three tallies are what make counting the
-overlapping drivers a lookup again rather than a scan over every statement:
-
-- `exact` counts each target as written;
-- `extending` counts, for each access, the targets that are **strict extensions** of it: a write
-  to `a[1][3]` is an extension of `a[1]` and of `a`.
-
-Two accesses overlap when one is a prefix of the other, so the targets overlapping `u` are the
-ones at a prefix of `u` -- of which there are at most `rank + 1`, each an exact lookup -- plus the
-ones extending it, which is the second map in one lookup. Counting the extensions at insert time
-rather than scanning for them at query time is what keeps this O(rank) instead of O(targets of
-that array), which matters: the mesh's link arrays have a hundred and twenty-eight elements. -/
-private structure Defs where
-  exact : Std.HashMap Signal Nat := {}
-  extending : Std.HashMap Signal Nat := {}
-
-private def Defs.add (d : Defs) (t : Signal) : Defs :=
-  let d := { d with exact := d.exact.insert t (d.exact.getD t 0 + 1) }
-  match t with
-  | .elem a q =>
-      -- Every proper prefix of `q` gains an extension. `rank` is small, so this is a handful.
-      (List.range q.length).foldl
-        (fun d k =>
-          let key : Signal := .elem a (q.take k)
-          { d with extending := d.extending.insert key (d.extending.getD key 0 + 1) })
-        d
-  | .sig _ => d
-
-/-- How many statement-targets overlap `u`. Equal by construction to
-`Σ over statements k, #{t ∈ targets k | t.overlaps u}`, which is what the decrement below undoes
-one statement at a time. -/
-private def Defs.driving (d : Defs) : Signal → Nat
-  | .sig x => d.exact.getD (.sig x) 0
-  | .elem a p =>
-      -- At a prefix of `u`, including `u` itself…
-      (List.range (p.length + 1)).foldl
-        (fun n k => n + d.exact.getD (.elem a (p.take k)) 0) 0
-      -- …and strictly beyond it.
-      + d.extending.getD (.elem a p) 0
-
 /-- Order `stmts` so every statement follows the statements that drive it.
 
 Kahn's algorithm over the signal graph, taking the **lowest-numbered** ready statement at each
@@ -189,34 +143,54 @@ def of (stmts : List Stmt) : SettleOrder := Id.run do
   -- How many statements assign each signal, and which statements read each *declaration*. The
   -- reader index is keyed by name rather than by signal because a write to `a[3]` has to find the
   -- statements that read `a` dynamically as well as those that read `a[3]`.
-  let mut defs : Defs := {}
-  for ts in targets do
-    for t in ts do
-      defs := defs.add t
-  let mut readers : Std.HashMap Name (Array Nat) := {}
+  -- Which statements *write* each declaration, for the write-after-write edges below. Keyed by
+  -- name for the reader index's reason: a write to `a[3]` and a dynamic write to `a` collide, and
+  -- only a scan within the name can tell.
+  let mut writers : Std.HashMap Name (Array Nat) := {}
   for i in [0 : n] do
-    -- **Once per statement per name.** A statement reading several elements of one array --
-    -- `anyReq[j] = req[j] | req[5+j] | ..` in `meshSwitch` -- would otherwise be listed under
-    -- that array once per element, and the decrement below, which rescans the reader's uses,
-    -- would then run once per listing. Its count would reach zero after the *first* driver
-    -- completed and it would be scheduled ahead of the rest, reading values nothing had written.
-    -- That is not a cycle, so `unresolved` stays empty and nothing else notices.
-    let mut seen : List Name := []
+    let mut seenW : List Name := []
+    for t in targets[i]! do
+      let k := t.name
+      if !seenW.contains k then
+        seenW := k :: seenW
+        writers := writers.insert k ((writers.getD k #[]).push i)
+  -- **The graph, built once.** `preds` and `succs` are two views of one edge set, so the
+  -- readiness count below is *derived* from the edges rather than restated beside them. That
+  -- distinction is the whole reason this is shaped the way it is: Kahn's algorithm tests
+  -- `indeg = 0`, and when the increment and the decrement each decide for themselves what an edge
+  -- is, the two can disagree -- a count left too high is a cycle that is not there, and one left
+  -- too low schedules a statement before its driver. This file carried exactly that bug once, in
+  -- the reader index: a statement reading several elements of one array was listed once per
+  -- element, its count reached zero after the *first* driver completed, and it ran early. That is
+  -- not a cycle, so `unresolved` stayed empty and nothing noticed.
+  --
+  -- Two kinds of edge, and an edge is recorded **once** however many signals justify it.
+  --
+  -- *Read after write.* A statement waits for every statement driving a signal it reads -- unless
+  -- it drives that signal itself, in which case it takes none and the write-after-write chain is
+  -- what orders it. `x = x | y` reads the value from before this pass rather than its own result.
+  --
+  -- *Write after write.* A signal driven more than once has only the sequential meaning blocking
+  -- assignment gives it, so its drivers keep their source order. Nothing flows along such an edge;
+  -- it exists so that last-write-wins means what it says. Without it the sort is free to run a
+  -- later write first and let an earlier one land on top, which is a wrong answer rather than a
+  -- reported cycle -- `lateWrite` in `CircuitHdlTest/SettleOrder.lean` is that case.
+  let mut preds : Array (Array Nat) := Array.replicate n #[]
+  let mut succs : Array (Array Nat) := Array.replicate n #[]
+  for i in [0 : n] do
+    let mut ps : Array Nat := #[]
     for u in uses[i]! do
-      let k := u.name
-      if !seen.contains k then
-        seen := k :: seen
-        readers := readers.insert k ((readers.getD k #[]).push i)
+      if (targets[i]!.filter (·.overlaps u)).isEmpty then
+        for j in writers.getD u.name #[] do
+          if j != i && (targets[j]!.any (·.overlaps u)) && !ps.contains j then ps := ps.push j
+    for t in targets[i]! do
+      for j in writers.getD t.name #[] do
+        if j < i && (targets[j]!.any (·.overlaps t)) && !ps.contains j then ps := ps.push j
+    preds := preds.set! i ps
+    for j in ps do
+      succs := succs.set! j ((succs[j]!).push i)
 
-  -- A statement waits on one edge per (signal it reads, statement that drives that signal),
-  -- except its own writes: `x = x | y` reads the value from before this pass, not its own result.
-  let mut indeg : Array Nat := Array.replicate n 0
-  for i in [0 : n] do
-    let mut d := 0
-    for u in uses[i]! do
-      let own := (targets[i]!.filter (·.overlaps u)).length
-      d := d + (defs.driving u - own)
-    indeg := indeg.set! i d
+  let mut indeg : Array Nat := preds.map (·.size)
 
   let mut done : Array Bool := Array.replicate n false
   let mut out : Array Stmt := #[]
@@ -236,14 +210,10 @@ def of (stmts : List Stmt) : SettleOrder := Id.run do
     | some i =>
       done := done.set! i true
       out := out.push arr[i]!
-      -- Undo this statement's contribution to every reader's count, **once per overlapping
-      -- read** rather than once per reader: a statement reading both `a[0]` and `a[1]` waited on
-      -- a dynamic write to `a` twice, and decrementing once would leave it stuck forever.
-      for t in targets[i]! do
-        for j in readers.getD t.name #[] do
-          if j != i then
-            for u in uses[j]! do
-              if t.overlaps u then indeg := indeg.set! j (indeg[j]! - 1)
+      -- One decrement per edge out of this statement. There is nothing to get wrong here any
+      -- more: the edges are the same ones the count was taken from.
+      for j in succs[i]! do
+        indeg := indeg.set! j (indeg[j]! - 1)
 
   if out.size == n then
     return { steps := out.toList, unresolved := [] }

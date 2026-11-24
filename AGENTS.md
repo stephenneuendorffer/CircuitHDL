@@ -455,10 +455,76 @@ Too coarse breaks correct designs and blinds the loop detector at once. Measured
 clock domain is a property of the declaration: an array written from two domains is the race a
 memory would be, whichever elements each one touches.
 
+### A signal driven twice needs an edge that carries no value
+
+`SettleOrder.of` orders by one rule -- a statement reading a signal waits for every statement
+driving it -- which is right at one driver and wrong at several, since a signal written twice has
+only the sequential meaning blocking assignment gives it. `for` is unrolled by the elaborator and
+`Stmt` has no loop constructor, so a loop with a carried variable is where a design meets that:
+
+```
+assign s = 0;
+for i < 2 { assign s = s + v[i]; }
+```
+
+Each of the three drivers waited for the other two, nothing was ever ready, and `unresolved` came
+back `[sig s]` -- a cycle in a design that has none. **The answer was still right**, the fallback
+for a reported cycle being source order, so what was wrong was the report.
+
+Two changes fix it, and both halves are needed:
+
+- **write-after-write edges**, so the drivers of a signal keep their source order. Nothing flows
+  along such an edge; it exists so last-write-wins means what it says;
+- **a statement that drives what it reads takes no read edge for it.** The write-after-write chain
+  from the previous driver is the dependency it actually has. At one driver `driving u - own` was
+  already zero, so `x = x | y`, the mesh and every other design are untouched -- verified by
+  checksumming the emitted order of thirteen designs either side, which is identical.
+
+**The sharper case is a wrong answer, not a false cycle**, and it is what the edges are really
+for. In `assign s = t; assign s = 1; assign t = i;` the later write waits for nothing and the
+earlier one waits for `t`, so without an edge between them the sort runs `s = 1` first and lets
+`s = t` land on top. Measured: `y` is 5 without the edges and 1 with them, `unresolved` empty both
+times, and blocking assignment says 1. `lateWrite` in `CircuitHdlTest/SettleOrder.lean`.
+
+One divergence is left and is pinned rather than fixed: a reader *between* two writes waits for
+every driver and so sees the last write rather than the one before it. Fixing that would mean the
+reader's position deciding which value it reads -- and position must **not** decide for a singly
+driven signal, which is the whole reason `reversed` settles in one pass. The two cases want
+opposite things and the single-driver one is the one every design is in.
+
+#### The graph is built once, and the count comes from it
+
+Kahn's algorithm tests `indeg = 0`, and the increment and the decrement used to decide
+independently what an edge was -- a tally on one side, a rescan of the reader index on the other.
+When those disagree the failure is quiet: a count left too high is a cycle that is not there, and
+one left too low schedules a statement before its driver. This file carried exactly that bug once,
+in the reader index, and `unresolved` stayed empty through it.
+
+So `preds` and `succs` are built once and `indeg` is `preds.map (·.size)` -- derived from the
+edges rather than restated beside them, with an edge recorded once however many signals justify
+it. Adding a second kind of edge is what forced the issue: two kinds times two places is four
+chances to disagree.
+
+It is also **faster**, which was not the reason for it. The old decrement rescanned
+`readers[name]` and re-tested every use on each completion, where the new one walks a successor
+list. Pinned under `taskset -c 12`, the sort alone, three repeats, best of five iterations:
+
+| | statements | tally | explicit edges |
+|---|---|---|---|
+| `riscv` | 70 | 13 ms | 7 ms |
+| `mesh 2 5` | 492 | 423 ms | 310 ms |
+| `mesh 4 13` | 1920 | 2520 ms | 2015 ms |
+
+Unpinned, the same `mesh 4 13` figure came out 270 ms once and 2509 ms minutes later on an
+unchanged binary -- the NUMA swing the benchmarking section describes, met again. Pin the process
+before quoting any of these.
+
 ### A genuine loop is reported, not fixed
 
 `SettleOrder.unresolved` names the signals no order could drive before they were read. It is empty
-for every design here; `CircuitHdlTest/SettleOrder.lean` builds two- and three-statement loops on
+for every design here except `swapComb`, which is a genuine two-statement cycle -- `a = b; b = a`
+with no clock -- and whose source-order fallback is exactly what Verilog's `always @*` does with
+it, so it is a design that works *through* the report rather than despite it; `CircuitHdlTest/SettleOrder.lean` builds two- and three-statement loops on
 purpose so the field is known to be reachable. `Module.check` does **not** consult it yet, and that
 is deliberate — no design has a loop, so the rule would be added without a case that exercises it.
 
